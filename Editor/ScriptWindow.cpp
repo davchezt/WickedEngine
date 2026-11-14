@@ -1,11 +1,12 @@
 #include "stdafx.h"
 #include "ScriptWindow.h"
-#include "Editor.h"
+
+using namespace wi::scene;
 
 void ScriptWindow::Create(EditorComponent* _editor)
 {
 	editor = _editor;
-	wi::gui::Window::Create(ICON_SCRIPT " Script", wi::gui::Window::WindowControls::COLLAPSE | wi::gui::Window::WindowControls::CLOSE);
+	wi::gui::Window::Create(ICON_SCRIPT " Script", wi::gui::Window::WindowControls::COLLAPSE | wi::gui::Window::WindowControls::CLOSE | wi::gui::Window::WindowControls::FIT_ALL_WIDGETS_VERTICAL);
 	SetSize(XMFLOAT2(520, 80));
 
 	closeButton.SetTooltip("Delete Script");
@@ -19,8 +20,8 @@ void ScriptWindow::Create(EditorComponent* _editor)
 
 		editor->RecordEntity(archive, entity);
 
-		editor->optionsWnd.RefreshEntityTree();
-		});
+		editor->componentsWnd.RefreshEntityTree();
+	});
 
 	float hei = 20;
 	float wid = 100;
@@ -62,11 +63,13 @@ void ScriptWindow::Create(EditorComponent* _editor)
 	playonceCheckBox.SetSize(XMFLOAT2(hei, hei));
 	playonceCheckBox.OnClick([=](wi::gui::EventArgs args) {
 		wi::scene::Scene& scene = editor->GetCurrentScene();
-		wi::scene::ScriptComponent* script = scene.scripts.GetComponent(entity);
-		if (script == nullptr)
-			return;
-
-		script->SetPlayOnce(args.bValue);
+		for (auto& x : editor->translator.selected)
+		{
+			ScriptComponent* script = scene.scripts.GetComponent(x.entity);
+			if (script == nullptr)
+				continue;
+			script->SetPlayOnce(args.bValue);
+		}
 	});
 	AddWidget(&playonceCheckBox);
 
@@ -75,17 +78,19 @@ void ScriptWindow::Create(EditorComponent* _editor)
 	playstopButton.SetSize(XMFLOAT2(wid, hei));
 	playstopButton.OnClick([=](wi::gui::EventArgs args) {
 		wi::scene::Scene& scene = editor->GetCurrentScene();
-		wi::scene::ScriptComponent* script = scene.scripts.GetComponent(entity);
-		if (script == nullptr)
-			return;
-
-		if (script->IsPlaying())
+		for (auto& x : editor->translator.selected)
 		{
-			script->Stop();
-		}
-		else
-		{
-			script->Play();
+			ScriptComponent* script = scene.scripts.GetComponent(x.entity);
+			if (script == nullptr)
+				continue;
+			if (script->IsPlaying())
+			{
+				script->Stop();
+			}
+			else
+			{
+				script->Play();
+			}
 		}
 	});
 	AddWidget(&playstopButton);
@@ -96,9 +101,6 @@ void ScriptWindow::Create(EditorComponent* _editor)
 
 void ScriptWindow::SetEntity(wi::ecs::Entity entity)
 {
-	if (this->entity == entity)
-		return;
-
 	this->entity = entity;
 
 	wi::scene::Scene& scene = editor->GetCurrentScene();
@@ -115,6 +117,10 @@ void ScriptWindow::SetEntity(wi::ecs::Entity entity)
 			fileButton.SetText("Open File...");
 		}
 		playonceCheckBox.SetCheck(script->IsPlayingOnlyOnce());
+	}
+	else
+	{
+		fileButton.SetText("Open File...");
 	}
 }
 

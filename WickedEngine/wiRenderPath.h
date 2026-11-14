@@ -28,9 +28,13 @@ namespace wi
 		virtual void Update(float dt) {}
 		// executed after Update()
 		virtual void PostUpdate() {}
+		// after PostUpdate(), before Render()
+		virtual void PreRender() {}
 		// Render to layers, rendertargets, etc
 		// This will be rendered offscreen
 		virtual void Render() const {}
+		// after Render(), before Compose()
+		virtual void PostRender() {}
 		// Compose the rendered layers (for example blend the layers together as Images)
 		// This will be rendered to the backbuffer
 		virtual void Compose(wi::graphics::CommandList cmd) const {}
@@ -39,5 +43,9 @@ namespace wi
 		inline void setlayerMask(uint32_t value) { layerMask = value; }
 
 		wi::graphics::ColorSpace colorspace = wi::graphics::ColorSpace::SRGB;
+
+		// This is an identifier of RenderPath subtype that is used for lua binding.
+		static constexpr const auto script_check_identifier = relative_path_storage(__FILE__);
+		virtual const char* GetScriptBindingID() const { return script_check_identifier.c_str(); }
 	};
 }

@@ -1,15 +1,13 @@
 #include "stdafx.h"
 #include "IKWindow.h"
-#include "Editor.h"
 
 using namespace wi::ecs;
 using namespace wi::scene;
 
-
 void IKWindow::Create(EditorComponent* _editor)
 {
 	editor = _editor;
-	wi::gui::Window::Create(ICON_IK " Inverse Kinematics", wi::gui::Window::WindowControls::COLLAPSE | wi::gui::Window::WindowControls::CLOSE);
+	wi::gui::Window::Create(ICON_IK " Inverse Kinematics", wi::gui::Window::WindowControls::COLLAPSE | wi::gui::Window::WindowControls::CLOSE | wi::gui::Window::WindowControls::FIT_ALL_WIDGETS_VERTICAL);
 	SetSize(XMFLOAT2(400, 120));
 
 	closeButton.SetTooltip("Delete InverseKinematicsComponent");
@@ -23,7 +21,7 @@ void IKWindow::Create(EditorComponent* _editor)
 
 		editor->RecordEntity(archive, entity);
 
-		editor->optionsWnd.RefreshEntityTree();
+		editor->componentsWnd.RefreshEntityTree();
 		});
 
 	float x = 120;
@@ -32,25 +30,34 @@ void IKWindow::Create(EditorComponent* _editor)
 	float hei = 18;
 	float step = hei + 2;
 
+	auto forEachSelected = [this] (auto func) {
+		return [this, func] (auto args) {
+			wi::scene::Scene& scene = editor->GetCurrentScene();
+			for (auto& x : editor->translator.selected)
+			{
+				InverseKinematicsComponent* ik = scene.inverse_kinematics.GetComponent(x.entity);
+				if (ik != nullptr)
+				{
+					func(ik, args);
+				}
+			}
+		};
+	};
+
 	targetCombo.Create("Target: ");
 	targetCombo.SetSize(XMFLOAT2(siz, hei));
 	targetCombo.SetPos(XMFLOAT2(x, y));
 	targetCombo.SetEnabled(false);
-	targetCombo.OnSelect([&](wi::gui::EventArgs args) {
-		Scene& scene = editor->GetCurrentScene();
-		InverseKinematicsComponent* ik = scene.inverse_kinematics.GetComponent(entity);
-		if (ik != nullptr)
+	targetCombo.OnSelect(forEachSelected([this] (auto ik, auto args) {
+		if (args.iValue == 0)
 		{
-			if (args.iValue == 0)
-			{
-				ik->target = INVALID_ENTITY;
-			}
-			else
-			{
-				ik->target = scene.transforms.GetEntity(args.iValue - 1);
-			}
+			ik->target = INVALID_ENTITY;
 		}
-		});
+		else
+		{
+			ik->target = editor->GetCurrentScene().transforms.GetEntity(args.iValue - 1);
+		}
+	}));
 	targetCombo.SetTooltip("Choose a target entity (with transform) that the IK will follow");
 	AddWidget(&targetCombo);
 
@@ -58,27 +65,27 @@ void IKWindow::Create(EditorComponent* _editor)
 	disabledCheckBox.SetTooltip("Disable simulation.");
 	disabledCheckBox.SetPos(XMFLOAT2(x, y += step));
 	disabledCheckBox.SetSize(XMFLOAT2(hei, hei));
-	disabledCheckBox.OnClick([=](wi::gui::EventArgs args) {
-		editor->GetCurrentScene().inverse_kinematics.GetComponent(entity)->SetDisabled(args.bValue);
-		});
+	disabledCheckBox.OnClick(forEachSelected([] (auto ik, auto args) {
+		ik->SetDisabled(args.bValue);
+	}));
 	AddWidget(&disabledCheckBox);
 
 	chainLengthSlider.Create(0, 10, 0, 10, "Chain Length: ");
 	chainLengthSlider.SetTooltip("How far the hierarchy chain is simulated backwards from this entity");
 	chainLengthSlider.SetPos(XMFLOAT2(x, y += step));
 	chainLengthSlider.SetSize(XMFLOAT2(siz, hei));
-	chainLengthSlider.OnSlide([&](wi::gui::EventArgs args) {
-		editor->GetCurrentScene().inverse_kinematics.GetComponent(entity)->chain_length = args.iValue;
-		});
+	chainLengthSlider.OnSlide(forEachSelected([] (auto ik, auto args) {
+		ik->chain_length = args.iValue;
+	}));
 	AddWidget(&chainLengthSlider);
 
 	iterationCountSlider.Create(0, 10, 1, 10, "Iteration Count: ");
 	iterationCountSlider.SetTooltip("How many iterations to compute the inverse kinematics for. Higher values are slower but more accurate.");
 	iterationCountSlider.SetPos(XMFLOAT2(x, y += step));
 	iterationCountSlider.SetSize(XMFLOAT2(siz, hei));
-	iterationCountSlider.OnSlide([&](wi::gui::EventArgs args) {
-		editor->GetCurrentScene().inverse_kinematics.GetComponent(entity)->iteration_count = args.iValue;
-		});
+	iterationCountSlider.OnSlide(forEachSelected([] (auto ik, auto args) {
+		ik->iteration_count = args.iValue;
+	}));
 	AddWidget(&iterationCountSlider);
 
 	SetMinimized(true);
@@ -126,43 +133,11 @@ void IKWindow::SetEntity(Entity entity)
 void IKWindow::ResizeLayout()
 {
 	wi::gui::Window::ResizeLayout();
-	const float padding = 4;
-	const float width = GetWidgetAreaSize().x;
-	float y = padding;
-	float jump = 20;
+	layout.margin_left = 110;
 
-	const float margin_left = 110;
-	const float margin_right = 30;
-
-	auto add = [&](wi::gui::Widget& widget) {
-		if (!widget.IsVisible())
-			return;
-		widget.SetPos(XMFLOAT2(margin_left, y));
-		widget.SetSize(XMFLOAT2(width - margin_left - margin_right, widget.GetScale().y));
-		y += widget.GetSize().y;
-		y += padding;
-	};
-	auto add_right = [&](wi::gui::Widget& widget) {
-		if (!widget.IsVisible())
-			return;
-		widget.SetPos(XMFLOAT2(width - margin_right - widget.GetSize().x, y));
-		y += widget.GetSize().y;
-		y += padding;
-	};
-	auto add_fullwidth = [&](wi::gui::Widget& widget) {
-		if (!widget.IsVisible())
-			return;
-		const float margin_left = padding;
-		const float margin_right = padding;
-		widget.SetPos(XMFLOAT2(margin_left, y));
-		widget.SetSize(XMFLOAT2(width - margin_left - margin_right, widget.GetScale().y));
-		y += widget.GetSize().y;
-		y += padding;
-	};
-
-	add(targetCombo);
-	add_right(disabledCheckBox);
-	add(chainLengthSlider);
-	add(iterationCountSlider);
+	layout.add(targetCombo);
+	layout.add_right(disabledCheckBox);
+	layout.add(chainLengthSlider);
+	layout.add(iterationCountSlider);
 
 }

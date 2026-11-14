@@ -1,18 +1,20 @@
 #define OBJECTSHADER_LAYOUT_SHADOW_TEX
 #define OBJECTSHADER_USE_COLOR
+#define OBJECTSHADER_USE_NORMAL // tessellation compat!
 #include "objectHF.hlsli"
 #include "ShaderInterop_Renderer.h"
 
 [earlydepthstencil]
 float4 main(PixelInput input) : SV_TARGET
 {
-	const float2 pixel = (xPaintRadUVSET == 0 ? input.uvsets.xy : input.uvsets.zw) * xPaintRadResolution;
+	float4 uvsets = input.GetUVSets();
+	const float2 pixel = frac((xPaintRadUVSET == 0 ? uvsets.xy : uvsets.zw)) * xPaintRadResolution;
 
 	const float2x2 rot = float2x2(
 		cos(xPaintRadBrushRotation), -sin(xPaintRadBrushRotation),
 		sin(xPaintRadBrushRotation), cos(xPaintRadBrushRotation)
 		);
-	const float2 diff = mul(xPaintRadCenter - pixel, rot);
+	const float2 diff = mul((xPaintRadCenter % xPaintRadResolution) - pixel, rot);
 
 	float dist = 0;
 	switch (xPaintRadBrushShape)

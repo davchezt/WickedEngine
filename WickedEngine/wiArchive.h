@@ -3,6 +3,7 @@
 #include "wiMath.h"
 #include "wiVector.h"
 #include "wiColor.h"
+#include "wiGraphics.h"
 
 #include <string>
 
@@ -14,38 +15,65 @@ namespace wi
 	//	The data flow is always FIFO (first in, first out)
 	class Archive
 	{
+	public:
+		struct Header
+		{
+			uint64_t version = 0;
+			union Properties
+			{
+				struct
+				{
+					uint64_t thumbnail_data_size : 32;
+					uint64_t compressed : 1;
+					uint64_t reserved : 31;
+				} bits;
+				uint64_t raw = 0;
+			} properties;
+		};
+		static_assert(sizeof(Header) == sizeof(uint64_t) * 2);
+
 	private:
-		uint64_t version = 0; // the version number is used for maintaining backwards compatibility with earlier archive versions
+		Header header;
 		bool readMode = false; // archive can be either read or write mode, but not both
+		bool report_errors = true; // if false, version-incompatibility is silent (IsOpen() stays false) instead of popping a message box; used for internal/automatic reads (e.g. shader cache) that should regenerate rather than alert the user
 		size_t pos = 0; // position of the next memory operation, relative to the data's beginning
 		wi::vector<uint8_t> DATA; // data suitable for read/write operations
 		const uint8_t* data_ptr = nullptr; // this can either be a memory mapped pointer (read only), or the DATA's pointer
+		size_t data_ptr_size = 0;
+		bool data_already_decompressed = false;
 
 		std::string fileName; // save to this file on closing if not empty
 		std::string directory; // the directory part from the fileName
 
+		const uint8_t* thumbnail_data_ptr_write = nullptr; // temp ptr to write archive data
+		constexpr const uint8_t* get_thumbnail_data() const { return data_ptr + sizeof(Header); }
+
+		void WriteCompressedData(wi::vector<uint8_t>& final_data) const;
+
 		void CreateEmpty(); // creates new archive in write mode
 
 	public:
-		// Create empty arhive for writing
+		// Create empty archive for writing
 		Archive();
 		Archive(const Archive&) = default;
 		Archive(Archive&&) = default;
 		// Create archive from a file.
 		//	If readMode == true, the whole file will be loaded into the archive in read mode
 		//	If readMode == false, the file will be written when the archive is destroyed or Close() is called
-		Archive(const std::string& fileName, bool readMode = true);
+		//	If report_errors == false, an incompatible archive version fails silently (IsOpen() == false) instead of popping a message box
+		Archive(const std::string& fileName, bool readMode = true, bool report_errors = true);
 		// Creates a memory mapped archive in read mode
-		Archive(const uint8_t* data);
+		Archive(const uint8_t* data, size_t size);
 		~Archive() { Close(); }
 
 		Archive& operator=(const Archive&) = default;
 		Archive& operator=(Archive&&) = default;
 
-		void WriteData(wi::vector<uint8_t>& dest) const { dest.resize(pos); std::memcpy(dest.data(), data_ptr, pos); }
+		void WriteData(wi::vector<uint8_t>& dest) const;
 		const uint8_t* GetData() const { return data_ptr; }
+		const size_t GetSize() const { return data_ptr_size; }
 		size_t GetPos() const { return pos; }
-		constexpr uint64_t GetVersion() const { return version; }
+		constexpr uint64_t GetVersion() const { return header.version; }
 		constexpr bool IsReadMode() const { return readMode; }
 		// This can set the archive into either read or write mode, and it will reset it's position
 		void SetReadModeAndResetPos(bool isReadMode);
@@ -59,13 +87,36 @@ namespace wi
 		//	The archive data will be written starting from the beginning, to the current position
 		bool SaveFile(const std::string& fileName);
 		// Write the archive contents into a C++ header file
-		//	dataName : it will be the name of the byte data array in the header, that can be memory mapped
+		//	dataName : it will be the name of the byte data array in the header, that can be memory mapped as an Archive
 		bool SaveHeaderFile(const std::string& fileName, const std::string& dataName);
+		// Write the archive contents into a C++ source file
+		//	dataName : it will be the name of the byte data array in the header, that can be memory mapped as an Archive
+		//	Note: size is exported as name_size where name is the dataName that you give to it
+		bool SaveCPPFile(const std::string& fileName, const std::string& dataName);
 		// If the archive was opened from a file, this will return the file's directory
 		const std::string& GetSourceDirectory() const;
 		// If the archive was opened from a file, this will return the file's name
 		//	The file's name will include the directory as well
 		const std::string& GetSourceFileName() const;
+
+		// Set whether the archive should be compressed upon saving
+		//	Note that in memory, the archive is uncompressed
+		//	Note that compressed archive will not work with streaming!
+		constexpr void SetCompressionEnabled(bool value) { header.properties.bits.compressed = value; }
+		// Returns true if the archive data is originating from compressed data
+		//	Note that even if the archive was opened from compressed data source, the archive is always uncompressed in memory
+		//	Note that compressed archive will not work with streaming!
+		constexpr bool IsCompressionEnabled() const { return header.properties.bits.compressed; }
+
+		// If Archive contains thumbnail image data, then creates a Texture from it:
+		wi::graphics::Texture CreateThumbnailTexture() const;
+
+		// Set a Texture as the thumbnail. This resets the archive, so you should usually do this before writing data:
+		void SetThumbnailAndResetPos(const wi::graphics::Texture& texture);
+
+		// Open just the tumbnail data from an archive, and return it as a Texture:
+		//	header: optional, can return header info if not null
+		static wi::graphics::Texture PeekThumbnail(const std::string& filename, Header* out_header = nullptr);
 
 		// Appends the current archive write offset as uint64_t to the archive
 		//	Returns the previous write offset of the archive, which can be used by PatchUnknownJumpPosition()
@@ -83,13 +134,22 @@ namespace wi
 			assert(!readMode);
 			assert(!DATA.empty());
 			assert(offset + sizeof(uint64_t) < DATA.size());
-			*(uint64_t*)(DATA.data() + offset) = uint64_t(pos);
+			uint64_t posuint64 = pos;
+			memcpy(DATA.data() + offset, &posuint64, sizeof(uint64_t));
 		}
 		// Modifies the current archive offset
 		//	It can be used in conjunction with WriteUnknownJumpPosition() and PatchUnknownJumpPosition()
 		void Jump(uint64_t jump_pos)
 		{
 			pos = jump_pos;
+		}
+
+		// This is like reading a vector<uint8_t>, but instead of copying the data, it returns the memory mapped pointer and size
+		inline void MapVector(const uint8_t*& data, size_t& size)
+		{
+			(*this) >> size;
+			data = data_ptr + pos;
+			pos += size;
 		}
 
 		// It could be templated but we have to be extremely careful of different datasizes on different platforms
@@ -107,9 +167,19 @@ namespace wi
 			_write((int8_t)data);
 			return *this;
 		}
+		inline Archive& operator<<(short data)
+		{
+			_write((int16_t)data);
+			return *this;
+		}
 		inline Archive& operator<<(unsigned char data)
 		{
 			_write((uint8_t)data);
+			return *this;
+		}
+		inline Archive& operator<<(unsigned short data)
+		{
+			_write((uint16_t)data);
 			return *this;
 		}
 		inline Archive& operator<<(int data)
@@ -222,6 +292,17 @@ namespace wi
 			}
 			return *this;
 		}
+		inline Archive& operator<<(const wi::Archive& other)
+		{
+			// Here we will use the << operator so that non-specified types will have compile error!
+			//	Note: version and thumbnail data is skipped, only data is appended
+			const size_t start = sizeof(uint64_t) * 2; // version and thumbnail size
+			for (size_t i = start; i < other.pos; ++i)
+			{
+				(*this) << other.data_ptr[i];
+			}
+			return *this;
+		}
 
 		// Read operations
 		inline Archive& operator>>(bool& data)
@@ -238,11 +319,25 @@ namespace wi
 			data = (char)temp;
 			return *this;
 		}
+		inline Archive& operator>>(short& data)
+		{
+			int16_t temp;
+			_read(temp);
+			data = (short)temp;
+			return *this;
+		}
 		inline Archive& operator>>(unsigned char& data)
 		{
 			uint8_t temp;
 			_read(temp);
 			data = (unsigned char)temp;
+			return *this;
+		}
+		inline Archive& operator>>(unsigned short& data)
+		{
+			uint16_t temp;
+			_read(temp);
+			data = (unsigned short)temp;
 			return *this;
 		}
 		inline Archive& operator>>(int& data)
@@ -396,8 +491,9 @@ namespace wi
 			{
 				DATA.resize(_right * 2);
 				data_ptr = DATA.data();
+				data_ptr_size = DATA.size();
 			}
-			*(T*)(DATA.data() + pos) = data;
+			std::memcpy(DATA.data() + pos, &data, sizeof(data));
 			pos = _right;
 		}
 
@@ -407,7 +503,8 @@ namespace wi
 		{
 			assert(readMode);
 			assert(data_ptr != nullptr);
-			data = *(const T*)(data_ptr + pos);
+			assert(pos < data_ptr_size);
+			std::memcpy(&data, data_ptr + pos, sizeof(data));
 			pos += (size_t)(sizeof(data));
 		}
 	};

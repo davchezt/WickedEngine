@@ -1,7 +1,7 @@
 #include "wiRawInput.h"
 #include "wiPlatform.h"
 
-#if defined(_WIN32) && !defined(PLATFORM_UWP)
+#ifdef PLATFORM_WINDOWS_DESKTOP
 #include "wiVector.h"
 
 #include <cassert>
@@ -305,12 +305,13 @@ namespace wi::input::rawinput
 				for (USHORT i = 0; i < Caps.NumberInputValueCaps; i++)
 				{
 					ULONG value;
-					status = HidP_GetUsageValue(
+					if(HidP_GetUsageValue(
 						HidP_Input, pValueCaps[i].UsagePage, 0,
 						pValueCaps[i].Range.UsageMin, &value, pPreparsedData,
-						(PCHAR)raw.data.hid.bRawData, raw.data.hid.dwSizeHid
-					);
-					assert(status == HIDP_STATUS_SUCCESS);
+						(PCHAR)raw.data.hid.bRawData, raw.data.hid.dwSizeHid) != HIDP_STATUS_SUCCESS)
+					{
+						continue;
+					}
 
 					switch (pValueCaps[i].Range.UsageMin)
 					{
@@ -353,6 +354,8 @@ namespace wi::input::rawinput
 						case POV_LEFTUP:
 							controller.buttons |= 1 << (wi::input::GAMEPAD_BUTTON_UP - wi::input::GAMEPAD_RANGE_START - 1);
 							break;
+						default:
+							break;
 						}
 						switch (pov)
 						{
@@ -360,6 +363,8 @@ namespace wi::input::rawinput
 						case POV_UPRIGHT:
 						case POV_RIGHTDOWN:
 							controller.buttons |= 1 << (wi::input::GAMEPAD_BUTTON_RIGHT - wi::input::GAMEPAD_RANGE_START - 1);
+							break;
+						default:
 							break;
 						}
 						switch (pov)
@@ -369,6 +374,8 @@ namespace wi::input::rawinput
 						case POV_DOWNLEFT:
 							controller.buttons |= 1 << (wi::input::GAMEPAD_BUTTON_DOWN - wi::input::GAMEPAD_RANGE_START - 1);
 							break;
+						default:
+							break;
 						}
 						switch (pov)
 						{
@@ -376,6 +383,8 @@ namespace wi::input::rawinput
 						case POV_DOWNLEFT:
 						case POV_LEFTUP:
 							controller.buttons |= 1 << (wi::input::GAMEPAD_BUTTON_LEFT - wi::input::GAMEPAD_RANGE_START - 1);
+							break;
+						default:
 							break;
 						}
 					}
@@ -399,11 +408,11 @@ namespace wi::input::rawinput
 		}
 
 		// Enumerate devices to detect lost devices:
-		UINT numDevices;
+		UINT numDevices = 0;
 		UINT listResult = GetRawInputDeviceList(NULL, &numDevices, sizeof(RAWINPUTDEVICELIST));
 		assert(listResult == 0);
 
-		static RAWINPUTDEVICELIST devicelist[64];
+		static RAWINPUTDEVICELIST devicelist[512];
 		listResult = GetRawInputDeviceList(devicelist, &numDevices, sizeof(RAWINPUTDEVICELIST));
 		assert(listResult >= 0);
 		assert(numDevices <= arraysize(devicelist));
@@ -569,4 +578,4 @@ namespace wi::input::rawinput
 	bool GetControllerState(wi::input::ControllerState* state, int index) { return false; }
 	void SetControllerFeedback(const wi::input::ControllerFeedback& data, int index) {}
 }
-#endif // _WIN32
+#endif // PLATFORM_WINDOWS_DESKTOP

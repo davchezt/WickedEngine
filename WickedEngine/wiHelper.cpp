@@ -3,11 +3,18 @@
 #include "wiBacklog.h"
 #include "wiEventHandler.h"
 #include "wiMath.h"
+#include "wiImage.h"
+#include "wiRenderer.h"
 
+#include "Utility/lodepng.h"
+#include "Utility/dds.h"
 #include "Utility/stb_image_write.h"
-#include "Utility/basis_universal/encoder/basisu_comp.h"
-#include "Utility/basis_universal/encoder/basisu_gpu_texture.h"
-extern basist::etc1_global_selector_codebook g_basis_global_codebook;
+#include "Utility/zstd/zstd.h"
+#include "Utility/win32ico.h"
+
+#if !defined(__SCE__) && !defined(PLATFORM_XBOX)
+#include "Utility/portable-file-dialogs.h"
+#endif // !defined(__SCE__) && !defined(PLATFORM_XBOX)
 
 #include <thread>
 #include <locale>
@@ -15,29 +22,36 @@ extern basist::etc1_global_selector_codebook g_basis_global_codebook;
 #include <iomanip>
 #include <fstream>
 #include <sstream>
-#include <codecvt> // string conversion
 #include <filesystem>
 #include <vector>
+#include <iostream>
+#include <cstdlib>
 
-#ifdef _WIN32
+#if defined(_WIN32)
 #include <direct.h>
-#ifdef PLATFORM_UWP
-#include <winrt/Windows.UI.Popups.h>
-#include <winrt/Windows.Storage.h>
-#include <winrt/Windows.Storage.Pickers.h>
-#include <winrt/Windows.Storage.AccessCache.h>
-#include <winrt/Windows.Storage.Streams.h>
-#include <winrt/Windows.Foundation.h>
-#include <winrt/Windows.Foundation.Collections.h>
-#include <winrt/Windows.System.h>
-#else
+#include <Psapi.h> // GetProcessMemoryInfo
 #include <Commdlg.h> // openfile
 #include <WinBase.h>
-#endif // PLATFORM_UWP
-#else
-#include "Utility/portable-file-dialogs.h"
 #endif // _WIN32
 
+#if defined(__FREEBSD__)
+#include <kvm.h>
+#include <sys/param.h>
+#include <sys/sysctl.h>
+#include <sys/user.h>
+#pragma comment(lib,"kvm")
+#elif defined(PLATFORM_LINUX)
+#include <sys/sysinfo.h>
+#endif // PLATFORM_LINUX
+
+#ifdef PLATFORM_WINDOWS_DESKTOP
+#include <comdef.h> // com_error
+#endif // PLATFORM_WINDOWS_DESKTOP
+
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <sys/sysctl.h>
+#endif // __APPLE__
 
 namespace wi::helper
 {
@@ -46,7 +60,7 @@ namespace wi::helper
 	{
 		std::string result;
 		std::locale loc;
-		for (unsigned int i = 0; i < s.length(); ++i)
+		for (size_t i = 0; i < s.length(); ++i)
 		{
 			result += std::toupper(s.at(i), loc);
 		}
@@ -56,7 +70,28 @@ namespace wi::helper
 	{
 		std::string result;
 		std::locale loc;
-		for (unsigned int i = 0; i < s.length(); ++i)
+		for (size_t i = 0; i < s.length(); ++i)
+		{
+			result += std::tolower(s.at(i), loc);
+		}
+		return result;
+	}
+
+	std::wstring toUpper(const std::wstring& s)
+	{
+		std::wstring result;
+		std::locale loc;
+		for (size_t i = 0; i < s.length(); ++i)
+		{
+			result += std::toupper(s.at(i), loc);
+		}
+		return result;
+	}
+	std::wstring toLower(const std::wstring& s)
+	{
+		std::wstring result;
+		std::locale loc;
+		for (size_t i = 0; i < s.length(); ++i)
 		{
 			result += std::tolower(s.at(i), loc);
 		}
@@ -65,24 +100,108 @@ namespace wi::helper
 
 	void messageBox(const std::string& msg, const std::string& caption)
 	{
-#ifdef _WIN32
-#ifndef PLATFORM_UWP
-		MessageBoxA(GetActiveWindow(), msg.c_str(), caption.c_str(), 0);
-#else
-		std::wstring wmessage, wcaption;
-		StringConvert(msg, wmessage);
+#if defined(PLATFORM_WINDOWS_DESKTOP)
+		std::wstring wmsg;
+		std::wstring wcaption;
+		StringConvert(msg, wmsg);
 		StringConvert(caption, wcaption);
-		// UWP can only show message box on main thread:
-		wi::eventhandler::Subscribe_Once(wi::eventhandler::EVENT_THREAD_SAFE_POINT, [=](uint64_t userdata) {
-			winrt::Windows::UI::Popups::MessageDialog(wmessage, wcaption).ShowAsync();
-		});
-#endif // PLATFORM_UWP
-#elif SDL2
+		MessageBox(GetActiveWindow(), wmsg.c_str(), wcaption.c_str(), 0);
+#elif defined(__APPLE__)
+		wi::apple::MessageBox(caption.c_str(), msg.c_str());
+#elif defined(SDL2) || defined(SDL3)
 		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, caption.c_str(), msg.c_str(), NULL);
-#endif // _WIN32
+#endif
 	}
 
-	void screenshot(const wi::graphics::SwapChain& swapchain, const std::string& name)
+	MessageBoxResult messageBoxCustom(const std::string& msg, const std::string& caption, const std::string& buttons)
+	{
+#if defined(PLATFORM_WINDOWS_DESKTOP)
+		std::wstring wmsg;
+		std::wstring wcaption;
+		StringConvert(msg, wmsg);
+		StringConvert(caption, wcaption);
+
+		UINT type = MB_ICONQUESTION;
+		if (buttons == "YesNoCancel")
+		{
+			type |= MB_YESNOCANCEL;
+		}
+		else if (buttons == "YesNo")
+		{
+			type |= MB_YESNO;
+		}
+		else if (buttons == "OKCancel")
+		{
+			type |= MB_OKCANCEL;
+		}
+		else if (buttons == "AbortRetryIgnore")
+		{
+			type |= MB_ABORTRETRYIGNORE;
+		}
+		else // default to OK
+		{
+			type |= MB_OK;
+		}
+
+		const int result = MessageBox(GetActiveWindow(), wmsg.c_str(), wcaption.c_str(), type);
+
+		switch (result)
+		{
+		case IDOK: return MessageBoxResult::OK;
+		case IDCANCEL: return MessageBoxResult::Cancel;
+		case IDYES: return MessageBoxResult::Yes;
+		case IDNO: return MessageBoxResult::No;
+		case IDABORT: return MessageBoxResult::Abort;
+		case IDRETRY: return MessageBoxResult::Retry;
+		case IDIGNORE: return MessageBoxResult::Ignore;
+		default: return MessageBoxResult::Cancel;
+		}
+#elif defined(__APPLE__)
+		
+		return (MessageBoxResult)wi::apple::MessageBox(caption.c_str(), msg.c_str(), buttons.c_str());
+		
+#elif defined(SDL2) || defined(SDL3)
+		const SDL_MessageBoxButtonData buttons_data[] = {
+			{ SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 0, "Yes" },
+			{ 0, 1, "No" },
+			{ SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 2, "Cancel" },
+		};
+		const SDL_MessageBoxData messageboxdata = {
+			SDL_MESSAGEBOX_INFORMATION,
+			NULL,
+			caption.c_str(),
+			msg.c_str(),
+			SDL_arraysize(buttons_data),
+			buttons_data,
+			NULL
+		};
+		int buttonid;
+#ifdef SDL2
+		if (SDL_ShowMessageBox(&messageboxdata, &buttonid) < 0)
+#elif defined(SDL3)
+		if (!SDL_ShowMessageBox(&messageboxdata, &buttonid))
+#endif
+		{
+			return MessageBoxResult::Cancel;
+		}
+		switch (buttonid)
+		{
+		case 0: return MessageBoxResult::Yes;
+		case 1: return MessageBoxResult::No;
+		case 2: return MessageBoxResult::Cancel;
+		default: return MessageBoxResult::Cancel;
+		}
+#endif
+
+		return MessageBoxResult::Cancel;
+	}
+
+	std::string screenshot(const wi::graphics::SwapChain& swapchain, const std::string& name)
+	{
+		return screenshot(wi::graphics::GetDevice()->GetBackBuffer(&swapchain));
+	}
+
+	std::string screenshot(const wi::graphics::Texture& texture, const std::string& name)
 	{
 		std::string directory;
 		if (name.empty())
@@ -94,22 +213,25 @@ namespace wi::helper
 			directory = GetDirectoryFromPath(name);
 		}
 
-		if(!directory.empty()) //PE: Crash if only filename is used with no folder.
+		if (!directory.empty()) //PE: Crash if only filename is used with no folder.
 			DirectoryCreate(directory);
 
 		std::string filename = name;
 		if (filename.empty())
 		{
-			filename = directory + "/sc_" + getCurrentDateTimeAsString() + ".jpg";
+			filename = directory + "/sc_" + getCurrentDateTimeAsString() + ".png";
 		}
 
-		bool result = saveTextureToFile(wi::graphics::GetDevice()->GetBackBuffer(&swapchain), filename);
+		bool result = saveTextureToFile(texture, filename);
 		assert(result);
+
+		SetClipboardImage(texture);
 
 		if (result)
 		{
-			wi::backlog::post("Screenshot saved: " + filename);
+			return filename;
 		}
+		return "";
 	}
 
 	bool saveTextureToMemory(const wi::graphics::Texture& texture, wi::vector<uint8_t>& texturedata)
@@ -154,42 +276,43 @@ namespace wi::helper
 
 		if (stagingTex.mapped_data != nullptr)
 		{
-			texturedata.resize(stagingTex.mapped_size);
+			texturedata.resize(ComputeTextureMemorySizeInBytes(desc));
 
-			const uint32_t data_stride = GetFormatStride(desc.format);
 			const uint32_t block_size = GetFormatBlockSize(desc.format);
-			const uint32_t num_blocks_x = desc.width / block_size;
-			const uint32_t num_blocks_y = desc.height / block_size;
 			size_t cpy_offset = 0;
 			size_t subresourceIndex = 0;
-			for (uint32_t layer = 0; layer < desc.array_size; ++layer)
+			const uint32_t planes = GetFormatPlaneCount(desc.format);
+			for (uint32_t plane = 0; plane < planes; ++plane)
 			{
-				uint32_t mip_width = num_blocks_x;
-				uint32_t mip_height = num_blocks_y;
-				uint32_t mip_depth = desc.depth;
-				for (uint32_t mip = 0; mip < desc.mip_levels; ++mip)
+				const uint32_t data_stride = GetFormatStride(desc.format, plane);
+				for (uint32_t layer = 0; layer < desc.array_size; ++layer)
 				{
-					assert(subresourceIndex < stagingTex.mapped_subresource_count);
-					const SubresourceData& subresourcedata = stagingTex.mapped_subresources[subresourceIndex++];
-					const size_t dst_rowpitch = mip_width * data_stride;
-					for (uint32_t z = 0; z < mip_depth; ++z)
+					for (uint32_t mip = 0; mip < desc.mip_levels; ++mip)
 					{
-						uint8_t* dst_slice = texturedata.data() + cpy_offset;
-						uint8_t* src_slice = (uint8_t*)subresourcedata.data_ptr + subresourcedata.slice_pitch * z;
-						for (uint32_t i = 0; i < mip_height; ++i)
-						{
-							std::memcpy(
-								dst_slice + i * dst_rowpitch,
-								src_slice + i * subresourcedata.row_pitch,
-								subresourcedata.row_pitch
-							);
-						}
-						cpy_offset += mip_height * dst_rowpitch;
-					}
+						const uint32_t mip_width = std::max(1u, desc.width >> mip);
+						const uint32_t mip_height = std::max(1u, desc.height >> mip);
+						const uint32_t mip_depth = std::max(1u, desc.depth >> mip);
+						const uint32_t num_blocks_x = (mip_width + block_size - 1) / block_size;
+						const uint32_t num_blocks_y = (mip_height + block_size - 1) / block_size;
 
-					mip_width = std::max(1u, mip_width / 2);
-					mip_height = std::max(1u, mip_height / 2);
-					mip_depth = std::max(1u, mip_depth / 2);
+						assert(subresourceIndex < stagingTex.mapped_subresource_count);
+						const SubresourceData& subresourcedata = stagingTex.mapped_subresources[subresourceIndex++];
+						const size_t dst_rowpitch = num_blocks_x * data_stride;
+						for (uint32_t z = 0; z < mip_depth; ++z)
+						{
+							uint8_t* dst_slice = texturedata.data() + cpy_offset;
+							uint8_t* src_slice = (uint8_t*)subresourcedata.data_ptr + subresourcedata.slice_pitch * z;
+							for (uint32_t i = 0; i < num_blocks_y; ++i)
+							{
+								std::memcpy(
+									dst_slice + i * dst_rowpitch,
+									src_slice + i * subresourcedata.row_pitch,
+									dst_rowpitch
+								);
+							}
+							cpy_offset += num_blocks_y * dst_rowpitch;
+						}
+					}
 				}
 			}
 		}
@@ -218,6 +341,292 @@ namespace wi::helper
 		using namespace wi::graphics;
 		const uint32_t data_stride = GetFormatStride(desc.format);
 
+		std::string extension = wi::helper::toUpper(fileExtension);
+
+		if (extension.compare("DDS") == 0)
+		{
+			filedata.resize(sizeof(dds::Header) + texturedata.size());
+			dds::DXGI_FORMAT dds_format = dds::DXGI_FORMAT_UNKNOWN;
+			switch (desc.format)
+			{
+			case wi::graphics::Format::R32G32B32A32_FLOAT:
+				dds_format = dds::DXGI_FORMAT_R32G32B32A32_FLOAT;
+				break;
+			case wi::graphics::Format::R32G32B32A32_UINT:
+				dds_format = dds::DXGI_FORMAT_R32G32B32A32_UINT;
+				break;
+			case wi::graphics::Format::R32G32B32A32_SINT:
+				dds_format = dds::DXGI_FORMAT_R32G32B32A32_SINT;
+				break;
+			case wi::graphics::Format::R32G32B32_FLOAT:
+				dds_format = dds::DXGI_FORMAT_R32G32B32_FLOAT;
+				break;
+			case wi::graphics::Format::R32G32B32_UINT:
+				dds_format = dds::DXGI_FORMAT_R32G32B32_UINT;
+				break;
+			case wi::graphics::Format::R32G32B32_SINT:
+				dds_format = dds::DXGI_FORMAT_R32G32B32_SINT;
+				break;
+			case wi::graphics::Format::R16G16B16A16_FLOAT:
+				dds_format = dds::DXGI_FORMAT_R16G16B16A16_FLOAT;
+				break;
+			case wi::graphics::Format::R16G16B16A16_UNORM:
+				dds_format = dds::DXGI_FORMAT_R16G16B16A16_UNORM;
+				break;
+			case wi::graphics::Format::R16G16B16A16_UINT:
+				dds_format = dds::DXGI_FORMAT_R16G16B16A16_UINT;
+				break;
+			case wi::graphics::Format::R16G16B16A16_SNORM:
+				dds_format = dds::DXGI_FORMAT_R16G16B16A16_SNORM;
+				break;
+			case wi::graphics::Format::R16G16B16A16_SINT:
+				dds_format = dds::DXGI_FORMAT_R16G16B16A16_SINT;
+				break;
+			case wi::graphics::Format::R32G32_FLOAT:
+				dds_format = dds::DXGI_FORMAT_R32G32_FLOAT;
+				break;
+			case wi::graphics::Format::R32G32_UINT:
+				dds_format = dds::DXGI_FORMAT_R32G32_UINT;
+				break;
+			case wi::graphics::Format::R32G32_SINT:
+				dds_format = dds::DXGI_FORMAT_R32G32_SINT;
+				break;
+			case wi::graphics::Format::R10G10B10A2_UNORM:
+				dds_format = dds::DXGI_FORMAT_R10G10B10A2_UNORM;
+				break;
+			case wi::graphics::Format::R10G10B10A2_UINT:
+				dds_format = dds::DXGI_FORMAT_R10G10B10A2_UINT;
+				break;
+			case wi::graphics::Format::R11G11B10_FLOAT:
+				dds_format = dds::DXGI_FORMAT_R11G11B10_FLOAT;
+				break;
+			case wi::graphics::Format::R8G8B8A8_UNORM:
+				dds_format = dds::DXGI_FORMAT_R8G8B8A8_UNORM;
+				break;
+			case wi::graphics::Format::R8G8B8A8_UNORM_SRGB:
+				dds_format = dds::DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+				break;
+			case wi::graphics::Format::R8G8B8A8_UINT:
+				dds_format = dds::DXGI_FORMAT_R8G8B8A8_UINT;
+				break;
+			case wi::graphics::Format::R8G8B8A8_SNORM:
+				dds_format = dds::DXGI_FORMAT_R8G8B8A8_SNORM;
+				break;
+			case wi::graphics::Format::R8G8B8A8_SINT:
+				dds_format = dds::DXGI_FORMAT_R8G8B8A8_SINT;
+				break;
+			case wi::graphics::Format::B8G8R8A8_UNORM:
+				dds_format = dds::DXGI_FORMAT_B8G8R8A8_UNORM;
+				break;
+			case wi::graphics::Format::B8G8R8A8_UNORM_SRGB:
+				dds_format = dds::DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+				break;
+			case wi::graphics::Format::R16G16_FLOAT:
+				dds_format = dds::DXGI_FORMAT_R16G16_FLOAT;
+				break;
+			case wi::graphics::Format::R16G16_UNORM:
+				dds_format = dds::DXGI_FORMAT_R16G16_UNORM;
+				break;
+			case wi::graphics::Format::R16G16_UINT:
+				dds_format = dds::DXGI_FORMAT_R16G16_UINT;
+				break;
+			case wi::graphics::Format::R16G16_SNORM:
+				dds_format = dds::DXGI_FORMAT_R16G16_SNORM;
+				break;
+			case wi::graphics::Format::R16G16_SINT:
+				dds_format = dds::DXGI_FORMAT_R16G16_SINT;
+				break;
+			case wi::graphics::Format::D32_FLOAT:
+			case wi::graphics::Format::R32_FLOAT:
+				dds_format = dds::DXGI_FORMAT_R32_FLOAT;
+				break;
+			case wi::graphics::Format::R32_UINT:
+				dds_format = dds::DXGI_FORMAT_R32_UINT;
+				break;
+			case wi::graphics::Format::R32_SINT:
+				dds_format = dds::DXGI_FORMAT_R32_SINT;
+				break;
+			case wi::graphics::Format::R9G9B9E5_SHAREDEXP:
+				dds_format = dds::DXGI_FORMAT_R9G9B9E5_SHAREDEXP;
+				break;
+			case wi::graphics::Format::R8G8_UNORM:
+				dds_format = dds::DXGI_FORMAT_R8G8_UNORM;
+				break;
+			case wi::graphics::Format::R8G8_UINT:
+				dds_format = dds::DXGI_FORMAT_R8G8_UINT;
+				break;
+			case wi::graphics::Format::R8G8_SNORM:
+				dds_format = dds::DXGI_FORMAT_R8G8_SNORM;
+				break;
+			case wi::graphics::Format::R8G8_SINT:
+				dds_format = dds::DXGI_FORMAT_R8G8_SINT;
+				break;
+			case wi::graphics::Format::R16_FLOAT:
+				dds_format = dds::DXGI_FORMAT_R16_FLOAT;
+				break;
+			case wi::graphics::Format::D16_UNORM:
+			case wi::graphics::Format::R16_UNORM:
+				dds_format = dds::DXGI_FORMAT_R16_UNORM;
+				break;
+			case wi::graphics::Format::R16_UINT:
+				dds_format = dds::DXGI_FORMAT_R16_UINT;
+				break;
+			case wi::graphics::Format::R16_SNORM:
+				dds_format = dds::DXGI_FORMAT_R16_SNORM;
+				break;
+			case wi::graphics::Format::R16_SINT:
+				dds_format = dds::DXGI_FORMAT_R16_SINT;
+				break;
+			case wi::graphics::Format::R8_UNORM:
+				dds_format = dds::DXGI_FORMAT_R8_UNORM;
+				break;
+			case wi::graphics::Format::R8_UINT:
+				dds_format = dds::DXGI_FORMAT_R8_UINT;
+				break;
+			case wi::graphics::Format::R8_SNORM:
+				dds_format = dds::DXGI_FORMAT_R8_SNORM;
+				break;
+			case wi::graphics::Format::R8_SINT:
+				dds_format = dds::DXGI_FORMAT_R8_SINT;
+				break;
+			case wi::graphics::Format::BC1_UNORM:
+				dds_format = dds::DXGI_FORMAT_BC1_UNORM;
+				break;
+			case wi::graphics::Format::BC1_UNORM_SRGB:
+				dds_format = dds::DXGI_FORMAT_BC1_UNORM_SRGB;
+				break;
+			case wi::graphics::Format::BC2_UNORM:
+				dds_format = dds::DXGI_FORMAT_BC2_UNORM;
+				break;
+			case wi::graphics::Format::BC2_UNORM_SRGB:
+				dds_format = dds::DXGI_FORMAT_BC2_UNORM_SRGB;
+				break;
+			case wi::graphics::Format::BC3_UNORM:
+				dds_format = dds::DXGI_FORMAT_BC3_UNORM;
+				break;
+			case wi::graphics::Format::BC3_UNORM_SRGB:
+				dds_format = dds::DXGI_FORMAT_BC3_UNORM_SRGB;
+				break;
+			case wi::graphics::Format::BC4_UNORM:
+				dds_format = dds::DXGI_FORMAT_BC4_UNORM;
+				break;
+			case wi::graphics::Format::BC4_SNORM:
+				dds_format = dds::DXGI_FORMAT_BC4_SNORM;
+				break;
+			case wi::graphics::Format::BC5_UNORM:
+				dds_format = dds::DXGI_FORMAT_BC5_UNORM;
+				break;
+			case wi::graphics::Format::BC5_SNORM:
+				dds_format = dds::DXGI_FORMAT_BC5_SNORM;
+				break;
+			case wi::graphics::Format::BC6H_UF16:
+				dds_format = dds::DXGI_FORMAT_BC6H_UF16;
+				break;
+			case wi::graphics::Format::BC6H_SF16:
+				dds_format = dds::DXGI_FORMAT_BC6H_SF16;
+				break;
+			case wi::graphics::Format::BC7_UNORM:
+				dds_format = dds::DXGI_FORMAT_BC7_UNORM;
+				break;
+			case wi::graphics::Format::BC7_UNORM_SRGB:
+				dds_format = dds::DXGI_FORMAT_BC7_UNORM_SRGB;
+				break;
+			default:
+				assert(0);
+				return false;
+			}
+			dds::write_header(
+				filedata.data(),
+				dds_format,
+				desc.width,
+				desc.type == TextureDesc::Type::TEXTURE_1D ? 0 : desc.height,
+				desc.mip_levels,
+				desc.array_size,
+				has_flag(desc.misc_flags, ResourceMiscFlag::TEXTURECUBE),
+				desc.type == TextureDesc::Type::TEXTURE_3D ? desc.depth : 0
+			);
+			std::memcpy(filedata.data() + sizeof(dds::Header), texturedata.data(), texturedata.size());
+			return true;
+		}
+
+		const bool is_png = extension.compare("PNG") == 0;
+
+		if (is_png)
+		{
+			if (desc.format == Format::R16_UNORM || desc.format == Format::R16_UINT || desc.format == Format::R16_SNORM || desc.format == Format::R16_SINT)
+			{
+				// Specialized handling for 16-bit single channel PNG:
+				wi::vector<uint8_t> src_bigendian = texturedata;
+				uint16_t* dest = (uint16_t*)src_bigendian.data();
+				for (uint32_t i = 0; i < desc.width * desc.height; ++i)
+				{
+					uint16_t r = dest[i];
+					r = (r >> 8) | ((r & 0xFF) << 8); // little endian to big endian
+					dest[i] = r;
+				}
+				unsigned error = lodepng::encode(filedata, src_bigendian, desc.width, desc.height, LCT_GREY, 16);
+				return error == 0;
+			}
+			else if (desc.format == Format::R16G16_UNORM || desc.format == Format::R16G16_UINT || desc.format == Format::R16G16_SNORM || desc.format == Format::R16G16_SINT)
+			{
+				// Specialized handling for 16-bit PNG:
+				//	Two channel RG data is expanded to RGBA (2-channel PNG is not good because that is interpreted as red and alpha)
+				wi::vector<uint8_t> src_bigendian = texturedata;
+				const uint32_t* src_rg = (const uint32_t*)src_bigendian.data();
+				wi::vector<wi::Color16> dest_rgba(desc.width * desc.height);
+				for (uint32_t i = 0; i < desc.width * desc.height; ++i)
+				{
+					uint32_t rg = src_rg[i];
+					wi::Color16& rgba = dest_rgba[i];
+					uint16_t r = rg & 0xFFFF;
+					r = (r >> 8) | ((r & 0xFF) << 8); // little endian to big endian
+					uint16_t g = (rg >> 16u) & 0xFFFF;
+					g = (g >> 8) | ((g & 0xFF) << 8); // little endian to big endian
+					rgba = wi::Color16(r, g, 0xFFFF, 0xFFFF);
+				}
+				unsigned error = lodepng::encode(filedata, (const unsigned char*)dest_rgba.data(), desc.width, desc.height, LCT_RGBA, 16);
+				return error == 0;
+			}
+			else if (desc.format == Format::R16G16B16A16_UNORM || desc.format == Format::R16G16B16A16_UINT || desc.format == Format::R16G16B16A16_SNORM || desc.format == Format::R16G16B16A16_SINT)
+			{
+				// Specialized handling for 16-bit PNG:
+				wi::vector<uint8_t> src_bigendian = texturedata;
+				wi::Color16* dest = (wi::Color16*)src_bigendian.data();
+				for (uint32_t i = 0; i < desc.width * desc.height; ++i)
+				{
+					wi::Color16 rgba = dest[i];
+					uint16_t r = rgba.getR();
+					r = (r >> 8) | ((r & 0xFF) << 8); // little endian to big endian
+					uint16_t g = rgba.getG();
+					g = (g >> 8) | ((g & 0xFF) << 8); // little endian to big endian
+					uint16_t b = rgba.getB();
+					b = (b >> 8) | ((b & 0xFF) << 8); // little endian to big endian
+					uint16_t a = rgba.getA();
+					a = (a >> 8) | ((a & 0xFF) << 8); // little endian to big endian
+					rgba = wi::Color16(r, g, b, a);
+					dest[i] = rgba;
+				}
+				unsigned error = lodepng::encode(filedata, src_bigendian, desc.width, desc.height, LCT_RGBA, 16);
+				return error == 0;
+			}
+			else if (desc.format == Format::R32_FLOAT || desc.format == Format::D32_FLOAT || desc.format == Format::D32_FLOAT_S8X24_UINT)
+			{
+				// Specialized handling for 16-bit single channel PNG from a 32-bit float source:
+				wi::vector<uint8_t> dst_bigendian(desc.width * desc.height * sizeof(uint16_t));
+				const float* src = (const float*)texturedata.data();
+				uint16_t* dest = (uint16_t*)dst_bigendian.data();
+				for (uint32_t i = 0; i < desc.width * desc.height; ++i)
+				{
+					float f = src[i];
+					uint16_t r = uint16_t(saturate(f) * 65535.0f);
+					r = (r >> 8) | ((r & 0xFF) << 8); // little endian to big endian
+					dest[i] = r;
+				}
+				unsigned error = lodepng::encode(filedata, dst_bigendian, desc.width, desc.height, LCT_GREY, 16);
+				return error == 0;
+			}
+		}
+
 		struct MipDesc
 		{
 			const uint8_t* address = nullptr;
@@ -245,12 +654,6 @@ namespace wi::helper
 			mip_depth = std::max(1u, mip_depth / 2);
 		}
 
-		std::string extension = wi::helper::toUpper(fileExtension);
-		bool basis = !extension.compare("BASIS");
-		bool ktx2 = !extension.compare("KTX2");
-		basisu::image basis_image;
-		basisu::vector<basisu::image> basis_mipmaps;
-
 		int dst_channel_count = 4;
 		if (desc.format == Format::R10G10B10A2_UNORM)
 		{
@@ -264,6 +667,11 @@ namespace wi::helper
 				float g = ((pixel >> 10) & 1023) / 1023.0f;
 				float b = ((pixel >> 20) & 1023) / 1023.0f;
 				float a = ((pixel >> 30) & 3) / 3.0f;
+				
+#ifdef __APPLE__
+				// The R10G10B10A2_UNORM format only has BGRA equivalent in Metal API and we use that:
+				std::swap(r, b);
+#endif // __APPLE__
 
 				uint32_t rgba8 = 0;
 				rgba8 |= (uint32_t)(r * 255.0f) << 0;
@@ -320,6 +728,18 @@ namespace wi::helper
 				data32[i] = rgba8;
 			}
 		}
+		else if (desc.format == Format::R16G16B16A16_UNORM || desc.format == Format::R16G16B16A16_UINT)
+		{
+			// This will be converted first to rgba8 before saving to common format:
+			wi::Color16* dataSrc = (wi::Color16*)texturedata.data();
+			wi::Color* data32 = (wi::Color*)texturedata.data();
+
+			for (uint32_t i = 0; i < data_count; ++i)
+			{
+				wi::Color16 pixel16 = dataSrc[i];
+				data32[i] = wi::Color::fromFloat4(pixel16.toFloat4());
+			}
+		}
 		else if (desc.format == Format::R11G11B10_FLOAT)
 		{
 			// This will be converted first to rgba8 before saving to common format:
@@ -330,6 +750,32 @@ namespace wi::helper
 			{
 				XMFLOAT3PK pixel = dataSrc[i];
 				XMVECTOR V = XMLoadFloat3PK(&pixel);
+				XMFLOAT3 pixel3;
+				XMStoreFloat3(&pixel3, V);
+				float r = std::max(0.0f, std::min(pixel3.x, 1.0f));
+				float g = std::max(0.0f, std::min(pixel3.y, 1.0f));
+				float b = std::max(0.0f, std::min(pixel3.z, 1.0f));
+				float a = 1;
+
+				uint32_t rgba8 = 0;
+				rgba8 |= (uint32_t)(r * 255.0f) << 0;
+				rgba8 |= (uint32_t)(g * 255.0f) << 8;
+				rgba8 |= (uint32_t)(b * 255.0f) << 16;
+				rgba8 |= (uint32_t)(a * 255.0f) << 24;
+
+				data32[i] = rgba8;
+			}
+		}
+		else if (desc.format == Format::R9G9B9E5_SHAREDEXP)
+		{
+			// This will be converted first to rgba8 before saving to common format:
+			XMFLOAT3SE* dataSrc = (XMFLOAT3SE*)texturedata.data();
+			uint32_t* data32 = (uint32_t*)texturedata.data();
+
+			for (uint32_t i = 0; i < data_count; ++i)
+			{
+				XMFLOAT3SE pixel = dataSrc[i];
+				XMVECTOR V = XMLoadFloat3SE(&pixel);
 				XMFLOAT3 pixel3;
 				XMStoreFloat3(&pixel3, V);
 				float r = std::max(0.0f, std::min(pixel3.x, 1.0f));
@@ -371,117 +817,152 @@ namespace wi::helper
 			// This can be saved by reducing target channel count, no conversion needed
 			dst_channel_count = 2;
 		}
-		else if (IsFormatBlockCompressed(desc.format))
+		else if (desc.format == Format::R8G8B8A8_UNORM || desc.format == Format::R8G8B8A8_UNORM_SRGB || desc.format == Format::R8G8B8A8_SNORM || desc.format == Format::R8G8B8A8_SINT || desc.format == Format::R8G8B8A8_UINT || desc.format == Format::R32_SINT || desc.format == Format::R32_UINT)
 		{
-			basisu::texture_format fmt;
-			switch (desc.format)
-			{
-			default:
-				assert(0);
-				return false;
-			case Format::BC1_UNORM:
-			case Format::BC1_UNORM_SRGB:
-				fmt = basisu::texture_format::cBC1;
-				break;
-			case Format::BC3_UNORM:
-			case Format::BC3_UNORM_SRGB:
-				fmt = basisu::texture_format::cBC3;
-				break;
-			case Format::BC4_UNORM:
-				fmt = basisu::texture_format::cBC4;
-				break;
-			case Format::BC5_UNORM:
-				fmt = basisu::texture_format::cBC5;
-				break;
-			case Format::BC7_UNORM:
-			case Format::BC7_UNORM_SRGB:
-				fmt = basisu::texture_format::cBC7;
-				break;
-			}
-			basisu::gpu_image basis_gpu_image;
-			basis_gpu_image.init(fmt, desc.width, desc.height);
-			std::memcpy(basis_gpu_image.get_ptr(), texturedata.data(), std::min(texturedata.size(), (size_t)basis_gpu_image.get_size_in_bytes()));
-			basis_gpu_image.unpack(basis_image);
+			// These are accepted as-is
 		}
 		else
 		{
-			assert(desc.format == Format::R8G8B8A8_UNORM || desc.format == Format::R8G8B8A8_UNORM_SRGB); // If you need to save other texture format, implement data conversion for it
+			assert(0); // If you need to save other texture format, implement data conversion for it
+			return false;
 		}
 
-		if (basis || ktx2)
+		if (!extension.compare("ICO"))
 		{
-			if (basis_image.get_total_pixels() == 0)
+			const uint32_t minsize = 32;
+
+			size_t filesize = sizeof(ico::ICONDIR);
+
+			ico::ICONDIR icondir = { 0,1,0 };
+
+			for (auto& mip : mips)
 			{
-				basis_image.init(texturedata.data(), desc.width, desc.height, 4);
-				if (desc.mip_levels > 1)
+				if (mip.width > 256 || mip.height > 256)
+					continue;
+				if (mip.width < minsize || mip.height < minsize)
+					break;
+				icondir.idCount++;
+				filesize += sizeof(ico::ICONDIRENTRY);
+			}
+
+			if (icondir.idCount < 1)
+			{
+				wilog_assert(0, "No valid images were found that can be added to ICO file format!");
+				return false;
+			}
+
+			uint32_t imageDataOffset = (uint32_t)filesize;
+
+			for (auto& mip : mips)
+			{
+				if (mip.width > 256 || mip.height > 256)
+					continue;
+				if (mip.width < minsize || mip.height < minsize)
+					break;
+				const uint32_t pixelCount = mip.width * mip.height;
+				const uint32_t rgbDataSize = pixelCount * 4; // 32-bit RGBA
+				const uint32_t maskSize = ((mip.width + 7) / 8) * mip.height; // 1-bit mask, padded to byte
+				const uint32_t imageDataSize = sizeof(ico::BITMAPINFOHEADER) + rgbDataSize + maskSize;
+				filesize += imageDataSize;
+			}
+
+			filedata.resize(filesize);
+			uint8_t* ptr = filedata.data();
+
+			std::memcpy(ptr, &icondir, sizeof(ico::ICONDIR));
+			ptr += sizeof(ico::ICONDIR);
+
+			for (auto& mip : mips)
+			{
+				if (mip.width > 256 || mip.height > 256)
+					continue;
+				if (mip.width < minsize || mip.height < minsize)
+					break;
+
+				const uint32_t pixelCount = mip.width * mip.height;
+				const uint32_t rgbDataSize = pixelCount * 4; // 32-bit RGBA
+				const uint32_t maskSize = ((mip.width + 7) / 8) * mip.height; // 1-bit mask, padded to byte
+				const uint32_t imageDataSize = sizeof(ico::BITMAPINFOHEADER) + rgbDataSize + maskSize;
+
+				ico::ICONDIRENTRY iconEntry = {
+					static_cast<uint8_t>(mip.width > 255 ? 0 : mip.width), // Width (0 for 256+)
+					static_cast<uint8_t>(mip.height > 255 ? 0 : mip.height), // Height (0 for 256+)
+					0, // Color count (0 for 32-bit)
+					0, // Reserved
+					1, // Color planes
+					32, // Bits per pixel
+					imageDataSize, // Size of image data
+					imageDataOffset // Offset to image data
+				};
+				std::memcpy(ptr, &iconEntry, sizeof(ico::ICONDIRENTRY));
+				ptr += sizeof(ico::ICONDIRENTRY);
+				imageDataOffset += imageDataSize;
+			}
+
+			for (auto& mip : mips)
+			{
+				if (mip.width > 256 || mip.height > 256)
+					continue;
+				if (mip.width < minsize || mip.height < minsize)
+					break;
+
+				const uint32_t pixelCount = mip.width * mip.height;
+				const uint32_t rgbDataSize = pixelCount * 4; // 32-bit RGBA
+				const uint32_t maskSize = ((mip.width + 7) / 8) * mip.height; // 1-bit mask, padded to byte
+
+				ico::BITMAPINFOHEADER bmpHeader = {
+					sizeof(ico::BITMAPINFOHEADER), // Size of header
+					int32_t(mip.width), // Width
+					int32_t(mip.height * 2), // Height (doubled for XOR + AND mask)
+					1, // Planes
+					32, // Bits per pixel
+					0, // No compression
+					rgbDataSize + maskSize, // Image size
+					0, // X pixels per meter
+					0, // Y pixels per meter
+					0, // Colors used
+					0  // Important colors
+				};
+				std::memcpy(ptr, &bmpHeader, sizeof(ico::BITMAPINFOHEADER));
+				ptr += sizeof(ico::BITMAPINFOHEADER);
+
+				// Convert RGBA to BGRA and write XOR mask (flipped vertically)
+				for (uint32_t y = mip.height; y > 0; --y)
 				{
-					basis_mipmaps.reserve(desc.mip_levels - 1);
-					for (uint32_t mip = 1; mip < desc.mip_levels; ++mip)
+					const uint8_t* src = mip.address + (y - 1) * mip.width * 4;
+					for (uint32_t x = 0; x < mip.width; ++x)
 					{
-						basisu::image basis_mip;
-						const MipDesc& mipdesc = mips[mip];
-						basis_mip.init(mipdesc.address, mipdesc.width, mipdesc.height, 4);
-						basis_mipmaps.push_back(basis_mip);
+						// Convert RGBA to BGRA
+						ptr[0] = src[2]; // B
+						ptr[1] = src[1]; // G
+						ptr[2] = src[0]; // R
+						ptr[3] = src[3]; // A
+						ptr += 4;
+						src += 4;
+					}
+				}
+
+				// Write AND mask (1-bit transparency mask)
+				for (uint32_t y = mip.height; y > 0; --y)
+				{
+					const uint8_t* src = mip.address + (y - 1) * mip.width * 4;
+					for (uint32_t x = 0; x < mip.width; x += 8)
+					{
+						uint8_t maskByte = 0;
+						for (uint32_t bit = 0; bit < 8 && (x + bit) < mip.width; ++bit)
+						{
+							// Set bit to 0 if pixel is opaque (alpha > 0), 1 if transparent
+							if (src[(x + bit) * 4 + 3] == 0)
+							{
+								maskByte |= (1 << (7 - bit));
+							}
+						}
+						*ptr++ = maskByte;
 					}
 				}
 			}
-			basisu::basis_compressor_params params;
-			params.m_source_images.push_back(basis_image);
-			if (desc.mip_levels > 1)
-			{
-				params.m_source_mipmap_images.push_back(basis_mipmaps);
-			}
-			if (ktx2)
-			{
-				params.m_create_ktx2_file = true;
-			}
-			else
-			{
-				params.m_create_ktx2_file = false;
-			}
-#if 1
-			params.m_compression_level = basisu::BASISU_DEFAULT_COMPRESSION_LEVEL;
-#else
-			params.m_compression_level = basisu::BASISU_MAX_COMPRESSION_LEVEL;
-#endif
-			// Disable CPU mipmap generation:
-			//	instead we provide mipmap data that was downloaded from the GPU with m_source_mipmap_images.
-			//	This is better, because engine specific mipgen options will be retained, such as coverage preserving mipmaps
-			params.m_mip_gen = false;
-			params.m_pSel_codebook = &g_basis_global_codebook;
-			params.m_quality_level = basisu::BASISU_QUALITY_MAX;
-			params.m_multithreading = true;
-			int num_threads = std::max(1u, std::thread::hardware_concurrency());
-			basisu::job_pool jpool(num_threads);
-			params.m_pJob_pool = &jpool;
-			basisu::basis_compressor compressor;
-			if (compressor.init(params))
-			{
-				auto result = compressor.process();
-				if (result == basisu::basis_compressor::cECSuccess)
-				{
-					if (basis)
-					{
-						const auto& basis_file = compressor.get_output_basis_file();
-						filedata.resize(basis_file.size());
-						std::memcpy(filedata.data(), basis_file.data(), basis_file.size());
-						return true;
-					}
-					else if (ktx2)
-					{
-						const auto& ktx2_file = compressor.get_output_ktx2_file();
-						filedata.resize(ktx2_file.size());
-						std::memcpy(filedata.data(), ktx2_file.data(), ktx2_file.size());
-						return true;
-					}
-				}
-				else
-				{
-					wi::backlog::post("basisu::basis_compressor::process() failure!", wi::backlog::LogLevel::Error);
-					assert(0);
-				}
-			}
-			return false;
+
+			return true;
 		}
 
 		int write_result = 0;
@@ -495,22 +976,16 @@ namespace wi::helper
 			}
 		};
 
-		const void* src_data = texturedata.data();
-		if (basis_image.get_width() > 0 && basis_image.get_ptr() != nullptr)
-		{
-			src_data = basis_image.get_ptr();
-		}
-
 		static int mip_request = 0; // you can use this while debugging to write specific mip level to file (todo: option param?)
 		const MipDesc& mip = mips[mip_request];
 
-		if (!extension.compare("JPG") || !extension.compare("JPEG"))
-		{
-			write_result = stbi_write_jpg_to_func(func, &filedata, (int)mip.width, (int)mip.height, dst_channel_count, mip.address, 100);
-		}
-		else if (!extension.compare("PNG"))
+		if (is_png)
 		{
 			write_result = stbi_write_png_to_func(func, &filedata, (int)mip.width, (int)mip.height, dst_channel_count, mip.address, 0);
+		}
+		else if (!extension.compare("JPG") || !extension.compare("JPEG"))
+		{
+			write_result = stbi_write_jpg_to_func(func, &filedata, (int)mip.width, (int)mip.height, dst_channel_count, mip.address, 100);
 		}
 		else if (!extension.compare("TGA"))
 		{
@@ -519,6 +994,35 @@ namespace wi::helper
 		else if (!extension.compare("BMP"))
 		{
 			write_result = stbi_write_bmp_to_func(func, &filedata, (int)mip.width, (int)mip.height, dst_channel_count, mip.address);
+		}
+		else if (!extension.compare("H"))
+		{
+			const size_t datasize = mip.width * mip.height * sizeof(wi::Color);
+			std::string ss;
+			ss += "struct EmbeddedImage {\n";
+			ss += "const unsigned int width = " + std::to_string(mip.width) + ";\n";
+			ss += "const unsigned int height = " + std::to_string(mip.height) + ";\n";
+			ss += "const unsigned int bytes_per_pixel = 4;\n";
+			ss += "const char comment[256] = \"RGBA Image Header Generated By Wicked Engine\";\n";
+			ss += "const unsigned char pixel_data[" + std::to_string(mip.width) + " * " + std::to_string(mip.height) + " * 4] = {";
+			for (size_t i = 0; i < datasize; ++i)
+			{
+				if (i % 32 == 0)
+				{
+					ss += "\n";
+				}
+				ss += std::to_string((uint32_t)mip.address[i]) + ",";
+			}
+			ss += "\n};\n};\n";
+			filedata.resize(ss.size());
+			std::memcpy(filedata.data(), ss.c_str(), ss.length());
+			return true;
+		}
+		else if (!extension.compare("RAW"))
+		{
+			filedata.resize(mip.width * mip.height * sizeof(wi::Color));
+			std::memcpy(filedata.data(), mip.address, filedata.size());
+			return true;
 		}
 		else
 		{
@@ -554,17 +1058,75 @@ namespace wi::helper
 		return false;
 	}
 
+	bool saveBufferToMemory(const wi::graphics::GPUBuffer& buffer, wi::vector<uint8_t>& data)
+	{
+		using namespace wi::graphics;
+		GraphicsDevice* device = GetDevice();
+
+		GPUBufferDesc desc = buffer.desc;
+		desc.usage = wi::graphics::Usage::READBACK;
+		desc.bind_flags = {};
+		desc.misc_flags = {};
+		GPUBuffer staging;
+		bool success = device->CreateBuffer(&desc, nullptr, &staging);
+		assert(success);
+
+		if (success)
+		{
+			CommandList cmd = device->BeginCommandList();
+
+			device->Barrier(GPUBarrier::Memory(), cmd);
+			device->CopyResource(&staging, &buffer, cmd);
+			device->Barrier(GPUBarrier::Memory(), cmd);
+
+			device->SubmitCommandLists();
+			device->WaitForGPU();
+
+			data.reserve(staging.mapped_size);
+			for (size_t i = 0; i < staging.mapped_size; ++i)
+			{
+				data.push_back(((uint8_t*)staging.mapped_data)[i]);
+			}
+		}
+
+		return success;
+	}
+
+	bool CreateCursorFromTexture(const wi::graphics::Texture& texture, int hotspotX, int hotspotY, wi::vector<uint8_t>& data)
+	{
+		if (!saveTextureToMemoryFile(texture, "ico", data))
+			return false;
+
+		// rewrite ICO structure for CUR structure:
+		ico::ICONDIR* icondir = (ico::ICONDIR*)data.data();
+		icondir->idType = 2;
+
+		uint32_t baseWidth = texture.desc.width;
+		uint32_t baseHeight = texture.desc.height;
+
+		for (uint16_t i = 0; i < icondir->idCount; ++i)
+		{
+			ico::ICONDIRENTRY* icondirentry = (ico::ICONDIRENTRY*)(data.data() + sizeof(ico::ICONDIR)) + i;
+			icondirentry->wPlanes = (uint16_t)hotspotX / (baseWidth / (icondirentry->bWidth == 0 ? 256 : icondirentry->bWidth));
+			icondirentry->wBitCount = (uint16_t)hotspotY / (baseHeight / (icondirentry->bHeight == 0 ? 256 : icondirentry->bHeight));
+		}
+
+		return true;
+	}
+
 	std::string getCurrentDateTimeAsString()
 	{
 		time_t t = std::time(nullptr);
-		struct tm time_info;
+		struct tm* tmptr;
 #ifdef _WIN32
+		struct tm time_info;
+		tmptr = &time_info;
 		localtime_s(&time_info, &t);
 #else
-		localtime(&t);
+		tmptr = localtime(&t);
 #endif
 		std::stringstream ss("");
-		ss << std::put_time(&time_info, "%d-%m-%Y %H-%M-%S");
+		ss << std::put_time(tmptr, "%Y-%m-%d %H-%M-%S");
 		return ss.str();
 	}
 
@@ -651,6 +1213,32 @@ namespace wi::helper
 		return filename.substr(0, idx);
 	}
 
+#ifdef _WIN32
+	// On windows we need to expand UTF8 strings to UTF16 when passing it to WinAPI:
+	std::wstring ToNativeString(const std::string& fileName)
+	{
+		std::wstring fileName_wide;
+		StringConvert(fileName, fileName_wide);
+		return fileName_wide;
+	}
+#else
+#define ToNativeString(x) (x)
+#endif // _WIN32
+
+	std::string FromWString(const std::wstring& fileName)
+	{
+		std::string fileName_u8;
+		StringConvert(fileName, fileName_u8);
+		return fileName_u8;
+	}
+
+	std::string GetPathRelative(const std::string& rootdir, const std::string& path)
+	{
+		std::string ret = path;
+		MakePathRelative(rootdir, ret);
+		return ret;
+	}
+
 	void MakePathRelative(const std::string& rootdir, std::string& path)
 	{
 		if (rootdir.empty() || path.empty())
@@ -658,131 +1246,98 @@ namespace wi::helper
 			return;
 		}
 
-#ifdef PLATFORM_UWP
-
-		size_t found = path.rfind(rootdir);
-		if (found != std::string::npos)
-		{
-			path = path.substr(found + rootdir.length());
-		}
-
-#else
-
-		std::filesystem::path filepath = path;
+		std::filesystem::path filepath = ToNativeString(path);
 		if (filepath.is_absolute())
 		{
-			std::filesystem::path rootpath = rootdir;
-			std::filesystem::path relative = std::filesystem::relative(path, rootdir);
+			std::filesystem::path rootpath = ToNativeString(rootdir);
+			// Non-throwing: a path on a drive that is not ready (empty card reader) must not throw, the empty result falls back below
+			std::error_code ec;
+			std::filesystem::path relative = std::filesystem::relative(filepath, rootpath, ec);
 			if (!relative.empty())
 			{
-				path = relative.string();
+				StringConvert(relative.generic_wstring(), path);
+			}
+			else
+			{
+				path = GetFileNameFromPath(path); // force it to be in relative format, if this happened then it could mean path is absolute but relative couldn't be resolved (drive letter change)
 			}
 		}
-
-#endif // PLATFORM_UWP
 
 	}
 
 	void MakePathAbsolute(std::string& path)
 	{
-		std::filesystem::path filepath = path;
-		std::filesystem::path absolute = std::filesystem::absolute(path);
+		std::filesystem::path absolute = std::filesystem::absolute(ToNativeString(path));
 		if (!absolute.empty())
 		{
-			path = absolute.string();
+			StringConvert(absolute.generic_wstring(), path);
 		}
+	}
+
+	std::string BackslashToForwardSlash(const std::string& str)
+	{
+		std::string ret = str;
+		std::replace(ret.begin(), ret.end(), '\\', '/');
+		return ret;
 	}
 
 	void DirectoryCreate(const std::string& path)
 	{
-		std::filesystem::create_directories(path);
+		std::filesystem::create_directories(ToNativeString(path));
 	}
 
-	template<template<typename T, typename A> typename vector_interface>
-	bool FileRead_Impl(const std::string& fileName, vector_interface<uint8_t, std::allocator<uint8_t>>& data)
+	size_t FileSize(const std::string& fileName)
 	{
-#ifndef PLATFORM_UWP
-#ifdef SDL_FILESYSTEM_UNIX
-		std::string filepath = fileName;
-		std::replace(filepath.begin(), filepath.end(), '\\', '/');
-		std::ifstream file(filepath, std::ios::binary | std::ios::ate);
+#ifdef _WIN32
+		std::ifstream file(ToNativeString(fileName), std::ios::binary | std::ios::ate);
 #else
-		std::ifstream file(fileName, std::ios::binary | std::ios::ate);
-#endif // SDL_FILESYSTEM_UNIX
+		std::string filepath = fileName;
+		std::replace(filepath.begin(), filepath.end(), '\\', '/'); // Linux cannot handle backslash in file path, need to convert it to forward slash
+		std::ifstream file(filepath, std::ios::binary | std::ios::ate);
+#endif // PLATFORM_LINUX || PLATFORM_PS5
+
 		if (file.is_open())
 		{
 			size_t dataSize = (size_t)file.tellg();
-			file.seekg(0, file.beg);
+			file.close();
+			return dataSize;
+		}
+		return 0;
+	}
+
+	template<template<typename T, typename A> typename vector_interface>
+	bool FileRead_Impl(const std::string& fileName, vector_interface<uint8_t, std::allocator<uint8_t>>& data, size_t max_read, size_t offset)
+	{
+#ifdef _WIN32
+		std::ifstream file(ToNativeString(fileName), std::ios::binary | std::ios::ate);
+#else
+		std::string filepath = fileName;
+		std::replace(filepath.begin(), filepath.end(), '\\', '/'); // Linux cannot handle backslash in file path, need to convert it to forward slash
+		std::ifstream file(filepath, std::ios::binary | std::ios::ate);
+#endif // PLATFORM_LINUX || PLATFORM_PS5
+
+		if (file.is_open())
+		{
+			size_t dataSize = (size_t)file.tellg() - offset;
+			dataSize = std::min(dataSize, max_read);
+			file.seekg((std::streampos)offset);
 			data.resize(dataSize);
 			file.read((char*)data.data(), dataSize);
 			file.close();
 			return true;
 		}
-#else
-		using namespace winrt::Windows::Storage;
-		using namespace winrt::Windows::Storage::Streams;
-		using namespace winrt::Windows::Foundation;
-		std::wstring wstr;
-		std::filesystem::path filepath = fileName;
-		filepath = std::filesystem::absolute(filepath);
-		StringConvert(filepath.string(), wstr);
-		bool success = false;
-
-		auto async_helper = [&]() -> IAsyncAction {
-			try
-			{
-				auto file = co_await StorageFile::GetFileFromPathAsync(wstr);
-				auto buffer = co_await FileIO::ReadBufferAsync(file);
-				auto reader = DataReader::FromBuffer(buffer);
-				auto size = buffer.Length();
-				data.resize((size_t)size);
-				for (auto& x : data)
-				{
-					x = reader.ReadByte();
-				}
-				success = true;
-			}
-			catch (winrt::hresult_error const& ex)
-			{
-				switch (ex.code())
-				{
-				case E_ACCESSDENIED:
-					wi::backlog::post("Opening file failed: " + fileName + " | Reason: Permission Denied!");
-					break;
-				default:
-					break;
-				}
-			}
-
-		};
-
-		if (winrt::impl::is_sta_thread())
-		{
-			std::thread([&] { async_helper().get(); }).join(); // can't block coroutine from ui thread
-		}
-		else
-		{
-			async_helper().get();
-		}
-
-		if (success)
-		{
-			return true;
-		}
-
-#endif // PLATFORM_UWP
 
 		wi::backlog::post("File not found: " + fileName, wi::backlog::LogLevel::Warning);
 		return false;
 	}
-	bool FileRead(const std::string& fileName, wi::vector<uint8_t>& data)
+	bool FileRead(const std::string& fileName, wi::vector<uint8_t>& data, size_t max_read, size_t offset)
 	{
-		return FileRead_Impl(fileName, data);
+		return FileRead_Impl(fileName, data, max_read, offset);
 	}
 #if WI_VECTOR_TYPE
-	bool FileRead(const std::string& fileName, std::vector<uint8_t>& data)
+	bool FileRead(const std::string& fileName, std::vector<uint8_t>& data, size_t max_read, size_t offset)
 	{
-		return FileRead_Impl(fileName, data);
+		return FileRead_Impl(fileName, data, max_read, offset);
 	}
 #endif // WI_VECTOR_TYPE
 
@@ -793,153 +1348,144 @@ namespace wi::helper
 			return false;
 		}
 
-#ifndef PLATFORM_UWP
-		std::ofstream file(fileName, std::ios::binary | std::ios::trunc);
+		std::ofstream file(ToNativeString(fileName), std::ios::binary | std::ios::trunc);
 		if (file.is_open())
 		{
 			file.write((const char*)data, (std::streamsize)size);
 			file.close();
 			return true;
 		}
-#else
-
-		using namespace winrt::Windows::Storage;
-		using namespace winrt::Windows::Storage::Streams;
-		using namespace winrt::Windows::Foundation;
-		std::wstring wstr;
-		std::filesystem::path filepath = fileName;
-		filepath = std::filesystem::absolute(filepath);
-		StringConvert(filepath.string(), wstr);
-
-		CREATEFILE2_EXTENDED_PARAMETERS params = {};
-		params.dwSize = (DWORD)size;
-		params.dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
-		HANDLE filehandle = CreateFile2FromAppW(wstr.c_str(), GENERIC_READ | GENERIC_WRITE, 0, CREATE_ALWAYS, &params);
-		assert(filehandle);
-		CloseHandle(filehandle);
-
-		bool success = false;
-		auto async_helper = [&]() -> IAsyncAction {
-			try
-			{
-				auto file = co_await StorageFile::GetFileFromPathAsync(wstr);
-				winrt::array_view<const uint8_t> dataarray(data, (winrt::array_view<const uint8_t>::size_type)size);
-				co_await FileIO::WriteBytesAsync(file, dataarray);
-				success = true;
-			}
-			catch (winrt::hresult_error const& ex)
-			{
-				switch (ex.code())
-				{
-				case E_ACCESSDENIED:
-					wi::backlog::post("Opening file failed: " + fileName + " | Reason: Permission Denied!");
-					break;
-				default:
-					break;
-				}
-			}
-
-		};
-
-		if (winrt::impl::is_sta_thread())
-		{
-			std::thread([&] { async_helper().get(); }).join(); // can't block coroutine from ui thread
-		}
-		else
-		{
-			async_helper().get();
-		}
-
-		if (success)
-		{
-			return true;
-		}
-#endif // PLATFORM_UWP
 
 		return false;
 	}
 
 	bool FileExists(const std::string& fileName)
 	{
-#ifndef PLATFORM_UWP
-		bool exists = std::filesystem::exists(fileName);
+		bool exists = std::filesystem::exists(ToNativeString(fileName));
 		return exists;
-#else
-		using namespace winrt::Windows::Storage;
-		using namespace winrt::Windows::Storage::Streams;
-		using namespace winrt::Windows::Foundation;
-		std::wstring wstr;
-		std::filesystem::path filepath = fileName;
-		filepath = std::filesystem::absolute(filepath);
-		StringConvert(filepath.string(), wstr);
-		bool success = false;
+	}
 
-		auto async_helper = [&]() -> IAsyncAction {
-			try
-			{
-				auto file = co_await StorageFile::GetFileFromPathAsync(wstr);
-				success = true;
-			}
-			catch (winrt::hresult_error const& ex)
-			{
-				switch (ex.code())
-				{
-				case E_ACCESSDENIED:
-					wi::backlog::post("Opening file failed: " + fileName + " | Reason: Permission Denied!");
-					break;
-				default:
-					break;
-				}
-			}
+	bool DirectoryExists(const std::string& fileName)
+	{
+		bool exists = std::filesystem::exists(ToNativeString(fileName));
+		return exists;
+	}
 
-		};
+	uint64_t FileTimestamp(const std::string& fileName)
+	{
+		if (!FileExists(fileName))
+			return 0;
+		auto tim = std::filesystem::last_write_time(ToNativeString(fileName));
+		return std::chrono::duration_cast<std::chrono::duration<uint64_t>>(tim.time_since_epoch()).count();
+	}
 
-		if (winrt::impl::is_sta_thread())
-		{
-			std::thread([&] { async_helper().get(); }).join(); // can't block coroutine from ui thread
-		}
-		else
-		{
-			async_helper().get();
-		}
-
-		return success;
-#endif // PLATFORM_UWP
+	bool FileCopy(const std::string& filename_src, const std::string& filename_dst)
+	{
+		return std::filesystem::copy_file(ToNativeString(filename_src), ToNativeString(filename_dst), std::filesystem::copy_options::overwrite_existing);
 	}
 
 	std::string GetTempDirectoryPath()
 	{
+#if defined(PLATFORM_XBOX) || defined(PLATFORM_PS5)
+		return "";
+#else
 		auto path = std::filesystem::temp_directory_path();
-		return path.string();
+		return FromWString(path.generic_wstring());
+#endif // PLATFORM_XBOX || PLATFORM_PS5
+	}
+
+	std::string GetCacheDirectoryPath()
+	{
+#ifdef PLATFORM_LINUX
+		const char* xdg_cache = std::getenv("XDG_CACHE_HOME");
+		if (xdg_cache == nullptr || *xdg_cache == '\0') {
+			const char* home = std::getenv("HOME");
+			if (home != nullptr) {
+				return std::string(home) + "/.cache";
+			} else {
+				// shouldn't happen, just to be safe
+				return GetTempDirectoryPath();
+			}
+		} else {
+			return xdg_cache;
+		}
+#else
+		return GetTempDirectoryPath();
+#endif
 	}
 
 	std::string GetCurrentPath()
 	{
+#ifdef PLATFORM_PS5
+		return "/app0";
+#elif defined(__APPLE__)
+		return wi::apple::GetResourcePath();
+#else
 		auto path = std::filesystem::current_path();
-		return path.string();
+		return FromWString(path.generic_wstring());
+#endif // PLATFORM_PS5
 	}
 
-	void FileDialog(const FileDialogParams& params, std::function<void(std::string fileName)> onSuccess)
+	std::string GetExecutablePath()
 	{
-#ifdef _WIN32
-#ifndef PLATFORM_UWP
+#if defined(_WIN32)
+		wchar_t wstr[1024] = {};
+		GetModuleFileName(NULL, wstr, arraysize(wstr));
+		char str[1024] = {};
+		StringConvert(wstr, str, arraysize(str));
+		return str;
+#elif defined(__FREEBSD__)
+		int name[] = { CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1 };
+		char str[MAXPATHLEN] = {};
+		size_t length;
+		int error = sysctl(name, 4, str, &length, NULL, 0);
+		if (error < 0 || length <= 1) {
+			// sysctl failed
+			return std::string();
+		}
+		return std::string(str, length);
+#elif defined(__APPLE__)
+		return wi::apple::GetExecutablePath();
+#else
+		return std::filesystem::canonical("/proc/self/exe").string();
+#endif // _WIN32
+	}
 
+	std::string GetSaveDataPath()
+	{
+#if defined(__APPLE__)
+		return wi::apple::GetApplicationSupportPath();
+#elif defined(__SCE__)
+		return "/savedata0";
+#elif _WIN32
+		PWSTR pathTmp = NULL;
+		HRESULT hr = SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, NULL, &pathTmp);
+		if (SUCCEEDED(hr))
+		{
+			int size_needed = WideCharToMultiByte(CP_UTF8, 0, pathTmp, -1, NULL, 0, NULL, NULL);
+			std::string safePath(size_needed - 1, 0);
+			WideCharToMultiByte(CP_UTF8, 0, pathTmp, -1, &safePath[0], size_needed, NULL, NULL);
+			CoTaskMemFree(pathTmp);
+			return safePath;
+		}
+		CoTaskMemFree(pathTmp);
+		return "";
+#else
+		return GetCurrentPath();
+#endif
+	}
+
+	void FileDialog(const FileDialogParams& params, const std::function<void(std::string fileName)>& onSuccess, const std::function<void()>& onFailure)
+	{
+#ifdef PLATFORM_WINDOWS_DESKTOP
 		std::thread([=] {
 
-			char szFile[256];
+			wchar_t szFile[4096] = {};
 
-			OPENFILENAMEA ofn;
-			ZeroMemory(&ofn, sizeof(ofn));
+			OPENFILENAME ofn = {};
 			ofn.lStructSize = sizeof(ofn);
-			ofn.hwndOwner = nullptr;
 			ofn.lpstrFile = szFile;
-			// Set lpstrFile[0] to '\0' so that GetOpenFileName does not 
-			// use the contents of szFile to initialize itself.
-			ofn.lpstrFile[0] = '\0';
-			ofn.nMaxFile = sizeof(szFile);
-			ofn.lpstrFileTitle = NULL;
-			ofn.nMaxFileTitle = 0;
-			ofn.lpstrInitialDir = NULL;
+			ofn.nMaxFile = arraysize(szFile);
 			ofn.nFilterIndex = 1;
 
 			// Slightly convoluted way to create the filter.
@@ -947,7 +1493,7 @@ namespace wi::helper
 			//	Second string is extensions, each separated by ';' and at the end of all, a '\0'
 			//	Then the whole container string is closed with an other '\0'
 			//		For example: "model files\0*.model;*.obj;\0"  <-- this string literal has "model files" as description and two accepted extensions "model" and "obj"
-			wi::vector<char> filter;
+			wi::vector<wchar_t> filter;
 			filter.reserve(256);
 			{
 				for (auto& x : params.description)
@@ -977,108 +1523,57 @@ namespace wi::helper
 			{
 			case FileDialogParams::OPEN:
 				ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+				ofn.Flags |= OFN_EXPLORER;
 				ofn.Flags |= OFN_NOCHANGEDIR;
-				ok = GetOpenFileNameA(&ofn) == TRUE;
+				if (params.multiselect)
+				{
+					ofn.Flags |= OFN_ALLOWMULTISELECT;
+				}
+				ok = GetOpenFileName(&ofn) == TRUE;
 				break;
 			case FileDialogParams::SAVE:
 				ofn.Flags = OFN_OVERWRITEPROMPT;
 				ofn.Flags |= OFN_NOCHANGEDIR;
-				ok = GetSaveFileNameA(&ofn) == TRUE;
+				ok = GetSaveFileName(&ofn) == TRUE;
 				break;
 			}
 
 			if (ok)
 			{
-				onSuccess(ofn.lpstrFile);
+				const wchar_t* p = szFile;
+				std::wstring directory = p;
+				p += directory.length() + 1;
+				if (*p == L'\0')
+				{
+					// Single file
+					std::string result_filename;
+					StringConvert(directory, result_filename);
+					onSuccess(BackslashToForwardSlash(result_filename));
+				}
+				else
+				{
+					// Multiple files
+					while (*p)
+					{
+						std::wstring fullPath = directory + L"\\" + p;
+						p += wcslen(p) + 1;
+						std::string result_filename;
+						StringConvert(fullPath, result_filename);
+						onSuccess(BackslashToForwardSlash(result_filename));
+					}
+				}
+			} else {
+				if (onFailure) onFailure();
 			}
 
 			}).detach();
+#endif // PLATFORM_WINDOWS_DESKTOP
 
-#else
-		auto filedialoghelper = [](FileDialogParams params, std::function<void(std::string fileName)> onSuccess) -> winrt::fire_and_forget {
-
-			using namespace winrt::Windows::Storage;
-			using namespace winrt::Windows::Storage::Pickers;
-			using namespace winrt::Windows::Storage::AccessCache;
-
-			switch (params.type)
-			{
-			default:
-			case FileDialogParams::OPEN:
-			{
-				FileOpenPicker picker;
-				picker.ViewMode(PickerViewMode::List);
-				picker.SuggestedStartLocation(PickerLocationId::Objects3D);
-
-				for (auto& x : params.extensions)
-				{
-					std::wstring wstr;
-					StringConvert(x, wstr);
-					wstr = L"." + wstr;
-					picker.FileTypeFilter().Append(wstr);
-				}
-
-				auto file = co_await picker.PickSingleFileAsync();
-
-				if (file)
-				{
-					auto futureaccess = StorageApplicationPermissions::FutureAccessList();
-					futureaccess.Clear();
-					futureaccess.Add(file);
-					std::wstring wstr = file.Path().data();
-					std::string str;
-					StringConvert(wstr, str);
-
-					onSuccess(str);
-				}
-			}
-			break;
-			case FileDialogParams::SAVE:
-			{
-				FileSavePicker picker;
-				picker.SuggestedStartLocation(PickerLocationId::Objects3D);
-
-				std::wstring wdesc;
-				StringConvert(params.description, wdesc);
-				winrt::Windows::Foundation::Collections::IVector<winrt::hstring> extensions{ winrt::single_threaded_vector<winrt::hstring>() };
-				for (auto& x : params.extensions)
-				{
-					std::wstring wstr;
-					StringConvert(x, wstr);
-					wstr = L"." + wstr;
-					extensions.Append(wstr);
-				}
-				picker.FileTypeChoices().Insert(wdesc, extensions);
-
-				auto file = co_await picker.PickSaveFileAsync();
-				if (file)
-				{
-					auto futureaccess = StorageApplicationPermissions::FutureAccessList();
-					futureaccess.Clear();
-					futureaccess.Add(file);
-					std::wstring wstr = file.Path().data();
-					std::string str;
-					StringConvert(wstr, str);
-					onSuccess(str);
-				}
-			}
-			break;
-			}
-		};
-		filedialoghelper(params, onSuccess);
-
-#endif // PLATFORM_UWP
-
-#else
-		if (!pfd::settings::available()) {
-			const char *message = "No dialog backend available";
-#ifdef SDL2
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
-									 "File dialog error!",
-									 message,
-									 nullptr);
-#endif
-			std::cerr << message << std::endl;
+#if defined(PLATFORM_LINUX) || defined(PLATFORM_APPLE)
+		if (!pfd::settings::available())
+		{
+			wilog_messagebox("[wi::helper::FileDialog()] No file dialog backend available! Install zenity or kdialog.");
+			return;
 		}
 
 		std::vector<std::string> extensions = {params.description, ""};
@@ -1088,45 +1583,107 @@ namespace wi::helper
 			extensions[1] += "*." + toLower(x);
 			extensions[1] += " ";
 			extensions[1] += "*." + toUpper(x);
-			if (extcount < params.extensions.size() - 1) {
+			if (extcount < params.extensions.size() - 1)
+			{
 				extensions[1] += " ";
 			}
 			extcount++;
 		}
 
 		switch (params.type) {
-			case FileDialogParams::OPEN: {
-				std::vector<std::string> selection = pfd::open_file(
-					"Open file",
-					std::filesystem::current_path().string(),
-					extensions
-				).result();
+			case FileDialogParams::OPEN:
+			{
+				pfd::opt options = pfd::opt::none;
+				if (params.multiselect)
+				{
+					options = options | pfd::opt::multiselect;
+				}
+				static std::string recent_dir_path = "";
+				std::vector<std::string> selection = pfd::open_file("Open file", recent_dir_path, extensions, options).result();
 				if (!selection.empty())
 				{
-					onSuccess(selection[0]);
+					for (auto& x : selection)
+					{
+#ifdef PLATFORM_LINUX
+						recent_dir_path = GetDirectoryFromPath(x);
+#endif
+						onSuccess(x);
+					}
+				} else {
+					if (onFailure) onFailure();
 				}
 				break;
 			}
-			case FileDialogParams::SAVE: {
-				std::string destination = pfd::save_file(
-					"Save file",
-					std::filesystem::current_path().string(),
-					extensions
-				).result();
+			case FileDialogParams::SAVE:
+			{
+				static std::string recent_dir_path = "";
+				std::string destination = pfd::save_file("Save file", recent_dir_path, extensions).result();
 				if (!destination.empty())
 				{
+#ifdef PLATFORM_LINUX
+					recent_dir_path = GetDirectoryFromPath(destination);
+#endif
 					onSuccess(destination);
+				} else {
+					if (onFailure) onFailure();
 				}
 				break;
 			}
 		}
-#endif // _WIN32
+#endif // defined(PLATFORM_LINUX) || defined(PLATFORM_APPLE)
+	}
+
+	std::string FolderDialog(const std::string& description)
+	{
+#if !defined(__SCE__) && !defined(PLATFORM_XBOX)
+		if (!pfd::settings::available())
+		{
+			messageBox("No dialog backend available!", "Error!");
+			return "";
+		}
+		return pfd::select_folder(description).result();
+#else
+		return "";
+#endif // !defined(__SCE__) && !defined(PLATFORM_XBOX)
+	}
+
+	void GetFileNamesInDirectory(const std::string& directory, const std::function<void(std::string fileName)>& onSuccess, const std::string& filter_extension)
+	{
+		std::filesystem::path directory_path = ToNativeString(directory);
+		if (!std::filesystem::exists(directory_path))
+			return;
+
+		for (const auto& entry : std::filesystem::directory_iterator(directory_path))
+		{
+			if (entry.is_directory())
+				continue;
+			std::string filename = FromWString(entry.path().filename().generic_wstring());
+			if (filter_extension.empty() || wi::helper::toUpper(wi::helper::GetExtensionFromFileName(filename)).compare(wi::helper::toUpper(filter_extension)) == 0)
+			{
+				onSuccess(directory + filename);
+			}
+		}
+	}
+
+	void GetFolderNamesInDirectory(const std::string& directory, const std::function<void(std::string folderName)>& onSuccess)
+	{
+		std::filesystem::path directory_path = ToNativeString(directory);
+		if (!std::filesystem::exists(directory_path))
+			return;
+
+		for (const auto& entry : std::filesystem::directory_iterator(directory_path))
+		{
+			if (!entry.is_directory())
+				continue;
+			std::string filename = FromWString(entry.path().filename().generic_wstring());
+			onSuccess(directory + filename);
+		}
 	}
 
 	bool Bin2H(const uint8_t* data, size_t size, const std::string& dst_filename, const char* dataName)
 	{
 		std::string ss;
-		ss += "const uint8_t ";
+		ss += "const unsigned char ";
 		ss += dataName ;
 		ss += "[] = {";
 		for (size_t i = 0; i < size; ++i)
@@ -1141,68 +1698,325 @@ namespace wi::helper
 		return FileWrite(dst_filename, (uint8_t*)ss.c_str(), ss.length());
 	}
 
+	bool Bin2CPP(const uint8_t* data, size_t size, const std::string& dst_filename, const char* dataName)
+	{
+		std::string ss;
+		ss += "extern const unsigned char ";
+		ss += dataName;
+		ss += "[] = {";
+		for (size_t i = 0; i < size; ++i)
+		{
+			if (i % 32 == 0)
+			{
+				ss += "\n";
+			}
+			ss += std::to_string((uint32_t)data[i]) + ",";
+		}
+		ss += "\n};\n";
+		ss += "extern const unsigned long long ";
+		ss += dataName;
+		ss += "_size = sizeof(";
+		ss += dataName;
+		ss += ");";
+		return FileWrite(dst_filename, (uint8_t*)ss.c_str(), ss.length());
+	}
+
 	void StringConvert(const std::string& from, std::wstring& to)
 	{
-#ifdef _WIN32
-		int num = MultiByteToWideChar(CP_UTF8, 0, from.c_str(), -1, NULL, 0);
-		if (num > 0)
+		to.clear();
+		size_t i = 0;
+		while (i < from.size())
 		{
-			to.resize(size_t(num) - 1);
-			MultiByteToWideChar(CP_UTF8, 0, from.c_str(), -1, &to[0], num);
+			uint32_t codepoint = 0;
+			unsigned char c = from[i];
+
+			if (c < 0x80)
+			{
+				codepoint = c;
+				i += 1;
+			}
+			else if ((c & 0xE0) == 0xC0)
+			{
+				if (i + 1 >= from.size())
+					break;
+				codepoint = ((c & 0x1F) << 6) | (from[i + 1] & 0x3F);
+				i += 2;
+			}
+			else if ((c & 0xF0) == 0xE0)
+			{
+				if (i + 2 >= from.size())
+					break;
+				codepoint = ((c & 0x0F) << 12) | ((from[i + 1] & 0x3F) << 6) | (from[i + 2] & 0x3F);
+				i += 3;
+			}
+			else if ((c & 0xF8) == 0xF0)
+			{
+				if (i + 3 >= from.size())
+					break;
+				codepoint = ((c & 0x07) << 18) | ((from[i + 1] & 0x3F) << 12) | ((from[i + 2] & 0x3F) << 6) | (from[i + 3] & 0x3F);
+				i += 4;
+			}
+			else
+			{
+				++i;
+				continue;
+			}
+
+			if constexpr (sizeof(wchar_t) >= 4)
+			{
+				to += static_cast<wchar_t>(codepoint);
+			}
+			else
+			{
+				if (codepoint <= 0xFFFF)
+				{
+					to += static_cast<wchar_t>(codepoint);
+				}
+				else
+				{
+					codepoint -= 0x10000;
+					to += static_cast<wchar_t>((codepoint >> 10) + 0xD800);
+					to += static_cast<wchar_t>((codepoint & 0x3FF) + 0xDC00);
+				}
+			}
 		}
-#else
-		std::wstring_convert<std::codecvt_utf8<wchar_t>> cv;
-		to = cv.from_bytes(from);
-#endif // _WIN32
 	}
 
 	void StringConvert(const std::wstring& from, std::string& to)
 	{
-#ifdef _WIN32
-		int num = WideCharToMultiByte(CP_UTF8, 0, from.c_str(), -1, NULL, 0, NULL, NULL);
-		if (num > 0)
+		to.clear();
+		for (size_t i = 0; i < from.size(); ++i)
 		{
-			to.resize(size_t(num) - 1);
-			WideCharToMultiByte(CP_UTF8, 0, from.c_str(), -1, &to[0], num, NULL, NULL);
+			uint32_t codepoint = 0;
+			wchar_t wc = from[i];
+
+			if constexpr (sizeof(wchar_t) >= 4)
+			{
+				codepoint = static_cast<uint32_t>(wc);
+			}
+			else
+			{
+				if (wc >= 0xD800 && wc <= 0xDBFF)
+				{
+					if (i + 1 < from.size())
+					{
+						wchar_t wc_low = from[i + 1];
+						if (wc_low >= 0xDC00 && wc_low <= 0xDFFF)
+						{
+							codepoint = ((static_cast<uint32_t>(wc - 0xD800) << 10) | (static_cast<uint32_t>(wc_low - 0xDC00))) + 0x10000;
+							++i;
+						}
+					}
+				}
+				else
+				{
+					codepoint = static_cast<uint32_t>(wc);
+				}
+			}
+
+			if (codepoint <= 0x7F)
+			{
+				to += static_cast<char>(codepoint);
+			}
+			else if (codepoint <= 0x7FF)
+			{
+				to += static_cast<char>(0xC0 | ((codepoint >> 6) & 0x1F));
+				to += static_cast<char>(0x80 | (codepoint & 0x3F));
+			}
+			else if (codepoint <= 0xFFFF)
+			{
+				to += static_cast<char>(0xE0 | ((codepoint >> 12) & 0x0F));
+				to += static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+				to += static_cast<char>(0x80 | (codepoint & 0x3F));
+			}
+			else if (codepoint <= 0x10FFFF)
+			{
+				to += static_cast<char>(0xF0 | ((codepoint >> 18) & 0x07));
+				to += static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F));
+				to += static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+				to += static_cast<char>(0x80 | (codepoint & 0x3F));
+			}
 		}
+	}
+
+	int StringConvert(const char* from, wchar_t* to, int dest_size_in_characters)
+	{
+		if (!from || !to || dest_size_in_characters <= 0)
+			return 0;
+
+		const unsigned char* src = reinterpret_cast<const unsigned char*>(from);
+		int written = 0;
+
+		while (*src && written < dest_size_in_characters - 1)
+		{
+			uint32_t codepoint = 0;
+			unsigned char c = *src;
+
+			if (c < 0x80)
+			{
+				codepoint = c;
+				++src;
+			}
+			else if ((c & 0xE0) == 0xC0)
+			{
+				if (!src[1])
+					break;
+				codepoint = ((c & 0x1F) << 6) | (src[1] & 0x3F);
+				src += 2;
+			}
+			else if ((c & 0xF0) == 0xE0)
+			{
+				if (!src[1] || !src[2])
+					break;
+				codepoint = ((c & 0x0F) << 12) | ((src[1] & 0x3F) << 6) | (src[2] & 0x3F);
+				src += 3;
+			}
+			else if ((c & 0xF8) == 0xF0)
+			{
+				if (!src[1] || !src[2] || !src[3])
+					break;
+				codepoint = ((c & 0x07) << 18) | ((src[1] & 0x3F) << 12) | ((src[2] & 0x3F) << 6) | (src[3] & 0x3F);
+				src += 4;
+			}
+			else
+			{
+				++src;
+				continue;
+			}
+
+			if constexpr (sizeof(wchar_t) >= 4)
+			{
+				to[written++] = static_cast<wchar_t>(codepoint);
+			}
+			else
+			{
+				if (codepoint <= 0xFFFF)
+				{
+					to[written++] = static_cast<wchar_t>(codepoint);
+				}
+				else
+				{
+					if (written + 1 >= dest_size_in_characters - 1)
+						break;
+					codepoint -= 0x10000;
+					to[written++] = static_cast<wchar_t>((codepoint >> 10) + 0xD800);
+					to[written++] = static_cast<wchar_t>((codepoint & 0x3FF) + 0xDC00);
+				}
+			}
+		}
+
+		to[written] = 0;
+		return written;
+	}
+
+	int StringConvert(const wchar_t* from, char* to, int dest_size_in_characters)
+	{
+		if (!from || !to || dest_size_in_characters <= 0)
+			return 0;
+
+		int written = 0;
+		for (int i = 0; from[i] != 0 && written < dest_size_in_characters - 1; ++i)
+		{
+			uint32_t codepoint = 0;
+			wchar_t wc = from[i];
+
+			if constexpr (sizeof(wchar_t) >= 4)
+			{
+				codepoint = static_cast<uint32_t>(wc);
+			}
+			else
+			{
+				if (wc >= 0xD800 && wc <= 0xDBFF)
+				{
+					wchar_t wc_low = from[i + 1];
+					if (wc_low >= 0xDC00 && wc_low <= 0xDFFF)
+					{
+						codepoint = ((static_cast<uint32_t>(wc - 0xD800) << 10) | (static_cast<uint32_t>(wc_low - 0xDC00))) + 0x10000;
+						++i;
+					}
+					else
+					{
+						codepoint = wc;
+					}
+				}
+				else
+				{
+					codepoint = static_cast<uint32_t>(wc);
+				}
+			}
+
+			if (codepoint <= 0x7F)
+			{
+				if (written + 1 >= dest_size_in_characters)
+					break;
+				to[written++] = static_cast<char>(codepoint);
+			}
+			else if (codepoint <= 0x7FF)
+			{
+				if (written + 2 >= dest_size_in_characters)
+					break;
+				to[written++] = static_cast<char>(0xC0 | ((codepoint >> 6) & 0x1F));
+				to[written++] = static_cast<char>(0x80 | (codepoint & 0x3F));
+			}
+			else if (codepoint <= 0xFFFF)
+			{
+				if (written + 3 >= dest_size_in_characters)
+					break;
+				to[written++] = static_cast<char>(0xE0 | ((codepoint >> 12) & 0x0F));
+				to[written++] = static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+				to[written++] = static_cast<char>(0x80 | (codepoint & 0x3F));
+			}
+			else if (codepoint <= 0x10FFFF)
+			{
+				if (written + 4 >= dest_size_in_characters)
+					break;
+				to[written++] = static_cast<char>(0xF0 | ((codepoint >> 18) & 0x07));
+				to[written++] = static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F));
+				to[written++] = static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+				to[written++] = static_cast<char>(0x80 | (codepoint & 0x3F));
+			}
+		}
+
+		if (written < dest_size_in_characters)
+			to[written] = '\0';
+
+		return written;
+	}
+
+	std::string StringRemoveTrailingWhitespaces(const std::string& str)
+	{
+		size_t found;
+		found = str.find_last_not_of(" /t");
+		if (found == std::string::npos)
+			return str;
+		return str.substr(0, found + 2);
+	}
+
+	void DebugOut(const std::string& str, DebugLevel level)
+	{
+#ifdef _WIN32
+		std::wstring wstr = ToNativeString(str);
+		OutputDebugString(wstr.c_str());
 #else
-		std::wstring_convert<std::codecvt_utf8<wchar_t>> cv;
-		to = cv.to_bytes(from);
+		switch (level)
+		{
+		default:
+		case DebugLevel::Normal:
+			std::cout << str;
+			std::flush(std::cout);
+			break;
+		case DebugLevel::Warning:
+			std::clog << str;
+			std::flush(std::clog);
+			break;
+		case DebugLevel::Error:
+			std::cerr << str;
+			std::flush(std::cerr);
+			break;
+	}
 #endif // _WIN32
 	}
 
-	int StringConvert(const char* from, wchar_t* to)
-	{
-#ifdef _WIN32
-		int num = MultiByteToWideChar(CP_UTF8, 0, from, -1, NULL, 0);
-		if (num > 0)
-		{
-			MultiByteToWideChar(CP_UTF8, 0, from, -1, &to[0], num);
-		}
-		return num;
-#else
-		std::wstring_convert<std::codecvt_utf8<wchar_t>> cv;
-		std::memcpy(to, cv.from_bytes(from).c_str(), cv.converted());
-		return (int)cv.converted();
-#endif // _WIN32
-	}
-
-	int StringConvert(const wchar_t* from, char* to)
-	{
-#ifdef _WIN32
-		int num = WideCharToMultiByte(CP_UTF8, 0, from, -1, NULL, 0, NULL, NULL);
-		if (num > 0)
-		{
-			WideCharToMultiByte(CP_UTF8, 0, from, -1, &to[0], num, NULL, NULL);
-		}
-		return num;
-#else
-		std::wstring_convert<std::codecvt_utf8<wchar_t>> cv;
-		std::memcpy(to, cv.to_bytes(from).c_str(), cv.converted());
-		return (int)cv.converted();
-#endif // _WIN32
-	}
-	
 	void Sleep(float milliseconds)
 	{
 		std::this_thread::sleep_for(std::chrono::milliseconds((int)milliseconds));
@@ -1210,25 +2024,31 @@ namespace wi::helper
 
 	void Spin(float milliseconds)
 	{
-		milliseconds /= 1000.0f;
-		std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
-		double ms = 0;
-		while (ms < milliseconds)
+		const std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
+		const double seconds = double(milliseconds) / 1000.0;
+		while (std::chrono::duration_cast<std::chrono::duration<double>>(std::chrono::high_resolution_clock::now() - t1).count() < seconds);
+	}
+
+	void QuickSleep(float milliseconds)
+	{
+		const std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
+		const double seconds = double(milliseconds) / 1000.0;
+		const int sleep_millisec_accuracy = 1;
+		const double sleep_sec_accuracy = double(sleep_millisec_accuracy) / 1000.0;
+		while (std::chrono::duration_cast<std::chrono::duration<double>>(std::chrono::high_resolution_clock::now() - t1).count() < seconds)
 		{
-			std::chrono::high_resolution_clock::time_point t2 = std::chrono::high_resolution_clock::now();
-			std::chrono::duration<double> time_span = std::chrono::duration_cast<std::chrono::duration<double>>(t2 - t1);
-			ms = time_span.count();
+			if (seconds - (std::chrono::high_resolution_clock::now() - t1).count() > sleep_sec_accuracy)
+			{
+				std::this_thread::sleep_for(std::chrono::milliseconds(sleep_millisec_accuracy));
+			}
 		}
 	}
 
 	void OpenUrl(const std::string& url)
 	{
-#ifdef PLATFORM_UWP
-		winrt::Windows::System::Launcher::LaunchUriAsync(winrt::Windows::Foundation::Uri(winrt::to_hstring(url)));
-#endif // PLATFORM_UWP
 
 #ifdef PLATFORM_WINDOWS_DESKTOP
-		std::string op = "start " + url;
+		std::string op = "start \"\" \"" + url + "\"";
 		int status = system(op.c_str());
 		wi::backlog::post("wi::helper::OpenUrl(" + url + ") returned status: " + std::to_string(status));
 		return;
@@ -1240,7 +2060,328 @@ namespace wi::helper
 		wi::backlog::post("wi::helper::OpenUrl(" + url + ") returned status: " + std::to_string(status));
 		return;
 #endif // PLATFORM_WINDOWS_DESKTOP
+		
+#ifdef __APPLE__
+		wi::apple::OpenUrl(url.c_str());
+		return;
+#endif // __APPLE__
 
 		wi::backlog::post("wi::helper::OpenUrl(" + url + "): not implemented for this operating system!", wi::backlog::LogLevel::Warning);
+	}
+
+	MemoryUsage GetMemoryUsage()
+{
+		MemoryUsage mem;
+#if defined(_WIN32)
+		// https://stackoverflow.com/questions/63166/how-to-determine-cpu-and-memory-consumption-from-inside-a-process
+		MEMORYSTATUSEX memInfo = {};
+		memInfo.dwLength = sizeof(MEMORYSTATUSEX);
+		BOOL ret = GlobalMemoryStatusEx(&memInfo);
+		assert(ret);
+		mem.total_physical = memInfo.ullTotalPhys;
+		mem.total_virtual = memInfo.ullTotalVirtual;
+		
+		PROCESS_MEMORY_COUNTERS_EX pmc = {};
+		GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc));
+		mem.process_physical = pmc.WorkingSetSize;
+		mem.process_virtual = pmc.PrivateUsage;
+#elif defined(__FREEBSD__)
+		static uint64_t phys_mem = 0;
+		static uint64_t swap_mem = 0;
+		size_t sysctl_buf_s;
+		int page_size = getpagesize();
+		if (phys_mem == 0)
+		{
+			int phys_mem_name[] = { CTL_HW, HW_PHYSMEM };
+			sysctl_buf_s = sizeof(phys_mem);
+			sysctl(phys_mem_name, 2, &phys_mem, &sysctl_buf_s, NULL, 0);
+			kvm_t *kvm;
+			if ((kvm = kvm_open(NULL, "/dev/null", "/dev/null", O_RDONLY, "GetMemoryUsage")) != NULL)
+			{
+				struct kvm_swap swap;
+				if (kvm_getswapinfo(kvm, &swap, 1, 0) == 0)
+					swap_mem = swap.ksw_total * page_size;
+				kvm_close(kvm);
+			}
+		}
+		mem.total_physical = phys_mem;
+		mem.total_virtual = swap_mem;
+		struct kinfo_proc kinfo;
+		int proc_name[] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid() };
+		sysctl_buf_s = sizeof(struct kinfo_proc);
+		if (sysctl(proc_name, 4, &kinfo, &sysctl_buf_s, NULL, 0) == 0)
+		{
+			mem.process_physical = kinfo.ki_rssize * page_size;
+		}
+#elif defined(PLATFORM_LINUX)
+		struct sysinfo info;
+		constexpr int PAGE_SIZE = 4096;
+		if (sysinfo(&info) == 0)
+		{
+			unsigned long phys = info.totalram - info.totalswap;
+			mem.total_physical = phys * info.mem_unit;
+			mem.total_virtual = info.totalswap * info.mem_unit;
+		}
+		unsigned long l;
+		std::ifstream statm("/proc/self/statm");
+		// Format of statm:
+		// size resident shared trs lrs drs dt
+		// see linux Documentation/filesystems/proc.rst
+		
+		// we want "resident", the second number, so just read the first one
+		// and discard it
+		statm >> l;
+		statm >> l;
+		mem.process_physical = l * PAGE_SIZE;
+		// there doesn't seem to be an easy way to determine
+		// swapped out memory
+#elif defined(PLATFORM_PS5)
+		wi::graphics::GraphicsDevice::MemoryUsage gpumem = wi::graphics::GetDevice()->GetMemoryUsage();
+		mem.process_physical = mem.total_physical = gpumem.budget;
+		mem.process_virtual = mem.total_virtual = gpumem.usage;
+#elif defined(__APPLE__)
+		task_vm_info_data_t vm_info;
+		mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+		kern_return_t result = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vm_info, &count);
+		if (result == KERN_SUCCESS)
+		{
+			mem.process_physical = vm_info.phys_footprint;
+			mem.process_virtual = vm_info.virtual_size;
+		}
+		{
+			int mib[2] = { CTL_HW, HW_MEMSIZE };
+			uint64_t ram_bytes = 0;
+			size_t len = sizeof(ram_bytes);
+			if (sysctl(mib, 2, &ram_bytes, &len, nullptr, 0) == 0)
+			{
+				mem.total_physical = ram_bytes;
+			}
+		}
+#endif // defined(_WIN32)
+		return mem;
+	}
+
+	std::string GetMemorySizeText(size_t sizeInBytes)
+	{
+		std::stringstream ss;
+		ss << std::fixed << std::setprecision(1);
+		if (sizeInBytes >= 1024ull * 1024ull * 1024ull)
+		{
+			ss << (double)sizeInBytes / 1024.0 / 1024.0 / 1024.0 << " GB";
+		}
+		else if (sizeInBytes >= 1024ull * 1024ull)
+		{
+			ss << (double)sizeInBytes / 1024.0 / 1024.0 << " MB";
+		}
+		else if (sizeInBytes >= 1024ull)
+		{
+			ss << (double)sizeInBytes / 1024.0 << " KB";
+		}
+		else
+		{
+			ss << sizeInBytes << " bytes";
+		}
+		return ss.str();
+	}
+
+	std::string GetTimerDurationText(float timerSeconds)
+	{
+		std::stringstream ss;
+		ss << std::fixed << std::setprecision(1);
+		if (timerSeconds < 1)
+		{
+			ss << timerSeconds * 1000 << " ms";
+		}
+		else if (timerSeconds < 60)
+		{
+			ss << timerSeconds << " sec";
+		}
+		else if (timerSeconds < 60 * 60)
+		{
+			ss << timerSeconds / 60 << " min";
+		}
+		else
+		{
+			ss << timerSeconds / 60 / 60 << " hours";
+		}
+		return ss.str();
+	}
+
+	std::string GetPlatformErrorString(wi::platform::error_type code)
+	{
+		std::string str;
+
+#ifdef PLATFORM_WINDOWS_DESKTOP
+		_com_error err(code);
+		LPCTSTR errMsg = err.ErrorMessage();
+		wchar_t wtext[1024] = {};
+		_snwprintf_s(wtext, arraysize(wtext), arraysize(wtext), L"0x%08x (%s)", code, errMsg);
+		char text[1024] = {};
+		wi::helper::StringConvert(wtext, text, arraysize(text));
+		str = text;
+#endif // _WIN32
+
+#ifdef PLATFORM_XBOX
+		char text[1024] = {};
+		snprintf(text, arraysize(text), "HRESULT error: 0x%08x", code);
+		str = text;
+#endif // PLATFORM_XBOX
+
+		return str;
+	}
+
+	bool Compress(const uint8_t* src_data, size_t src_size, wi::vector<uint8_t>& dst_data, int level)
+	{
+		dst_data.resize(ZSTD_compressBound(src_size));
+		size_t res = ZSTD_compress(dst_data.data(), dst_data.size(), src_data, src_size, level);
+		if (ZSTD_isError(res))
+			return false;
+		dst_data.resize(res);
+		return true;
+	}
+
+	bool Decompress(const uint8_t* src_data, size_t src_size, wi::vector<uint8_t>& dst_data)
+	{
+		size_t res = ZSTD_getFrameContentSize(src_data, src_size);
+		if (ZSTD_isError(res))
+			return false;
+		dst_data.resize(res);
+		res = ZSTD_decompress(dst_data.data(), dst_data.size(), src_data, src_size);
+		return ZSTD_isError(res) == 0;
+	}
+
+	size_t HashByteData(const uint8_t* data, size_t size)
+	{
+		size_t hash = 0;
+		for (size_t i = 0; i < size; ++i)
+		{
+			hash_combine(hash, data[i]);
+		}
+		return hash;
+	}
+
+	std::wstring GetClipboardText()
+	{
+		std::wstring wstr;
+
+#ifdef PLATFORM_WINDOWS_DESKTOP
+		if (!::OpenClipboard(NULL))
+			return wstr;
+		HANDLE wbuf_handle = ::GetClipboardData(CF_UNICODETEXT);
+		if (wbuf_handle == NULL)
+		{
+			::CloseClipboard();
+			return wstr;
+		}
+		if (const WCHAR* wbuf_global = (const WCHAR*)::GlobalLock(wbuf_handle))
+		{
+			wstr = wbuf_global;
+		}
+		::GlobalUnlock(wbuf_handle);
+		::CloseClipboard();
+#elif defined(SDL2) || defined(SDL3)
+		char* str = SDL_GetClipboardText();
+		StringConvert(str, wstr);
+		SDL_free(str);
+#elif defined(__APPLE__)
+		std::string str = wi::apple::GetClipboardText();
+		StringConvert(str, wstr);
+#endif // PLATFORM_WINDOWS_DESKTOP
+
+		return wstr;
+	}
+
+	void SetClipboardText(const std::wstring& wstr)
+	{
+#ifdef PLATFORM_WINDOWS_DESKTOP
+		if (!::OpenClipboard(NULL))
+			return;
+		const int wbuf_length = (int)wstr.length() + 1;
+		HGLOBAL wbuf_handle = ::GlobalAlloc(GMEM_MOVEABLE, (SIZE_T)wbuf_length * sizeof(WCHAR));
+		if (wbuf_handle == NULL)
+		{
+			::CloseClipboard();
+			return;
+		}
+		WCHAR* wbuf_global = (WCHAR*)::GlobalLock(wbuf_handle);
+		std::memcpy(wbuf_global, wstr.c_str(), wbuf_length * sizeof(wchar_t));
+		::GlobalUnlock(wbuf_handle);
+		::EmptyClipboard();
+		if (::SetClipboardData(CF_UNICODETEXT, wbuf_handle) == NULL)
+			::GlobalFree(wbuf_handle);
+		::CloseClipboard();
+#elif defined(SDL2) || defined(SDL3)
+		std::string str;
+		StringConvert(wstr, str);
+		SDL_SetClipboardText(str.c_str());
+#elif defined(__APPLE__)
+		std::string str;
+		StringConvert(wstr, str);
+		wi::apple::SetClipboardText(str.c_str());
+#endif // PLATFORM_WINDOWS_DESKTOP
+	}
+
+	void SetClipboardImage(const wi::graphics::Texture& texture)
+	{
+#ifdef PLATFORM_WINDOWS_DESKTOP
+		wi::vector<uint8_t> rgba;
+		if (!saveTextureToMemoryFile(texture, "RAW", rgba)) // "RAW" file format saves it to uncompressed RGBA bytes
+			return;
+
+		const size_t row_stride = wi::graphics::ComputeTextureMipRowPitch(texture.desc, 0);
+		const size_t image_size = row_stride * texture.desc.height;
+		const size_t total_size = sizeof(BITMAPINFOHEADER) + image_size;
+		HGLOBAL hClipboardData = GlobalAlloc(GMEM_MOVEABLE, total_size);
+		if (!hClipboardData)
+			return;
+
+		void* pData = GlobalLock(hClipboardData);
+		if (pData == nullptr)
+			return;
+
+		// Write standard DIB header chunk
+		BITMAPINFOHEADER* pHeader = (BITMAPINFOHEADER*)pData;
+		pHeader->biSize = sizeof(BITMAPINFOHEADER);
+		pHeader->biWidth = texture.desc.width;
+		pHeader->biHeight = texture.desc.height;
+		pHeader->biPlanes = 1;
+		pHeader->biBitCount = 32;
+		pHeader->biCompression = BI_RGB;
+		pHeader->biSizeImage = (DWORD)image_size;
+
+		// Clipboard DIB stores pixels bottom-to-top, flip vertical rows directly into memory block
+		unsigned char* pDestPixels = (unsigned char*)pData + sizeof(BITMAPINFOHEADER);
+		for (uint32_t y = 0; y < texture.desc.height; ++y)
+		{
+			unsigned char* src_row = rgba.data() + ((texture.desc.height - 1 - y) * row_stride);
+			unsigned char* dst_row = pDestPixels + (y * row_stride);
+
+			// Reorder raw storage layer RGBA -> Clipboard BGRA channel alignment configurations
+			for (uint32_t x = 0; x < texture.desc.width; ++x)
+			{
+				dst_row[x * 4 + 0] = src_row[x * 4 + 2]; // B
+				dst_row[x * 4 + 1] = src_row[x * 4 + 1]; // G
+				dst_row[x * 4 + 2] = src_row[x * 4 + 0]; // R
+				dst_row[x * 4 + 3] = src_row[x * 4 + 3]; // A
+			}
+		}
+		GlobalUnlock(hClipboardData);
+
+		if (OpenClipboard(NULL))
+		{
+			EmptyClipboard();
+			SetClipboardData(CF_DIB, hClipboardData);
+			CloseClipboard();
+		}
+		else
+		{
+			GlobalFree(hClipboardData);
+		}
+#elif defined(__APPLE__)
+		wi::vector<uint8_t> png;
+		if (!saveTextureToMemoryFile(texture, "PNG", png))
+			return;
+		wi::apple::SetClipboardImagePNG(png.data(), png.size());
+#endif // PLATFORM_WINDOWS_DESKTOP
 	}
 }

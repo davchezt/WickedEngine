@@ -1,6 +1,4 @@
 #pragma once
-#include "WickedEngine.h"
-
 class EditorComponent;
 
 class WeatherWindow : public wi::gui::Window
@@ -9,7 +7,7 @@ class WeatherWindow : public wi::gui::Window
 public:
 	void Create(EditorComponent* editor);
 
-	void Update();
+	void UpdateData();
 
 	EditorComponent* editor = nullptr;
 
@@ -25,7 +23,7 @@ public:
 	wi::gui::CheckBox overrideFogColorCheckBox;
 	wi::gui::CheckBox heightFogCheckBox;
 	wi::gui::Slider fogStartSlider;
-	wi::gui::Slider fogEndSlider;
+	wi::gui::Slider fogDensitySlider;
 	wi::gui::Slider fogHeightStartSlider;
 	wi::gui::Slider fogHeightEndSlider;
 	wi::gui::Slider gravitySlider;
@@ -36,7 +34,16 @@ public:
 	wi::gui::Slider windRandomnessSlider;
 	wi::gui::Slider skyExposureSlider;
 	wi::gui::Slider starsSlider;
+	wi::gui::Slider skyRotationSlider;
+	wi::gui::Slider rainAmountSlider;
+	wi::gui::Slider rainLengthSlider;
+	wi::gui::Slider rainSpeedSlider;
+	wi::gui::Slider rainScaleSlider;
+	wi::gui::Slider rainSplashScaleSlider;
 	wi::gui::CheckBox realisticskyCheckBox;
+	wi::gui::CheckBox aerialperspectiveCheckBox;
+	wi::gui::CheckBox realisticskyHighQualityCheckBox;
+	wi::gui::CheckBox realisticskyReceiveShadowCheckBox;
 	wi::gui::Button skyButton;
 	wi::gui::Button colorgradingButton;
 
@@ -57,10 +64,41 @@ public:
 
 	// volumetric clouds:
 	wi::gui::CheckBox volumetricCloudsCheckBox;
-	wi::gui::CheckBox volumetricCloudsShadowsCheckBox;
-	wi::gui::Slider coverageAmountSlider;
-	wi::gui::Slider coverageMinimumSlider;
-	wi::gui::Button volumetricCloudsWeatherMapButton;
+	wi::gui::CheckBox volumetricCloudsReceiveShadowCheckBox;
+	wi::gui::CheckBox volumetricCloudsCastShadowCheckBox;
+	wi::gui::Slider cloudStartHeightSlider;
+	wi::gui::Slider cloudThicknessSlider;
+	wi::gui::Slider skewAlongWindDirectionFirstSlider;
+	wi::gui::Slider totalNoiseScaleFirstSlider;
+	wi::gui::Slider curlScaleFirstSlider;
+	wi::gui::Slider curlNoiseHeightFractionFirstSlider;
+	wi::gui::Slider curlNoiseModifierFirstSlider;
+	wi::gui::Slider detailScaleFirstSlider;
+	wi::gui::Slider detailNoiseHeightFractionFirstSlider;
+	wi::gui::Slider detailNoiseModifierFirstSlider;
+	wi::gui::Slider skewAlongCoverageWindDirectionFirstSlider;
+	wi::gui::Slider weatherScaleFirstSlider;
+	wi::gui::Slider coverageAmountFirstSlider;
+	wi::gui::Slider coverageMinimumFirstSlider;
+	wi::gui::Slider typeAmountFirstSlider;
+	wi::gui::Slider typeMinimumFirstSlider;
+	wi::gui::Slider rainAmountFirstSlider;
+	wi::gui::Slider rainMinimumFirstSlider;
+	wi::gui::TextInputField gradientSmallFirstTextFields[4];
+	wi::gui::TextInputField gradientMediumFirstTextFields[4];
+	wi::gui::TextInputField gradientLargeFirstTextFields[4];
+	wi::gui::TextInputField anvilDeformationSmallFirstTextFields[4];
+	wi::gui::TextInputField anvilDeformationMediumFirstTextFields[4];
+	wi::gui::TextInputField anvilDeformationLargeFirstTextFields[4];
+	wi::gui::Slider windSpeedFirstSlider;
+	wi::gui::Slider windAngleFirstSlider;
+	wi::gui::Slider windUpAmountFirstSlider;
+	wi::gui::Slider coverageWindSpeedFirstSlider;
+	wi::gui::Slider coverageWindAngleFirstSlider;
+	wi::gui::Slider coverageAmountSecondSlider;
+	wi::gui::Slider coverageMinimumSecondSlider;
+	wi::gui::Button volumetricCloudsWeatherMapFirstButton;
+	wi::gui::Button volumetricCloudsWeatherMapSecondButton;
 
 	wi::gui::Button preset0Button;
 	wi::gui::Button preset1Button;
@@ -68,8 +106,6 @@ public:
 	wi::gui::Button preset3Button;
 	wi::gui::Button preset4Button;
 	wi::gui::Button preset5Button;
-	wi::gui::Button eliminateCoarseCascadesButton;
-	wi::gui::Button ktxConvButton;
 
 	void ResizeLayout() override;
 };

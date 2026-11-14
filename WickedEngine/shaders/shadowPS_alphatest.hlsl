@@ -3,9 +3,23 @@
 
 void main(PixelInput input)
 {
+	ShaderMaterial material = GetMaterial();
+	
+	half alpha = 1;
+
 	[branch]
-	if (GetMaterial().textures[BASECOLORMAP].IsValid())
+	if (material.textures[BASECOLORMAP].IsValid())
 	{
-		clip(GetMaterial().textures[BASECOLORMAP].Sample(sampler_point_wrap, input.uvsets).a - GetMaterial().alphaTest);
+		alpha = material.textures[BASECOLORMAP].Sample(sampler_point_wrap, input.GetUVSets()).a;
 	}
+	
+	[branch]
+	if (material.textures[TRANSPARENCYMAP].IsValid())
+	{
+		alpha *= material.textures[TRANSPARENCYMAP].Sample(sampler_point_wrap, input.GetUVSets()).r;
+	}
+	
+	ShaderMeshInstance meshinstance = load_instance(input.GetInstanceIndex());
+	
+	clip(alpha - material.GetAlphaTest() - meshinstance.GetAlphaTest());
 }

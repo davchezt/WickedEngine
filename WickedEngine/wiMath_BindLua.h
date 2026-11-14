@@ -6,20 +6,24 @@
 
 namespace wi::lua
 {
-
 	class Vector_BindLua
 	{
 	public:
 		XMFLOAT4 data = {};
-		static const char className[];
+		inline static constexpr char className[] = "Vector";
 		static Luna<Vector_BindLua>::FunctionType methods[];
 		static Luna<Vector_BindLua>::PropertyType properties[];
 
-		Vector_BindLua();
+		Vector_BindLua() = default;
+		Vector_BindLua(const XMFLOAT2& vector);
 		Vector_BindLua(const XMFLOAT3& vector);
 		Vector_BindLua(const XMFLOAT4& vector);
 		Vector_BindLua(const XMVECTOR& vector);
 		Vector_BindLua(lua_State* L);
+
+		XMFLOAT2 GetFloat2() { return XMFLOAT2(data.x, data.y); }
+		XMFLOAT3 GetFloat3() { return XMFLOAT3(data.x, data.y, data.z); }
+		XMFLOAT4 GetFloat4() { return data; }
 
 		int GetX(lua_State* L);
 		int GetY(lua_State* L);
@@ -35,6 +39,9 @@ namespace wi::lua
 		int TransformNormal(lua_State* L);
 		int TransformCoord(lua_State* L);
 		int Length(lua_State* L);
+		int LengthSquared(lua_State* L);
+		int Distance(lua_State* L);
+		int DistanceSquared(lua_State* L);
 		int Normalize(lua_State* L);
 		int Clamp(lua_State* L);
 		int Saturate(lua_State* L);
@@ -45,15 +52,23 @@ namespace wi::lua
 		int Add(lua_State* L);
 		int Subtract(lua_State* L);
 		int Lerp(lua_State* L);
+		int Rotate(lua_State* L);
 
 
+		int QuaternionIdentity(lua_State* L);
+		int QuaternionInverse(lua_State* L);
 		int QuaternionNormalize(lua_State* L);
 		int QuaternionMultiply(lua_State* L);
 		int QuaternionFromRollPitchYaw(lua_State* L);
 		int QuaternionToRollPitchYaw(lua_State* L);
+		int QuaternionSlerp(lua_State* L);
 		int Slerp(lua_State* L);
 
+		int PlaneFromPointNormal(lua_State* L);
+		int PlaneFromPoints(lua_State* L);
+
 		int GetAngle(lua_State* L);
+		int GetAngleSigned(lua_State* L);
 
 		static void Bind();
 	};
@@ -77,11 +92,11 @@ namespace wi::lua
 	{
 	public:
 		XMFLOAT4X4 data = wi::math::IDENTITY_MATRIX;
-		static const char className[];
+		inline static constexpr char className[] = "Matrix";
 		static Luna<Matrix_BindLua>::FunctionType methods[];
 		static Luna<Matrix_BindLua>::PropertyType properties[];
 
-		Matrix_BindLua();
+		Matrix_BindLua() = default;
 		Matrix_BindLua(const XMMATRIX& matrix);
 		Matrix_BindLua(const XMFLOAT4X4& matrix);
 		Matrix_BindLua(lua_State* L);
@@ -102,6 +117,10 @@ namespace wi::lua
 		int Add(lua_State* L);
 		int Transpose(lua_State* L);
 		int Inverse(lua_State* L);
+
+		int GetForward(lua_State* L);
+		int GetUp(lua_State* L);
+		int GetRight(lua_State* L);
 
 		static void Bind();
 	};

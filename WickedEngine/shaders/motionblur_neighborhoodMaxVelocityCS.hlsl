@@ -4,15 +4,22 @@
 Texture2D<float2> tilemax : register(t0);
 Texture2D<float2> tilemin : register(t1);
 
-RWByteAddressBuffer tile_statistics : register(u0);
+RWStructuredBuffer<PostprocessTileStatistics> tile_statistics : register(u0);
 RWStructuredBuffer<uint> tiles_earlyexit : register(u1);
 RWStructuredBuffer<uint> tiles_cheap : register(u2);
 RWStructuredBuffer<uint> tiles_expensive : register(u3);
 RWTexture2D<float2> output : register(u4);
 
+static const uint tile_replicate = sqr(MOTIONBLUR_TILESIZE / POSTPROCESS_BLOCKSIZE);
+
 [numthreads(POSTPROCESS_BLOCKSIZE, POSTPROCESS_BLOCKSIZE, 1)]
 void main(uint3 DTid : SV_DispatchThreadID)
 {
+	uint2 dim;
+	output.GetDimensions(dim.x, dim.y);
+	if(any(DTid.xy >= dim))
+		return;
+
 	float max_magnitude = 0;
 	float2 max_velocity = 0;
 	float min_magnitude = 100000;
@@ -45,19 +52,19 @@ void main(uint3 DTid : SV_DispatchThreadID)
 	uint prevCount;
 	if (max_magnitude < 0.0001f)
 	{
-		tile_statistics.InterlockedAdd(TILE_STATISTICS_OFFSET_EARLYEXIT, 1, prevCount);
-		tiles_earlyexit[prevCount] = tile;
+		InterlockedAdd(tile_statistics[0].dispatch_earlyexit.ThreadGroupCountX, tile_replicate, prevCount);
+		tiles_earlyexit[prevCount / tile_replicate] = tile;
 	}
 	else if (abs(max_magnitude - min_magnitude) < 0.002f)
 	{
-		tile_statistics.InterlockedAdd(TILE_STATISTICS_OFFSET_CHEAP, 1, prevCount);
-		tiles_cheap[prevCount] = tile;
+		InterlockedAdd(tile_statistics[0].dispatch_cheap.ThreadGroupCountX, tile_replicate, prevCount);
+		tiles_cheap[prevCount / tile_replicate] = tile;
 		output[DTid.xy] = max_velocity;
 	}
 	else
 	{
-		tile_statistics.InterlockedAdd(TILE_STATISTICS_OFFSET_EXPENSIVE, 1, prevCount);
-		tiles_expensive[prevCount] = tile;
+		InterlockedAdd(tile_statistics[0].dispatch_expensive.ThreadGroupCountX, tile_replicate, prevCount);
+		tiles_expensive[prevCount / tile_replicate] = tile;
 		output[DTid.xy] = max_velocity;
 	}
 }

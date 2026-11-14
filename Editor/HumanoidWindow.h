@@ -1,6 +1,4 @@
 #pragma once
-#include "WickedEngine.h"
-
 class EditorComponent;
 
 class HumanoidWindow : public wi::gui::Window
@@ -14,8 +12,16 @@ public:
 	void RefreshBoneList();
 
 	wi::gui::Label infoLabel;
+	wi::gui::Button importAnimationsButton;
+	wi::gui::Button activateAllRagdollsButton;
+	wi::gui::ComboBox animationTesterCombo;
 	wi::gui::CheckBox lookatMouseCheckBox;
 	wi::gui::CheckBox lookatCheckBox;
+	wi::gui::ComboBox lookatEntityCombo;
+	wi::gui::CheckBox ragdollDisabledCheckBox;
+	wi::gui::CheckBox ragdollCheckBox;
+	wi::gui::CheckBox ragdoll2DCheckBox;
+	wi::gui::CheckBox capsuleShadowCheckBox;
 	wi::gui::Slider headRotMaxXSlider;
 	wi::gui::Slider headRotMaxYSlider;
 	wi::gui::Slider headRotSpeedSlider;
@@ -23,9 +29,14 @@ public:
 	wi::gui::Slider eyeRotMaxYSlider;
 	wi::gui::Slider eyeRotSpeedSlider;
 	wi::gui::Slider headSizeSlider;
+	wi::gui::Slider ragdollFatnessSlider;
+	wi::gui::Slider ragdollHeadSizeSlider;
+	wi::gui::Slider armSpacingSlider;
+	wi::gui::Slider legSpacingSlider;
 	wi::gui::TreeList boneList;
 
-	void Update(const wi::Canvas& canvas, float dt) override;
 	void ResizeLayout() override;
+
+	void UpdateHumanoids();
 };
 

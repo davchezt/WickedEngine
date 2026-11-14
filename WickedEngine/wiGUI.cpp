@@ -7,11 +7,12 @@
 #include "wiEventHandler.h"
 #include "wiFont.h"
 #include "wiImage.h"
-#include "wiTextureHelper.h"
 #include "wiBacklog.h"
 #include "wiHelper.h"
 
 #include <sstream>
+#include <iomanip> // setprecision
+#include <utility>
 
 using namespace wi::graphics;
 using namespace wi::primitive;
@@ -29,7 +30,7 @@ namespace wi::gui
 			static wi::eventhandler::Handle handle = wi::eventhandler::Subscribe(wi::eventhandler::EVENT_RELOAD_SHADERS, [this](uint64_t userdata) { LoadShaders(); });
 			LoadShaders();
 
-			wi::backlog::post("wi::gui Initialized (" + std::to_string((int)std::round(timer.elapsed())) + " ms)");
+			wilog("wi::gui Initialized (%d ms)", (int)std::round(timer.elapsed()));
 		}
 
 		void LoadShaders()
@@ -74,15 +75,17 @@ namespace wi::gui
 		uint32_t priority = 0;
 
 		focus = false;
+		bool force_disable = false;
 		for (size_t i = 0; i < widgets.size(); ++i)
 		{
 			Widget* widget = widgets[i]; // re index in loop, because widgets can be realloced while updating!
-			widget->force_disable = focus;
+			widget->force_disable = force_disable;
 			widget->Update(canvas, dt);
 			widget->force_disable = false;
 
 			if (widget->priority_change)
 			{
+				force_disable = true;
 				widget->priority_change = false;
 				widget->priority = priority++;
 			}
@@ -91,30 +94,34 @@ namespace wi::gui
 				widget->priority = ~0u;
 			}
 
-			if (widget->IsVisible() && widget->hitBox.intersects(pointerHitbox))
+			const bool visible = widget->IsVisible();
+			const WIDGETSTATE state = widget->GetState();
+
+			if (visible && widget->hitBox.intersects(pointerHitbox))
 			{
 				focus = true;
 			}
-			if (widget->GetState() > IDLE)
+			if (visible && state > IDLE)
 			{
 				focus = true;
+				force_disable = true;
 			}
 		}
 
-		//Sort only if there are priority changes
 		if (priority > 0)
 		{
-			//Use std::stable_sort instead of std::sort to preserve UI element order with equal priorities
+			// Sort only if there are priority changes
+			//	Use std::stable_sort instead of std::sort to preserve UI element order with equal priorities
 			std::stable_sort(widgets.begin(), widgets.end(), [](const Widget* a, const Widget* b) {
 				return a->priority < b->priority;
-				});
+			});
 		}
 
 		wi::profiler::EndRange(range);
 	}
 	void GUI::Render(const wi::Canvas& canvas, CommandList cmd) const
 	{
-		if (!visible)
+		if (!visible || widgets.empty())
 		{
 			return;
 		}
@@ -122,7 +129,7 @@ namespace wi::gui
 		auto range_cpu = wi::profiler::BeginRangeCPU("GUI Render");
 		auto range_gpu = wi::profiler::BeginRangeGPU("GUI Render", cmd);
 
-		Rect scissorRect;
+		wi::graphics::Rect scissorRect;
 		scissorRect.bottom = (int32_t)(canvas.GetPhysicalHeight());
 		scissorRect.left = (int32_t)(0);
 		scissorRect.right = (int32_t)(canvas.GetPhysicalWidth());
@@ -189,6 +196,26 @@ namespace wi::gui
 		}
 		if (IsTyping())
 		{
+			// When typing is active but the user clicks outside all GUI widgets,
+			//	allow the click to pass through so it can deactivate typing and reach the viewport
+			if (wi::input::Press(wi::input::MOUSE_BUTTON_LEFT) || wi::input::Press(wi::input::MOUSE_BUTTON_RIGHT))
+			{
+				const XMFLOAT4 pointer = wi::input::GetPointer();
+				const auto pointerHitbox = Hitbox2D(XMFLOAT2(pointer.x, pointer.y), XMFLOAT2(1, 1));
+				bool pointer_on_widget = false;
+				for (const auto* widget : widgets)
+				{
+					if (widget->IsVisible() && pointerHitbox.intersects(widget->hitBox))
+					{
+						pointer_on_widget = true;
+						break;
+					}
+				}
+				if (!pointer_on_widget)
+				{
+					return false;
+				}
+			}
 			return true;
 		}
 
@@ -210,6 +237,13 @@ namespace wi::gui
 			widget->SetColor(color, id);
 		}
 	}
+	void GUI::SetImage(const wi::Resource& resource, int id)
+	{
+		for (auto& widget : widgets)
+		{
+			widget->SetImage(resource, id);
+		}
+	}
 	void GUI::SetShadowColor(wi::Color color)
 	{
 		for (auto& widget : widgets)
@@ -222,6 +256,24 @@ namespace wi::gui
 		for (auto& widget : widgets)
 		{
 			widget->SetTheme(theme, id);
+		}
+	}
+	void GUI::ExportLocalization(wi::Localization& localization) const
+	{
+		wi::Localization& section = localization.GetSection("gui");
+		for (auto& widget : widgets)
+		{
+			widget->ExportLocalization(section);
+		}
+	}
+	void GUI::ImportLocalization(const wi::Localization& localization)
+	{
+		const wi::Localization* section = localization.CheckSection("gui");
+		if (section == nullptr)
+			return;
+		for (auto& widget : widgets)
+		{
+			widget->ImportLocalization(*section);
 		}
 	}
 
@@ -305,8 +357,49 @@ namespace wi::gui
 			tooltipTimer = 0;
 		}
 
+		XMFLOAT2 highlight_pos = GetPointerHighlightPos(canvas);
+		for (auto& x : sprites)
+		{
+			if (x.params.isHighlightEnabled())
+			{
+				x.params.highlight_pos = highlight_pos;
+			}
+		}
+
 		sprites[state].Update(dt);
 		font.Update(dt);
+		angular_highlight_timer += dt;
+	}
+	void Widget::Render(const wi::Canvas& canvas, wi::graphics::CommandList cmd) const
+	{
+		if (!IsVisible())
+		{
+			return;
+		}
+
+		if (angular_highlight_width > 0)
+		{
+			wi::image::Params fx;
+			fx.color = angular_highlight_color;
+			fx.pos.x = translation.x - angular_highlight_width;
+			fx.pos.y = translation.y - angular_highlight_width;
+			fx.siz.x = scale.x + angular_highlight_width * 2;
+			fx.siz.y = scale.y + angular_highlight_width * 2;
+			if (sprites[state].params.isCornerRoundingEnabled())
+			{
+				fx.enableCornerRounding();
+				fx.corners_rounding[0] = sprites[state].params.corners_rounding[0];
+				fx.corners_rounding[1] = sprites[state].params.corners_rounding[1];
+				fx.corners_rounding[2] = sprites[state].params.corners_rounding[2];
+				fx.corners_rounding[3] = sprites[state].params.corners_rounding[3];
+			}
+			fx.angular_softness_outer_angle = XM_PI * 0.6f;
+			fx.angular_softness_inner_angle = 0;
+			XMStoreFloat2(&fx.angular_softness_direction, XMVector2Normalize(XMVectorSet(std::sin(angular_highlight_timer), std::cos(angular_highlight_timer), 0, 0)));
+			fx.enableAngularSoftnessDoubleSided();
+			fx.border_soften = 0.1f;
+			wi::image::Draw(nullptr, fx, cmd);
+		}
 	}
 	void Widget::RenderTooltip(const wi::Canvas& canvas, CommandList cmd) const
 	{
@@ -373,7 +466,7 @@ namespace wi::gui
 					tooltipSprite.params.siz.y + tooltip_shadow * 2,
 					tooltip_shadow_color
 				);
-				wi::image::Draw(wi::texturehelper::getWhite(), fx, cmd);
+				wi::image::Draw(nullptr, fx, cmd);
 			}
 
 			tooltipSprite.Draw(cmd);
@@ -406,9 +499,17 @@ namespace wi::gui
 			name = value;
 		}
 	}
-	const std::string Widget::GetText() const
+	std::string Widget::GetText() const
 	{
 		return font.GetTextA();
+	}
+	std::string Widget::GetTooltip() const
+	{
+		return tooltipFont.GetTextA();
+	}
+	void Widget::SetText(const char* value)
+	{
+		font.SetText(value);
 	}
 	void Widget::SetText(const std::string& value)
 	{
@@ -455,13 +556,11 @@ namespace wi::gui
 	}
 	XMFLOAT2 Widget::GetPos() const
 	{
-		XMFLOAT3 transform_position = TransformComponent::GetPosition();
-		return *(XMFLOAT2*)&transform_position;
+		return *(XMFLOAT2*)&translation;
 	}
 	XMFLOAT2 Widget::GetSize() const
 	{
-		XMFLOAT3 transform_scale = TransformComponent::GetScale();
-		return *(XMFLOAT2*)&transform_scale;
+		return *(XMFLOAT2*)&scale;
 	}
 	WIDGETSTATE Widget::GetState() const
 	{
@@ -471,8 +570,9 @@ namespace wi::gui
 	{
 		if (enabled != val)
 		{
-			priority_change = val;
 			enabled = val;
+			if (!enabled)
+				state = IDLE;
 		}
 	}
 	bool Widget::IsEnabled() const
@@ -483,8 +583,9 @@ namespace wi::gui
 	{
 		if (visible != val)
 		{
-			priority_change |= val;
 			visible = val;
+			if (!visible)
+				state = IDLE;
 		}
 	}
 	bool Widget::IsVisible() const
@@ -509,6 +610,55 @@ namespace wi::gui
 	wi::Color Widget::GetColor() const
 	{
 		return wi::Color::fromFloat4(sprites[GetState()].params.color);
+	}
+
+	enum LOCALIZATION_ID
+	{
+		LOCALIZATION_ID_TEXT,
+		LOCALIZATION_ID_TOOLTIP,
+	};
+	void Widget::ExportLocalization(wi::Localization& localization) const
+	{
+		if (!IsLocalizationEnabled())
+			return;
+
+		if (font.GetText().empty() && tooltipFont.GetText().empty())
+			return;
+
+		wi::Localization& section = localization.GetSection(GetName());
+		section.SetSectionHint(GetWidgetTypeName());
+
+		if (has_flag(localization_enabled, LocalizationEnabled::Text) && !font.GetText().empty())
+		{
+			section.Add(LOCALIZATION_ID_TEXT, font.GetTextA().c_str(), "text");
+		}
+		if (has_flag(localization_enabled, LocalizationEnabled::Tooltip) && !tooltipFont.GetText().empty())
+		{
+			section.Add(LOCALIZATION_ID_TOOLTIP, tooltipFont.GetTextA().c_str(), "tooltip");
+		}
+	}
+	void Widget::ImportLocalization(const wi::Localization& localization)
+	{
+		const wi::Localization* section = localization.CheckSection(GetName());
+		if (section == nullptr)
+			return;
+
+		if (has_flag(localization_enabled, LocalizationEnabled::Text))
+		{
+			const char* localized_text = section->Get(LOCALIZATION_ID_TEXT);
+			if (localized_text != nullptr)
+			{
+				SetText(localized_text);
+			}
+		}
+		if (has_flag(localization_enabled, LocalizationEnabled::Tooltip))
+		{
+			const char* localized_tooltip = section->Get(LOCALIZATION_ID_TOOLTIP);
+			if (localized_tooltip != nullptr)
+			{
+				SetTooltip(localized_tooltip);
+			}
+		}
 	}
 
 	void Widget::SetColor(wi::Color color, int id)
@@ -557,10 +707,25 @@ namespace wi::gui
 			theme.image.Apply(sprites[id].params);
 		}
 		theme.font.Apply(font.params);
+		if (theme.shadow >= 0)
+		{
+			SetShadowRadius(theme.shadow);
+		}
 		SetShadowColor(theme.shadow_color);
 		theme.tooltipFont.Apply(tooltipFont.params);
 		theme.tooltipImage.Apply(tooltipSprite.params);
+		if (theme.tooltip_shadow >= 0)
+		{
+			tooltip_shadow = theme.tooltip_shadow;
+		}
 		tooltip_shadow_color = theme.tooltip_shadow_color;
+		shadow_highlight = theme.shadow_highlight;
+		shadow_highlight_color = theme.shadow_highlight_color;
+		shadow_highlight_spread = theme.shadow_highlight_spread;
+		for (auto& x : sprites)
+		{
+			x.params.border_soften = theme.image.border_soften;
+		}
 	}
 
 	void Widget::AttachTo(Widget* parent)
@@ -580,6 +745,11 @@ namespace wi::gui
 		{
 			UpdateTransform_Parented(*parent);
 		}
+
+		XMVECTOR S, R, T;
+		XMMatrixDecompose(&S, &R, &T, XMLoadFloat4x4(&world));
+		XMStoreFloat3(&translation, T);
+		XMStoreFloat3(&scale, S);
 	}
 	void Widget::Detach()
 	{
@@ -589,9 +759,9 @@ namespace wi::gui
 			ApplyTransform();
 		}
 	}
-	void Widget::ApplyScissor(const wi::Canvas& canvas, const Rect rect, CommandList cmd, bool constrain_to_parent) const
+	void Widget::ApplyScissor(const wi::Canvas& canvas, const wi::graphics::Rect rect, CommandList cmd, bool constrain_to_parent) const
 	{
-		Rect scissor = rect;
+		wi::graphics::Rect scissor = rect;
 
 		if (constrain_to_parent && parent != nullptr)
 		{
@@ -661,6 +831,11 @@ namespace wi::gui
 			parent->HitboxConstrain(hb);
 		}
 	}
+	XMFLOAT2 Widget::GetPointerHighlightPos(const wi::Canvas& canvas) const
+	{
+		XMFLOAT4 pointer = wi::input::GetPointer();
+		return XMFLOAT2(pointer.x / canvas.GetLogicalWidth(), pointer.y / canvas.GetLogicalHeight());
+	}
 
 
 
@@ -669,11 +844,12 @@ namespace wi::gui
 	{
 		SetName(name);
 		SetText(name);
-		OnClick([](EventArgs args) {});
-		OnDragStart([](EventArgs args) {});
-		OnDrag([](EventArgs args) {});
-		OnDragEnd([](EventArgs args) {});
-		SetSize(XMFLOAT2(100, 30));
+		OnClick([](const EventArgs& args) {});
+		OnRightClick([](const EventArgs& args) {});
+		OnDragStart([](const EventArgs& args) {});
+		OnDrag([](const EventArgs& args) {});
+		OnDragEnd([](const EventArgs& args) {});
+		SetSize(XMFLOAT2(100, 20));
 
 		font.params.h_align = wi::font::WIFALIGN_CENTER;
 		font.params.v_align = wi::font::WIFALIGN_CENTER;
@@ -709,7 +885,7 @@ namespace wi::gui
 				args.clickPos = pointerHitbox.pos;
 				onDragEnd(args);
 
-				if (pointerHitbox.intersects(hitBox))
+				if (pointerHitbox.intersects(hitBox) && !disableClicking)
 				{
 					// Click occurs when the button is released within the bounds
 					onClick(args);
@@ -722,7 +898,8 @@ namespace wi::gui
 				Deactivate();
 			}
 
-			bool clicked = false;
+			bool leftButtonClicked = false;
+			bool rightButtonClicked = false;
 			// hover the button
 			if (pointerHitbox.intersects(hitBox))
 			{
@@ -732,16 +909,25 @@ namespace wi::gui
 				}
 			}
 
-			if (wi::input::Press(wi::input::MOUSE_BUTTON_LEFT))
+			if (wi::input::Press(wi::input::MOUSE_BUTTON_LEFT) || wi::input::IsTouchPanStarting())
 			{
 				if (state == FOCUS)
 				{
 					// activate
-					clicked = true;
+					leftButtonClicked = true;
 				}
 			}
 
-			if (wi::input::Down(wi::input::MOUSE_BUTTON_LEFT))
+			if (wi::input::Press(wi::input::MOUSE_BUTTON_RIGHT))
+			{
+				if (state == FOCUS)
+				{
+					// right-click
+					rightButtonClicked = true;
+				}
+			}
+
+			if (wi::input::Down(wi::input::MOUSE_BUTTON_LEFT) || wi::input::IsTouchPanning())
 			{
 				if (state == DEACTIVATING)
 				{
@@ -759,13 +945,21 @@ namespace wi::gui
 				}
 			}
 
-			if (clicked)
+			if (leftButtonClicked)
 			{
 				EventArgs args;
 				args.clickPos = pointerHitbox.pos;
 				dragStart = args.clickPos;
 				args.startPos = dragStart;
 				onDragStart(args);
+				Activate();
+			}
+
+			if (rightButtonClicked)
+			{
+				EventArgs args;
+				args.clickPos = pointerHitbox.pos;
+				onRightClick(args);
 				Activate();
 			}
 
@@ -800,15 +994,20 @@ namespace wi::gui
 			break;
 		}
 
-		font_description.params.posX = translation.x - 2;
+		left_text_width = 0;
+		right_text_width = 0;
+
+		font_description.params.posX = translation.x;
 		font_description.params.posY = translation.y + scale.y * 0.5f;
 		switch (font_description.params.h_align)
 		{
 		case wi::font::WIFALIGN_LEFT:
-			font_description.params.posX = translation.x + scale.x;
+			font_description.params.posX = translation.x + scale.x + shadow;
+			right_text_width = font_description.TextWidth();
 			break;
 		case wi::font::WIFALIGN_RIGHT:
-			font_description.params.posX = translation.x;
+			font_description.params.posX = translation.x - shadow;
+			left_text_width = font_description.TextWidth();
 			break;
 		case wi::font::WIFALIGN_CENTER:
 		default:
@@ -818,19 +1017,25 @@ namespace wi::gui
 		switch (font_description.params.v_align)
 		{
 		case wi::font::WIFALIGN_TOP:
-			font_description.params.posY = translation.y + scale.y;
+			font_description.params.posY = translation.y + scale.y + shadow;
 			break;
 		case wi::font::WIFALIGN_BOTTOM:
-			font_description.params.posY = translation.y;
+			font_description.params.posY = translation.y - shadow;
 			break;
 		case wi::font::WIFALIGN_CENTER:
 		default:
 			font_description.params.posY = translation.y + scale.y * 0.5f;
 			break;
 		}
+
+		if (state <= FOCUS)
+		{
+			disableClicking = false;
+		}
 	}
 	void Button::Render(const wi::Canvas& canvas, CommandList cmd) const
 	{
+		Widget::Render(canvas, cmd);
 		if (!IsVisible())
 		{
 			return;
@@ -840,6 +1045,7 @@ namespace wi::gui
 		if (shadow > 0)
 		{
 			wi::image::Params fx = sprites[state].params;
+			fx.gradient = wi::image::Params::Gradient::None;
 			fx.pos.x -= shadow;
 			fx.pos.y -= shadow;
 			fx.siz.x += shadow * 2;
@@ -855,7 +1061,18 @@ namespace wi::gui
 					}
 				}
 			}
-			wi::image::Draw(wi::texturehelper::getWhite(), fx, cmd);
+			if (shadow_highlight)
+			{
+				fx.enableHighlight();
+				fx.highlight_pos = GetPointerHighlightPos(canvas);
+				fx.highlight_color = shadow_highlight_color;
+				fx.highlight_spread = shadow_highlight_spread;
+			}
+			else
+			{
+				fx.disableHighlight();
+			}
+			wi::image::Draw(nullptr, fx, cmd);
 		}
 
 		font_description.Draw(cmd);
@@ -865,21 +1082,25 @@ namespace wi::gui
 		sprites[state].Draw(cmd);
 		font.Draw(cmd);
 	}
-	void Button::OnClick(std::function<void(EventArgs args)> func)
+	void Button::OnClick(std::function<void(const EventArgs& args)> func)
 	{
-		onClick = func;
+		onClick = std::move(func);
 	}
-	void Button::OnDragStart(std::function<void(EventArgs args)> func)
+	void Button::OnRightClick(std::function<void(const EventArgs& args)> func)
 	{
-		onDragStart = func;
+		onRightClick = std::move(func);
 	}
-	void Button::OnDrag(std::function<void(EventArgs args)> func)
+	void Button::OnDragStart(std::function<void(const EventArgs& args)> func)
 	{
-		onDrag = func;
+		onDragStart = std::move(func);
 	}
-	void Button::OnDragEnd(std::function<void(EventArgs args)> func)
+	void Button::OnDrag(std::function<void(const EventArgs& args)> func)
 	{
-		onDragEnd = func;
+		onDrag = std::move(func);
+	}
+	void Button::OnDragEnd(std::function<void(const EventArgs& args)> func)
+	{
+		onDragEnd = std::move(func);
 	}
 	void Button::SetTheme(const Theme& theme, int id)
 	{
@@ -888,6 +1109,49 @@ namespace wi::gui
 	}
 
 
+
+	void Image::Create(const std::string& name)
+	{
+		SetName(name);
+		SetSize(XMFLOAT2(100, 100));
+		SetEnabled(false);
+	}
+	void Image::Render(const wi::Canvas& canvas, CommandList cmd) const
+	{
+		if (!IsVisible())
+		{
+			return;
+		}
+
+		if (shadow > 0)
+		{
+			wi::image::Params fx = sprites[IDLE].params;
+			fx.gradient = wi::image::Params::Gradient::None;
+			fx.pos.x -= shadow;
+			fx.pos.y -= shadow;
+			fx.siz.x += shadow * 2;
+			fx.siz.y += shadow * 2;
+			fx.color = shadow_color;
+			if (fx.isCornerRoundingEnabled())
+			{
+				for (auto& corner_rounding : fx.corners_rounding)
+				{
+					corner_rounding.radius += shadow;
+				}
+			}
+			if (shadow_highlight)
+			{
+				fx.enableHighlight();
+				fx.highlight_color = shadow_highlight_color;
+				fx.highlight_spread = shadow_highlight_spread;
+			}
+			wi::image::Draw(nullptr, fx, cmd);
+		}
+
+		ApplyScissor(canvas, scissorRect, cmd);
+
+		sprites[IDLE].Draw(cmd);
+	}
 
 
 
@@ -909,7 +1173,7 @@ namespace wi::gui
 			scrollbar_begin = translation.y;
 			scrollbar_end = scrollbar_begin + scale.y;
 			scrollbar_size = scrollbar_end - scrollbar_begin;
-			scrollbar_granularity = std::min(1.0f, scrollbar_size / std::max(1.0f, list_length - scale.x));
+			scrollbar_granularity = std::min(1.0f, scrollbar_size / std::max(1.0f, list_length - safe_area));
 			scrollbar_length = std::max(scale.x * 2, scrollbar_size * scrollbar_granularity);
 			scrollbar_length = std::min(scrollbar_length, scale.y);
 		}
@@ -918,11 +1182,25 @@ namespace wi::gui
 			scrollbar_begin = translation.x;
 			scrollbar_end = scrollbar_begin + scale.x;
 			scrollbar_size = scrollbar_end - scrollbar_begin;
-			scrollbar_granularity = std::min(1.0f, scrollbar_size / std::max(1.0f, list_length - scale.y));
+			scrollbar_granularity = std::min(1.0f, scrollbar_size / std::max(1.0f, list_length - safe_area));
 			scrollbar_length = std::max(scale.y * 2, scrollbar_size * scrollbar_granularity);
 			scrollbar_length = std::min(scrollbar_length, scale.x);
 		}
 		scrollbar_length = std::max(0.0f, scrollbar_length);
+
+		// Decide whether the scrollbar is required, with hysteresis. Reserving
+		// the scrollbar's width shrinks the content area, and width-derived
+		// content (aspect-scaled previews) then gets shorter, which can make it
+		// fit and hide the scrollbar, which widens the content again - a
+		// per-frame on/off flicker. Once shown, keep it shown until the content
+		// fits by a margin (scrollbar_hysteresis), which breaks that loop. With
+		// hysteresis 0 this reduces to the old "content taller than the visible
+		// area" test.
+		const float content_over_area = list_length - safe_area;
+		const float required_threshold = scrollbar_required
+			? (scrollbar_size - scrollbar_hysteresis)
+			: scrollbar_size;
+		scrollbar_required = content_over_area > required_threshold;
 
 		if (IsEnabled() && dt > 0)
 		{
@@ -947,13 +1225,13 @@ namespace wi::gui
 			}
 
 			bool clicked = false;
-			if (wi::input::Press(wi::input::MOUSE_BUTTON_LEFT))
+			if (wi::input::Press(wi::input::MOUSE_BUTTON_LEFT) || wi::input::IsTouchPanning())
 			{
 				clicked = true;
 			}
 
 			bool click_down = false;
-			if (wi::input::Down(wi::input::MOUSE_BUTTON_LEFT))
+			if (wi::input::Down(wi::input::MOUSE_BUTTON_LEFT) || wi::input::IsTouchPanning())
 			{
 				click_down = true;
 				if (state == FOCUS || state == DEACTIVATING)
@@ -1040,6 +1318,7 @@ namespace wi::gui
 	}
 	void ScrollBar::Render(const wi::Canvas& canvas, CommandList cmd) const
 	{
+		Widget::Render(canvas, cmd);
 		if (!IsVisible())
 		{
 			return;
@@ -1052,7 +1331,42 @@ namespace wi::gui
 		fx.pos = XMFLOAT3(translation.x, translation.y, 0);
 		fx.siz = XMFLOAT2(scale.x, scale.y);
 		fx.color = sprites[IDLE].params.color;
-		wi::image::Draw(wi::texturehelper::getWhite(), fx, cmd);
+		wi::image::Draw(nullptr, fx, cmd);
+
+
+		// shadow:
+		if (shadow > 0)
+		{
+			wi::image::Params fx = sprites_knob[scrollbar_state].params;
+			fx.gradient = wi::image::Params::Gradient::None;
+			fx.pos.x -= shadow;
+			fx.pos.y -= shadow;
+			fx.siz.x += shadow * 2;
+			fx.siz.y += shadow * 2;
+			fx.color = shadow_color;
+			if (fx.isCornerRoundingEnabled())
+			{
+				for (auto& corner_rounding : fx.corners_rounding)
+				{
+					if (corner_rounding.radius > 0)
+					{
+						corner_rounding.radius += shadow;
+					}
+				}
+			}
+			if (shadow_highlight)
+			{
+				fx.enableHighlight();
+				fx.highlight_pos = GetPointerHighlightPos(canvas);
+				fx.highlight_color = shadow_highlight_color;
+				fx.highlight_spread = shadow_highlight_spread;
+			}
+			else
+			{
+				fx.disableHighlight();
+			}
+			wi::image::Draw(nullptr, fx, cmd);
+		}
 
 		// scrollbar knob
 		sprites_knob[scrollbar_state].Draw(cmd);
@@ -1064,7 +1378,7 @@ namespace wi::gui
 		//scissorRect.top = (int32_t)(0);
 		//GraphicsDevice* device = wi::graphics::GetDevice();
 		//device->BindScissorRects(1, &scissorRect, cmd);
-		//wi::image::Draw(wi::texturehelper::getWhite(), wi::image::Params(hitBox.pos.x, hitBox.pos.y, hitBox.siz.x, hitBox.siz.y, wi::Color(255,0,0,100)), cmd);
+		//wi::image::Draw(nullptr, wi::image::Params(hitBox.pos.x, hitBox.pos.y, hitBox.siz.x, hitBox.siz.y, wi::Color(255,0,0,100)), cmd);
 
 	}
 	void ScrollBar::SetColor(wi::Color color, int id)
@@ -1099,6 +1413,27 @@ namespace wi::gui
 			}
 		}
 	}
+	void ScrollBar::SetOffset(float value)
+	{
+		float scrollbar_begin;
+		float scrollbar_end;
+		float scrollbar_size;
+
+		if (vertical)
+		{
+			scrollbar_begin = translation.y;
+			scrollbar_end = scrollbar_begin + scale.y;
+			scrollbar_size = scrollbar_end - scrollbar_begin;
+		}
+		else
+		{
+			scrollbar_begin = translation.x;
+			scrollbar_end = scrollbar_begin + scale.x;
+			scrollbar_size = scrollbar_end - scrollbar_begin;
+		}
+
+		scrollbar_delta = lerp(0.0f, scrollbar_size - scrollbar_length, value / list_length);
+	}
 
 
 
@@ -1125,15 +1460,22 @@ namespace wi::gui
 		}
 		Widget::Update(canvas, dt);
 
-		font.params.h_wrap = scale.x;
+		if (wrap_enabled)
+		{
+			font.params.h_wrap = scale.x - margin_left - margin_right;
+		}
+		else
+		{
+			font.params.h_wrap = -1;
+		}
 
 		switch (font.params.h_align)
 		{
 		case wi::font::WIFALIGN_LEFT:
-			font.params.posX = translation.x + 2;
+			font.params.posX = translation.x + 2 + margin_left;
 			break;
 		case wi::font::WIFALIGN_RIGHT:
-			font.params.posX = translation.x + scale.x - 2;
+			font.params.posX = translation.x + scale.x - 2 - margin_right;
 			break;
 		case wi::font::WIFALIGN_CENTER:
 		default:
@@ -1143,10 +1485,10 @@ namespace wi::gui
 		switch (font.params.v_align)
 		{
 		case wi::font::WIFALIGN_TOP:
-			font.params.posY = translation.y + 2;
+			font.params.posY = translation.y + 2 + margin_top;
 			break;
 		case wi::font::WIFALIGN_BOTTOM:
-			font.params.posY = translation.y + scale.y - 2;
+			font.params.posY = translation.y + scale.y - 2 - margin_bottom;
 			break;
 		case wi::font::WIFALIGN_CENTER:
 		default:
@@ -1154,11 +1496,21 @@ namespace wi::gui
 			break;
 		}
 
-		scrollbar.SetListLength(font.TextHeight());
-		scrollbar.ClearTransform();
-		scrollbar.SetPos(XMFLOAT2(translation.x + scale.x - scrollbar_width, translation.y));
-		scrollbar.SetSize(XMFLOAT2(scrollbar_width, scale.y));
-		scrollbar.Update(canvas, dt);
+		const float textheight = font.TextHeight();
+
+		if (fittext_enabled)
+		{
+			SetSize(XMFLOAT2(GetSize().x, textheight + 4 + margin_top + margin_bottom));
+		}
+
+		if (scrollbar.IsEnabled())
+		{
+			scrollbar.SetListLength(textheight);
+			scrollbar.ClearTransform();
+			scrollbar.SetPos(XMFLOAT2(translation.x + scale.x - scrollbar_width, translation.y));
+			scrollbar.SetSize(XMFLOAT2(scrollbar_width, scale.y));
+			scrollbar.Update(canvas, dt);
+		}
 
 		if (IsEnabled() && dt > 0)
 		{
@@ -1167,13 +1519,18 @@ namespace wi::gui
 				Deactivate();
 			}
 
-			Hitbox2D pointerHitbox = GetPointerHitbox();
-			if (scroll_allowed && scrollbar.IsScrollbarRequired() && pointerHitbox.intersects(hitBox))
+			const Hitbox2D pointerHitbox = GetPointerHitbox();
+			if (scroll_allowed && scrollbar.IsEnabled() && scrollbar.IsScrollbarRequired() && pointerHitbox.intersects(hitBox))
 			{
-				scroll_allowed = false;
+				const float wheel_delta = wi::input::GetPointer().z;
+				const bool at_begin = (wheel_delta > 0 && scrollbar.IsScrolledToBegin());
+				if (wheel_delta != 0.0f && !at_begin)
+				{
+					scroll_allowed = false;
+					// This is outside scrollbar code, because it can also be scrolled if parent widget is only in focus
+					scrollbar.Scroll(wheel_delta * 60.0f);
+				}
 				state = FOCUS;
-				// This is outside scrollbar code, because it can also be scrolled if parent widget is only in focus
-				scrollbar.Scroll(wi::input::GetPointer().z * 20);
 			}
 			else
 			{
@@ -1186,15 +1543,18 @@ namespace wi::gui
 			}
 		}
 
-		if (scrollbar.IsScrollbarRequired())
+		if (scrollbar.IsEnabled())
 		{
-			font.params.h_wrap = scale.x - scrollbar_width;
+			if (scrollbar.IsScrollbarRequired())
+			{
+				font.params.h_wrap = scale.x - scrollbar_width;
+			}
+			font.params.posY += scrollbar.GetOffset();
 		}
-
-		font.params.posY += scrollbar.GetOffset();
 	}
 	void Label::Render(const wi::Canvas& canvas, CommandList cmd) const
 	{
+		Widget::Render(canvas, cmd);
 		if (!IsVisible())
 		{
 			return;
@@ -1204,6 +1564,7 @@ namespace wi::gui
 		if (shadow > 0)
 		{
 			wi::image::Params fx = sprites[state].params;
+			fx.gradient = wi::image::Params::Gradient::None;
 			fx.pos.x -= shadow;
 			fx.pos.y -= shadow;
 			fx.siz.x += shadow * 2;
@@ -1219,7 +1580,18 @@ namespace wi::gui
 					}
 				}
 			}
-			wi::image::Draw(wi::texturehelper::getWhite(), fx, cmd);
+			if (shadow_highlight)
+			{
+				fx.enableHighlight();
+				fx.highlight_pos = GetPointerHighlightPos(canvas);
+				fx.highlight_color = shadow_highlight_color;
+				fx.highlight_spread = shadow_highlight_spread;
+			}
+			else
+			{
+				fx.disableHighlight();
+			}
+			wi::image::Draw(nullptr, fx, cmd);
 		}
 
 		ApplyScissor(canvas, scissorRect, cmd);
@@ -1227,7 +1599,10 @@ namespace wi::gui
 		sprites[IDLE].Draw(cmd);
 		font.Draw(cmd);
 
-		scrollbar.Render(canvas, cmd);
+		if (scrollbar.IsEnabled())
+		{
+			scrollbar.Render(canvas, cmd);
+		}
 	}
 	void Label::SetColor(wi::Color color, int id)
 	{
@@ -1247,18 +1622,124 @@ namespace wi::gui
 	int caret_pos = 0;
 	int caret_begin = 0;
 	int caret_delay = 0;
+	bool input_updated = false;
+	bool doubleclick_select = false;
 	wi::Timer caret_timer;
+	wi::Timer key_repeat_timer;
+	wi::input::BUTTON key_repeat_button = {};
+	bool key_repeat_active = false;
+	static constexpr float KEY_REPEAT_DELAY = 0.5f;
+	static constexpr float KEY_REPEAT_RATE = 0.035f;
+	bool KeyRepeat(wi::input::BUTTON button)
+	{
+		if (wi::input::Press(button))
+		{
+			key_repeat_button = button;
+			key_repeat_timer.record();
+			key_repeat_active = false;
+			return true;
+		}
+		if (wi::input::Down(button) && key_repeat_button == button)
+		{
+			const float elapsed = (float)key_repeat_timer.elapsed_seconds();
+			if (!key_repeat_active && elapsed > KEY_REPEAT_DELAY)
+			{
+				key_repeat_active = true;
+				key_repeat_timer.record();
+				return true;
+			}
+			if (key_repeat_active && elapsed > KEY_REPEAT_RATE)
+			{
+				key_repeat_timer.record();
+				return true;
+			}
+		}
+		return false;
+	}
+
+	// Simple recursive-descent arithmetic expression evaluator.
+	// Supports: +, -, *, /, parentheses, unary +/-, floating-point literals.
+	// Returns true and sets 'result' if 'str' is a fully-consumed valid expression.
+	// Returns false for non-numeric input (e.g. plain text strings) so callers fall back.
+	namespace {
+		struct ArithExprParser
+		{
+			const char* pos;
+			bool valid = true;
+
+			void skipWS() { while (*pos == ' ' || *pos == '\t') pos++; }
+
+			double parsePrimary()
+			{
+				skipWS();
+				if (*pos == '(')
+				{
+					pos++;
+					double v = parseExpr();
+					skipWS();
+					if (*pos == ')') pos++;
+					return v;
+				}
+				if (*pos == '-') { pos++; return -parsePrimary(); }
+				if (*pos == '+') { pos++; return  parsePrimary(); }
+				char* end;
+				double v = strtod(pos, &end);
+				if (end == pos) { valid = false; return 0; }
+				pos = end;
+				return v;
+			}
+
+			double parseTerm()
+			{
+				double left = parsePrimary();
+				while (valid)
+				{
+					skipWS();
+					if (*pos == '*') { pos++; left *= parsePrimary(); }
+					else if (*pos == '/') { pos++; double r = parsePrimary(); if (r == 0.0) { valid = false; return 0; } left /= r; }
+					else break;
+				}
+				return left;
+			}
+
+			double parseExpr()
+			{
+				double left = parseTerm();
+				while (valid)
+				{
+					skipWS();
+					if (*pos == '+') { pos++; left += parseTerm(); }
+					else if (*pos == '-') { pos++; left -= parseTerm(); }
+					else break;
+				}
+				return left;
+			}
+		};
+
+		bool EvaluateArithmetic(const std::string& str, double& result)
+		{
+			if (str.empty()) return false;
+			ArithExprParser p;
+			p.pos = str.c_str();
+			result = p.parseExpr();
+			p.skipWS();
+			return p.valid && (*p.pos == '\0') && std::isfinite(result);
+		}
+	} // anonymous namespace
+
 	void TextInputField::Create(const std::string& name)
 	{
 		SetName(name);
 		SetText(name);
-		OnInputAccepted([](EventArgs args) {});
-		SetSize(XMFLOAT2(100, 30));
+		OnInputAccepted([](const EventArgs& args) {});
+		SetSize(XMFLOAT2(100, 20));
 
 		font.params.v_align = wi::font::WIFALIGN_CENTER;
 
 		font_description.params = font.params;
 		font_description.params.h_align = wi::font::WIFALIGN_RIGHT;
+
+		SetLocalizationEnabled(wi::gui::LocalizationEnabled::Tooltip); // disable localization of text because that can come from user input and musn't be overwritten!
 	}
 	void TextInputField::SetValue(const std::string& newValue)
 	{
@@ -1272,22 +1753,62 @@ namespace wi::gui
 	}
 	void TextInputField::SetValue(float newValue)
 	{
-		std::stringstream ss("");
-		ss << newValue;
-		font.SetText(ss.str());
+		if (newValue == FLT_MAX)
+		{
+			font.SetText(L"FLT_MAX");
+		}
+		else if (newValue == -FLT_MAX)
+		{
+			font.SetText(L"-FLT_MAX");
+		}
+		else
+		{
+			std::stringstream ss("");
+			if (float_precision >= 0)
+			{
+				ss << std::fixed << std::setprecision(float_precision);
+			}
+			ss << newValue;
+			font.SetText(ss.str());
+		}
 	}
 	const std::string TextInputField::GetValue()
 	{
 		return font.GetTextA();
 	}
+	const std::string TextInputField::GetCurrentInputValue()
+	{
+		if (state == ACTIVE)
+		{
+			return font_input.GetTextA();
+		}
+		return GetValue();
+	}
 	void TextInputField::Update(const wi::Canvas& canvas, float dt)
 	{
+		const bool was_active = (state == ACTIVE);
+
 		if (!IsVisible())
 		{
+			// If this text input was active but became invisible, clear typing state
+			if (was_active)
+			{
+				font_input.text.clear();
+				typing_active = false;
+				state = IDLE;
+			}
 			return;
 		}
 
 		Widget::Update(canvas, dt);
+
+		// If this text input was active but state was externally reset,
+		//	properly clear the typing state so IsTyping() no longer blocks input
+		if (was_active && state != ACTIVE)
+		{
+			font_input.text.clear();
+			typing_active = false;
+		}
 
 		if (IsEnabled() && dt > 0)
 		{
@@ -1296,8 +1817,8 @@ namespace wi::gui
 			hitBox.siz.x = scale.x;
 			hitBox.siz.y = scale.y;
 
-			Hitbox2D pointerHitbox = GetPointerHitbox();
-			bool intersectsPointer = pointerHitbox.intersects(hitBox);
+			const Hitbox2D pointerHitbox = GetPointerHitbox();
+			const bool intersectsPointer = pointerHitbox.intersects(hitBox);
 
 			if (state == FOCUS)
 			{
@@ -1317,18 +1838,42 @@ namespace wi::gui
 				}
 			}
 
-			bool clicked = false;
+			bool leftButtonClicked = false;
 			if (wi::input::Press(wi::input::MOUSE_BUTTON_LEFT))
 			{
-				clicked = true;
+				leftButtonClicked = true;
+			}
+			bool rightButtonClicked = false;
+			if (wi::input::Press(wi::input::MOUSE_BUTTON_RIGHT))
+			{
+				rightButtonClicked = true;
 			}
 
 			if (state == ACTIVE)
 			{
+				if (!wi::input::Down(wi::input::MOUSE_BUTTON_LEFT))
+				{
+					doubleclick_select = false;
+				}
 				if (wi::input::Press(wi::input::KEYBOARD_BUTTON_ENTER))
 				{
-					// accept input...
-					font.SetText(font_input.GetText());
+					// accept input, evaluating arithmetic expressions (e.g. "10 * 2" -> "20")
+					std::string inputStr = font_input.GetTextA();
+					double arithmeticResult = 0;
+					if (EvaluateArithmetic(inputStr, arithmeticResult))
+					{
+						std::stringstream ssResult;
+						if (float_precision >= 0)
+						{
+							ssResult << std::fixed << std::setprecision(float_precision);
+						}
+						ssResult << arithmeticResult;
+						font.SetText(ssResult.str());
+					}
+					else
+					{
+						font.SetText(font_input.GetText());
+					}
 					font_input.text.clear();
 
 					if (onInputAccepted)
@@ -1338,9 +1883,7 @@ namespace wi::gui
 						args.iValue = atoi(args.sValue.c_str());
 						args.fValue = (float)atof(args.sValue.c_str());
 						onInputAccepted(args);
-						typing_active = false;
 					}
-
 					Deactivate();
 				}
 				//else if (wi::input::Press(wi::input::KEYBOARD_BUTTON_BACKSPACE))
@@ -1348,12 +1891,12 @@ namespace wi::gui
 				//	// delete input...
 				//	DeleteFromInput(-1);
 				//}
-				else if (wi::input::Press(wi::input::KEYBOARD_BUTTON_DELETE))
+				else if (KeyRepeat(wi::input::KEYBOARD_BUTTON_DELETE))
 				{
 					// delete input...
 					DeleteFromInput(1);
 				}
-				else if (wi::input::Press(wi::input::KEYBOARD_BUTTON_LEFT) && caret_pos > 0)
+				else if (KeyRepeat(wi::input::KEYBOARD_BUTTON_LEFT) && caret_pos > 0)
 				{
 					// caret repositioning left:
 					caret_pos--;
@@ -1363,24 +1906,34 @@ namespace wi::gui
 					}
 					caret_timer.record();
 				}
-				else if (wi::input::Press(wi::input::KEYBOARD_BUTTON_RIGHT) && caret_pos < font_input.GetText().size())
+				else if (KeyRepeat(wi::input::KEYBOARD_BUTTON_RIGHT))
 				{
 					// caret repositioning right:
-					caret_pos++;
+					if (caret_pos < font_input.GetText().size())
+					{
+						caret_pos++;
+					}
 					if (!wi::input::Down(wi::input::BUTTON::KEYBOARD_BUTTON_LSHIFT) && !wi::input::Down(wi::input::BUTTON::KEYBOARD_BUTTON_RSHIFT))
 					{
 						caret_begin = caret_pos;
 					}
 					caret_timer.record();
 				}
-				else if ((clicked && !intersectsPointer) || wi::input::Press(wi::input::KEYBOARD_BUTTON_ESCAPE))
+				else if ((leftButtonClicked && !intersectsPointer) || (rightButtonClicked && !intersectsPointer) || wi::input::Press(wi::input::KEYBOARD_BUTTON_ESCAPE))
 				{
-					// cancel input 
+					// cancel input
 					font_input.text.clear();
-					Deactivate();
 					typing_active = false;
+					state = IDLE;
 				}
-				else if (wi::input::Down(wi::input::MOUSE_BUTTON_LEFT))
+				else if (leftButtonClicked && intersectsPointer && wi::input::IsDoubleClicked())
+				{
+					caret_begin = 0;
+					caret_pos = (int)font_input.GetText().size();
+					caret_timer.record();
+					doubleclick_select = true;
+				}
+				else if (wi::input::Down(wi::input::MOUSE_BUTTON_LEFT) && !doubleclick_select)
 				{
 					// caret repositioning by mouse click:
 					caret_timer.record();
@@ -1397,7 +1950,7 @@ namespace wi::gui
 							break;
 						}
 					}
-					if (clicked && intersectsPointer)
+					if (leftButtonClicked && intersectsPointer)
 					{
 						caret_begin = caret_pos;
 					}
@@ -1408,27 +1961,39 @@ namespace wi::gui
 					}
 				}
 
+				if (wi::input::Down(wi::input::KEYBOARD_BUTTON_LCONTROL) && wi::input::Down((wi::input::BUTTON)'A'))
+				{
+					caret_begin = 0;
+					caret_pos = (int)font_input.GetText().size();
+				}
+
 			}
 
-			if (clicked && state == FOCUS)
+			if (leftButtonClicked && state == FOCUS)
 			{
 				// activate
-				SetAsActive();
-				typing_active = true; // do NOT set this inside SetAsActive() because that can be called from outside, but this bool cannot, and it could stuck
+				const bool select_all = intersectsPointer && wi::input::IsDoubleClicked();
+				SetAsActive(select_all);
+				doubleclick_select = select_all;
 			}
 		}
 
+		left_text_width = 0;
+		right_text_width = 0;
+
 		font.params.posX = translation.x + 2;
 		font.params.posY = translation.y + scale.y * 0.5f;
-		font_description.params.posX = translation.x - 2;
+		font_description.params.posX = translation.x;
 		font_description.params.posY = translation.y + scale.y * 0.5f;
 		switch (font_description.params.h_align)
 		{
 		case wi::font::WIFALIGN_LEFT:
-			font_description.params.posX = translation.x + scale.x;
+			font_description.params.posX = translation.x + scale.x + shadow;
+			right_text_width = font_description.TextWidth();
 			break;
 		case wi::font::WIFALIGN_RIGHT:
-			font_description.params.posX = translation.x;
+			font_description.params.posX = translation.x - shadow;
+			left_text_width = font_description.TextWidth();
 			break;
 		case wi::font::WIFALIGN_CENTER:
 		default:
@@ -1438,10 +2003,10 @@ namespace wi::gui
 		switch (font_description.params.v_align)
 		{
 		case wi::font::WIFALIGN_TOP:
-			font_description.params.posY = translation.y + scale.y;
+			font_description.params.posY = translation.y + scale.y + shadow;
 			break;
 		case wi::font::WIFALIGN_BOTTOM:
-			font_description.params.posY = translation.y;
+			font_description.params.posY = translation.y - shadow;
 			break;
 		case wi::font::WIFALIGN_CENTER:
 		default:
@@ -1452,10 +2017,25 @@ namespace wi::gui
 		if (state == ACTIVE)
 		{
 			font_input.params = font.params;
+
+			if (!cancel_input_enabled)
+			{
+				SetValue(font_input.GetTextA());
+			}
+
+			if (input_updated && onInput)
+			{
+				wi::gui::EventArgs args;
+				args.sValue = GetCurrentInputValue();
+				onInput(args);
+			}
+			input_updated = false;
 		}
+
 	}
 	void TextInputField::Render(const wi::Canvas& canvas, CommandList cmd) const
 	{
+		Widget::Render(canvas, cmd);
 		if (!IsVisible())
 		{
 			return;
@@ -1465,6 +2045,7 @@ namespace wi::gui
 		if (shadow > 0)
 		{
 			wi::image::Params fx = sprites[state].params;
+			fx.gradient = wi::image::Params::Gradient::None;
 			fx.pos.x -= shadow;
 			fx.pos.y -= shadow;
 			fx.siz.x += shadow * 2;
@@ -1480,7 +2061,18 @@ namespace wi::gui
 					}
 				}
 			}
-			wi::image::Draw(wi::texturehelper::getWhite(), fx, cmd);
+			if (shadow_highlight)
+			{
+				fx.enableHighlight();
+				fx.highlight_pos = GetPointerHighlightPos(canvas);
+				fx.highlight_color = shadow_highlight_color;
+				fx.highlight_spread = shadow_highlight_spread;
+			}
+			else
+			{
+				fx.disableHighlight();
+			}
+			wi::image::Draw(nullptr, fx, cmd);
 		}
 
 		font_description.Draw(cmd);
@@ -1522,7 +2114,7 @@ namespace wi::gui
 				params.siz.y = scale.y - 2;
 				params.blendFlag = wi::enums::BLENDMODE_ALPHA;
 				params.color = wi::Color::lerp(font_input.params.color, wi::Color::Transparent(), 0.5f);
-				wi::image::Draw(wi::texturehelper::getWhite(), params, cmd);
+				wi::image::Draw(nullptr, params, cmd);
 			}
 
 			//Rect scissorRect;
@@ -1538,14 +2130,18 @@ namespace wi::gui
 		{
 			font.Draw(cmd);
 		}
-
 	}
-	void TextInputField::OnInputAccepted(std::function<void(EventArgs args)> func)
+	void TextInputField::OnInputAccepted(std::function<void(const EventArgs& args)> func)
 	{
-		onInputAccepted = func;
+		onInputAccepted = std::move(func);
+	}
+	void TextInputField::OnInput(std::function<void(const EventArgs& args)> func)
+	{
+		onInput = std::move(func);
 	}
 	void TextInputField::AddInput(const wchar_t inputChar)
 	{
+		input_updated = true;
 		switch (inputChar)
 		{
 		case '\b':	// BACKSPACE
@@ -1559,15 +2155,58 @@ namespace wi::gui
 		std::wstring value_new = font_input.GetText();
 		if (value_new.size() >= caret_pos)
 		{
+			int caret_pos_prev = caret_pos;
 			if (caret_begin != caret_pos)
 			{
 				int offset = std::min(caret_pos, caret_begin);
 				value_new.erase(offset, std::abs(caret_pos - caret_begin));
 				caret_pos = offset;
 			}
-			value_new.insert(value_new.begin() + caret_pos, inputChar);
+			int num = 0;
+#ifdef __APPLE__
+			if (wi::input::Down(wi::input::KEYBOARD_BUTTON_LCOMMAND) || wi::input::Down(wi::input::KEYBOARD_BUTTON_RCOMMAND))
+#else
+			if (wi::input::Down(wi::input::KEYBOARD_BUTTON_LCONTROL) || wi::input::Down(wi::input::KEYBOARD_BUTTON_RCONTROL))
+#endif // __APPLE__
+			{
+				if (wi::input::Down((wi::input::BUTTON)'V'))
+				{
+					// Paste:
+					std::wstring clipboard = wi::helper::GetClipboardText();
+					value_new.insert(value_new.begin() + caret_pos, clipboard.begin(), clipboard.end());
+					num = (int)clipboard.length();
+				}
+				else if (wi::input::Down((wi::input::BUTTON)'C'))
+				{
+					// Copy:
+					caret_pos = caret_pos_prev;
+					const std::wstring& text = font_input.GetText();
+					int start = std::min(caret_begin, caret_pos);
+					int end = std::max(caret_begin, caret_pos);
+					std::wstring clipboard = std::wstring(text.c_str() + start, text.c_str() + end);
+					wi::helper::SetClipboardText(clipboard);
+					return;
+				}
+				else if (wi::input::Down((wi::input::BUTTON)'X'))
+				{
+					// Cut:
+					caret_pos = caret_pos_prev;
+					const std::wstring& text = font_input.GetText();
+					int start = std::min(caret_begin, caret_pos);
+					int end = std::max(caret_begin, caret_pos);
+					std::wstring clipboard = std::wstring(text.c_str() + start, text.c_str() + end);
+					wi::helper::SetClipboardText(clipboard);
+				}
+				else
+					return;
+			}
+			else
+			{
+				value_new.insert(value_new.begin() + caret_pos, inputChar);
+				num = 1;
+			}
 			font_input.SetText(value_new);
-			caret_pos = std::min((int)font_input.GetText().size(), caret_pos + 1);
+			caret_pos = std::min((int)font_input.GetText().size(), caret_pos + num);
 		}
 		caret_begin = caret_pos;
 	}
@@ -1577,6 +2216,7 @@ namespace wi::gui
 	}
 	void TextInputField::DeleteFromInput(int direction)
 	{
+		input_updated = true;
 		std::wstring value_new = font_input.GetText();
 		if (caret_begin != caret_pos)
 		{
@@ -1620,13 +2260,43 @@ namespace wi::gui
 		Widget::SetTheme(theme, id);
 		theme.font.Apply(font_description.params);
 	}
-	void TextInputField::SetAsActive()
+	void TextInputField::SetAsActive(bool selectall)
 	{
 		Activate();
 		font_input.SetText(font.GetText());
 		caret_pos = (int)font_input.GetText().size();
-		caret_begin = caret_pos;
+		caret_begin = selectall ? 0 : caret_pos;
 		caret_delay = 0;
+	}
+	void TextInputField::Activate()
+	{
+		if (state != ACTIVE)
+			typing_active = true;
+		Widget::Activate();
+	}
+	void TextInputField::Deactivate()
+	{
+		if(state == ACTIVE)
+			typing_active = false;
+		Widget::Deactivate();
+	}
+	void TextInputField::SetEnabled(bool val)
+	{
+		if (!val && state == ACTIVE)
+		{
+			font_input.text.clear();
+			typing_active = false;
+		}
+		Widget::SetEnabled(val);
+	}
+	void TextInputField::SetVisible(bool val)
+	{
+		if (!val && state == ACTIVE)
+		{
+			font_input.text.clear();
+			typing_active = false;
+		}
+		Widget::SetVisible(val);
 	}
 
 
@@ -1641,21 +2311,31 @@ namespace wi::gui
 
 		SetName(name);
 		SetText(name);
-		OnSlide([](EventArgs args) {});
-		SetSize(XMFLOAT2(200, 40));
+		OnSlide([](const EventArgs& args) {});
+		SetSize(XMFLOAT2(200, 20));
 
 		valueInputField.Create(name + "_endInputField");
+		valueInputField.SetLocalizationEnabled(LocalizationEnabled::None);
 		valueInputField.SetShadowRadius(0);
-		valueInputField.SetTooltip("Enter number to modify value even outside slider limits. Enter \"reset\" to reset slider to initial state.");
+		valueInputField.SetTooltip("Enter number to modify value even outside slider limits. Arithmetic expressions are supported (e.g. 10 * 2, 1 + 0.5). Other inputs:\n - reset : reset slider to initial state.\n - FLT_MAX : float max value\n - -FLT_MAX : negative float max value.");
 		valueInputField.SetValue(end);
 		valueInputField.OnInputAccepted([this, start, end, defaultValue](EventArgs args) {
-			if (args.sValue.compare("reset") != std::string::npos)
+			if (args.sValue.compare("reset") == 0)
 			{
 				this->value = defaultValue;
 				this->start = start;
 				this->end = end;
 				args.fValue = this->value;
-				args.iValue = (int)this->value;
+			}
+			else if (args.sValue.compare("FLT_MAX") == 0)
+			{
+				this->value = FLT_MAX;
+				args.fValue = this->value;
+			}
+			else if (args.sValue.compare("-FLT_MAX") == 0)
+			{
+				this->value = -FLT_MAX;
+				args.fValue = this->value;
 			}
 			else
 			{
@@ -1664,7 +2344,7 @@ namespace wi::gui
 				this->end = std::max(this->end, args.fValue);
 			}
 			onSlide(args);
-			});
+		});
 
 		for (int i = IDLE; i < WIDGETSTATE_COUNT; ++i)
 		{
@@ -1707,13 +2387,19 @@ namespace wi::gui
 		Widget::Update(canvas, dt);
 
 		valueInputField.Detach();
-		valueInputField.SetSize(XMFLOAT2(std::max(scale.y, wi::font::TextWidth(valueInputField.GetText(), valueInputField.font.params) + 4), scale.y));
-		valueInputField.SetPos(XMFLOAT2(translation.x + scale.x + 1, translation.y));
+		if (state != ACTIVE)
+		{
+			// only set input field size when slider is not dragged because now it will modify slider active size too, and slider size shouldn't be modified while dragging!
+			valueInputField.SetSize(XMFLOAT2(std::max(scale.y, wi::font::TextWidth(valueInputField.GetCurrentInputValue(), valueInputField.font.params) + 4), scale.y));
+			valueInputField.SetPos(XMFLOAT2(translation.x + scale.x - valueInputField.GetSize().x, translation.y));
+		}
 		valueInputField.AttachTo(this);
+
+		hitBox.siz.x = scale.x - valueInputField.GetSize().x - 1;
 
 		scissorRect.bottom = (int32_t)std::ceil(translation.y + scale.y);
 		scissorRect.left = (int32_t)std::floor(translation.x);
-		scissorRect.right = (int32_t)std::ceil(translation.x + scale.x + 1 + valueInputField.GetSize().x);
+		scissorRect.right = (int32_t)std::ceil(translation.x + scale.x);
 		scissorRect.top = (int32_t)std::floor(translation.y);
 
 		for (int i = 0; i < WIDGETSTATE_COUNT; ++i)
@@ -1738,11 +2424,11 @@ namespace wi::gui
 			}
 			if (state == ACTIVE)
 			{
-				if (wi::input::Down(wi::input::MOUSE_BUTTON_LEFT))
+				if (wi::input::Down(wi::input::MOUSE_BUTTON_LEFT) || wi::input::IsTouchPanning())
 				{
 					if (state == ACTIVE)
 					{
-						// continue drag if already grabbed wheter it is intersecting or not
+						// continue drag if already grabbed whether it is intersecting or not
 						dragged = true;
 					}
 				}
@@ -1763,7 +2449,7 @@ namespace wi::gui
 				}
 			}
 
-			if (wi::input::Press(wi::input::MOUSE_BUTTON_LEFT))
+			if (wi::input::Press(wi::input::MOUSE_BUTTON_LEFT) || wi::input::IsTouchPanning())
 			{
 				if (state == FOCUS)
 				{
@@ -1777,7 +2463,7 @@ namespace wi::gui
 			{
 				EventArgs args;
 				args.clickPos = pointerHitbox.pos;
-				value = wi::math::InverseLerp(translation.x, translation.x + scale.x, args.clickPos.x);
+				value = wi::math::InverseLerp(translation.x, translation.x + hitBox.siz.x, args.clickPos.x);
 				value = wi::math::Clamp(value, 0, 1);
 				value *= step;
 				value = std::floor(value);
@@ -1796,14 +2482,19 @@ namespace wi::gui
 
 		const float knobWidth = sprites_knob[state].params.siz.x;
 		const float knobWidthHalf = knobWidth * 0.5f;
-		sprites_knob[state].params.pos.x = wi::math::Lerp(translation.x + knobWidthHalf + 2, translation.x + scale.x - knobWidthHalf - 2, wi::math::Clamp(wi::math::InverseLerp(start, end, value), 0, 1));
+		sprites_knob[state].params.pos.x = wi::math::Lerp(translation.x + knobWidthHalf + 2, translation.x + hitBox.siz.x - knobWidthHalf - 2, wi::math::Clamp(wi::math::InverseLerp(start, end, value), 0, 1));
 		sprites_knob[state].params.pos.y = translation.y + 2;
 		sprites_knob[state].params.siz.y = scale.y - 4;
 		sprites_knob[state].params.pivot = XMFLOAT2(0.5f, 0);
 		sprites_knob[state].params.fade = sprites[state].params.fade;
+
+		sprites[state].params.siz.x = hitBox.siz.x;
+
+		left_text_width = font.TextWidth();
 	}
 	void Slider::Render(const wi::Canvas& canvas, CommandList cmd) const
 	{
+		Widget::Render(canvas, cmd);
 		if (!IsVisible())
 		{
 			return;
@@ -1813,9 +2504,11 @@ namespace wi::gui
 		if (shadow > 0)
 		{
 			wi::image::Params fx = sprites[state].params;
+			fx.gradient = wi::image::Params::Gradient::None;
 			fx.pos.x -= shadow;
 			fx.pos.y -= shadow;
-			fx.siz.x += shadow * 2 + 1 + valueInputField.GetSize().x;
+			fx.siz.x = scale.x;
+			fx.siz.x += shadow * 2;
 			fx.siz.y += shadow * 2;
 			fx.color = shadow_color;
 			if (fx.isCornerRoundingEnabled())
@@ -1828,7 +2521,18 @@ namespace wi::gui
 					}
 				}
 			}
-			wi::image::Draw(wi::texturehelper::getWhite(), fx, cmd);
+			if (shadow_highlight)
+			{
+				fx.enableHighlight();
+				fx.highlight_pos = GetPointerHighlightPos(canvas);
+				fx.highlight_color = shadow_highlight_color;
+				fx.highlight_spread = shadow_highlight_spread;
+			}
+			else
+			{
+				fx.disableHighlight();
+			}
+			wi::image::Draw(nullptr, fx, cmd);
 		}
 
 		font.Draw(cmd);
@@ -1849,9 +2553,9 @@ namespace wi::gui
 		Widget::RenderTooltip(canvas, cmd);
 		valueInputField.RenderTooltip(canvas, cmd);
 	}
-	void Slider::OnSlide(std::function<void(EventArgs args)> func)
+	void Slider::OnSlide(std::function<void(const EventArgs& args)> func)
 	{
-		onSlide = func;
+		onSlide = std::move(func);
 	}
 	void Slider::SetColor(wi::Color color, int id)
 	{
@@ -1896,7 +2600,7 @@ namespace wi::gui
 	{
 		SetName(name);
 		SetText(name);
-		OnClick([](EventArgs args) {});
+		OnClick([](const EventArgs& args) {});
 		SetSize(XMFLOAT2(20, 20));
 
 		font.params.h_align = wi::font::WIFALIGN_RIGHT;
@@ -1971,9 +2675,12 @@ namespace wi::gui
 		}
 
 		font.params.posY = translation.y + scale.y * 0.5f;
+
+		left_text_width = font.TextWidth();
 	}
 	void CheckBox::Render(const wi::Canvas& canvas, CommandList cmd) const
 	{
+		Widget::Render(canvas, cmd);
 		if (!IsVisible())
 		{
 			return;
@@ -1983,6 +2690,7 @@ namespace wi::gui
 		if (shadow > 0)
 		{
 			wi::image::Params fx = sprites[state].params;
+			fx.gradient = wi::image::Params::Gradient::None;
 			fx.pos.x -= shadow;
 			fx.pos.y -= shadow;
 			fx.siz.x += shadow * 2;
@@ -1998,7 +2706,18 @@ namespace wi::gui
 					}
 				}
 			}
-			wi::image::Draw(wi::texturehelper::getWhite(), fx, cmd);
+			if (shadow_highlight)
+			{
+				fx.enableHighlight();
+				fx.highlight_pos = GetPointerHighlightPos(canvas);
+				fx.highlight_color = shadow_highlight_color;
+				fx.highlight_spread = shadow_highlight_spread;
+			}
+			else
+			{
+				fx.disableHighlight();
+			}
+			wi::image::Draw(nullptr, fx, cmd);
 		}
 
 		font.Draw(cmd);
@@ -2047,14 +2766,26 @@ namespace wi::gui
 					scale.y * 0.5f
 				);
 				params.color = font.params.color;
-				wi::image::Draw(wi::texturehelper::getWhite(), params, cmd);
+				wi::image::Draw(nullptr, params, cmd);
 			}
+		}
+		else if (!uncheck_text.empty())
+		{
+			wi::font::Params params;
+			params.posX = translation.x + scale.x * 0.5f;
+			params.posY = translation.y + scale.y * 0.5f;
+			params.h_align = wi::font::WIFALIGN_CENTER;
+			params.v_align = wi::font::WIFALIGN_CENTER;
+			params.size = int(scale.y);
+			params.scaling = 0.75f;
+			params.color = font.params.color;
+			wi::font::Draw(uncheck_text, params, cmd);
 		}
 
 	}
-	void CheckBox::OnClick(std::function<void(EventArgs args)> func)
+	void CheckBox::OnClick(std::function<void(const EventArgs& args)> func)
 	{
-		onClick = func;
+		onClick = std::move(func);
 	}
 	void CheckBox::SetCheck(bool value)
 	{
@@ -2073,17 +2804,21 @@ namespace wi::gui
 	{
 		wi::helper::StringConvert(text, check_text);
 	}
+	void CheckBox::SetUnCheckText(const std::string& text)
+	{
+		wi::helper::StringConvert(text, uncheck_text);
+	}
 
 
 
 
 
-
+	static constexpr float combo_height() { return 20; };
 	void ComboBox::Create(const std::string& name)
 	{
 		SetName(name);
 		SetText(name);
-		OnSelect([](EventArgs args) {});
+		OnSelect([](const EventArgs& args) {});
 		SetSize(XMFLOAT2(100, 20));
 
 		font.params.h_align = wi::font::WIFALIGN_RIGHT;
@@ -2092,26 +2827,67 @@ namespace wi::gui
 		selected_font = font;
 		selected_font.params.h_align = wi::font::WIFALIGN_CENTER;
 		selected_font.params.v_align = wi::font::WIFALIGN_CENTER;
+
+		filter.Create("");
+		filter.SetCancelInputEnabled(false);
 	}
 	float ComboBox::GetDropOffset(const wi::Canvas& canvas) const
 	{
 		float screenheight = canvas.GetLogicalHeight();
-		int visible_items = std::min(maxVisibleItemCount, int(items.size()) - firstItemVisible);
-		float total_height = (visible_items + 1) * scale.y;
+		int visible_items = std::min(maxVisibleItemCount, filteredItemCount - firstItemVisible);
+		if (!filterText.empty())
+		{
+			visible_items = 0;
+			for (int i = firstItemVisible; (i < (int)items.size()) && (visible_items < maxVisibleItemCount); ++i)
+			{
+				if (wi::helper::toUpper(items[i].name).find(filterText) != std::string::npos)
+				{
+					visible_items++;
+				}
+			}
+		}
+		float total_height = scale.y + visible_items * combo_height();
 		if (translation.y + total_height > screenheight)
 		{
 			return -total_height - 1;
 		}
-		return 1;
+		return combo_height(); // space for filter sub-widget above
+	}
+	float ComboBox::GetDropX(const wi::Canvas& canvas) const
+	{
+		if (fixed_drop_width && translation.x > canvas.GetLogicalWidth() * 0.5f)
+		{
+			// in this case, left-align the drop down:
+			float x = translation.x + scale.x - fixed_drop_width;
+			if (HasScrollbar())
+			{
+				x -= 1 + scale.y;
+			}
+			x = std::max(0.0f, x);
+			return x;
+		}
+		return translation.x;
 	}
 	float ComboBox::GetItemOffset(const wi::Canvas& canvas, int index) const
 	{
+		if (!filterText.empty())
+		{
+			int invisible_items = 0;
+			for (int i = firstItemVisible; (i < (int)items.size()) && (i < index); ++i)
+			{
+				if (wi::helper::toUpper(items[i].name).find(filterText) == std::string::npos)
+				{
+					invisible_items++;
+				}
+			}
+			index -= invisible_items;
+		}
 		index = std::max(firstItemVisible, index) - firstItemVisible;
-		return scale.y * (index + 1) + GetDropOffset(canvas);
+		return scale.y + combo_height() * index + GetDropOffset(canvas);
 	}
 	bool ComboBox::HasScrollbar() const
 	{
-		return maxVisibleItemCount < (int)items.size();
+		return maxVisibleItemCount < filteredItemCount;
 	}
 	void ComboBox::Update(const wi::Canvas& canvas, float dt)
 	{
@@ -2122,152 +2898,238 @@ namespace wi::gui
 
 		Widget::Update(canvas, dt);
 
-		if (IsEnabled() && dt > 0)
+		const float drop_width = fixed_drop_width > 0 ? fixed_drop_width : (scale.x - 1 - scale.y);
+		const float drop_x = GetDropX(canvas);
+
+		if (dt > 0)
 		{
-			float drop_offset = GetDropOffset(canvas);
+			if (IsEnabled())
+			{
+				float drop_offset = GetDropOffset(canvas);
 
-			if (state == FOCUS)
-			{
-				state = IDLE;
-			}
-			if (state == DEACTIVATING)
-			{
-				state = IDLE;
-			}
-			if (state == ACTIVE && combostate == COMBOSTATE_SELECTING)
-			{
-				hovered = -1;
-				Deactivate();
-			}
-			if (state == IDLE)
-			{
-				combostate = COMBOSTATE_INACTIVE;
-			}
-
-			hitBox.pos.x = translation.x;
-			hitBox.pos.y = translation.y;
-			hitBox.siz.x = scale.x + scale.y + 1; // + drop-down indicator arrow + little offset
-			hitBox.siz.y = scale.y;
-
-			Hitbox2D pointerHitbox = GetPointerHitbox();
-
-			bool clicked = false;
-			// hover the button
-			if (pointerHitbox.intersects(hitBox))
-			{
-				if (state == IDLE)
+				if (state == FOCUS)
 				{
-					state = FOCUS;
+					state = IDLE;
 				}
-			}
-
-			if (wi::input::Press(wi::input::MOUSE_BUTTON_LEFT))
-			{
-				// activate
-				clicked = true;
-			}
-
-			bool click_down = false;
-			if (wi::input::Down(wi::input::MOUSE_BUTTON_LEFT))
-			{
-				click_down = true;
 				if (state == DEACTIVATING)
 				{
-					// Keep pressed until mouse is released
+					state = IDLE;
+				}
+				if (state == ACTIVE && combostate == COMBOSTATE_SELECTING)
+				{
+					hovered = -1;
+					Deactivate();
+				}
+				if (state == IDLE)
+				{
+					combostate = COMBOSTATE_INACTIVE;
+				}
+
+				hitBox.pos.x = translation.x;
+				hitBox.pos.y = translation.y;
+				hitBox.siz.x = scale.x;
+				if (drop_arrow)
+				{
+					hitBox.siz.x += scale.y + 1; // + drop-down indicator arrow + little offset
+				}
+				hitBox.siz.y = scale.y;
+
+				Hitbox2D pointerHitbox = GetPointerHitbox();
+
+				bool clicked = false;
+				// hover the button
+				if (pointerHitbox.intersects(hitBox))
+				{
+					if (state == IDLE)
+					{
+						state = FOCUS;
+					}
+				}
+
+				if (wi::input::Press(wi::input::MOUSE_BUTTON_LEFT))
+				{
+					// activate
+					clicked = true;
+				}
+
+				bool click_down = false;
+				if (wi::input::Down(wi::input::MOUSE_BUTTON_LEFT) || wi::input::IsTouchPanning())
+				{
+					click_down = true;
+					if (state == DEACTIVATING)
+					{
+						// Keep pressed until mouse is released
+						Activate();
+					}
+				}
+
+
+				if (clicked && state == FOCUS)
+				{
 					Activate();
 				}
-			}
 
-
-			if (clicked && state == FOCUS)
-			{
-				Activate();
-			}
-
-			const float scrollbar_begin = translation.y + scale.y + drop_offset + scale.y * 0.5f;
-			const float scrollbar_end = scrollbar_begin + std::max(0.0f, (float)std::min(maxVisibleItemCount, (int)items.size()) - 1) * scale.y;
-
-			if (state == ACTIVE)
-			{
-				pointerHitbox = GetPointerHitbox(false); // get the hitbox again, but this time it won't be constrained to parent
-				if (HasScrollbar())
+				if (state == ACTIVE)
 				{
-					if (combostate != COMBOSTATE_SELECTING && combostate != COMBOSTATE_INACTIVE)
+					filteredItemCount = int(items.size());
+					if (!filterText.empty())
 					{
-						if (combostate == COMBOSTATE_SCROLLBAR_GRABBED || pointerHitbox.intersects(Hitbox2D(XMFLOAT2(translation.x + scale.x + 1, translation.y + scale.y + drop_offset), XMFLOAT2(scale.y, (float)std::min(maxVisibleItemCount, (int)items.size()) * scale.y))))
+						filteredItemCount = 0;
+						for (int i = 0; i < (int)items.size(); ++i)
 						{
-							if (click_down)
+							if (wi::helper::toUpper(items[i].name).find(filterText) == std::string::npos)
+								continue;
+							filteredItemCount++;
+						}
+					}
+
+					const float scrollbar_begin = translation.y + scale.y + drop_offset + scale.y * 0.5f;
+					const float scrollbar_end = scrollbar_begin + std::max(0.0f, (float)std::min(maxVisibleItemCount, filteredItemCount) - 1) * combo_height();
+
+					pointerHitbox = GetPointerHitbox(false); // get the hitbox again, but this time it won't be constrained to parent
+					if (HasScrollbar())
+					{
+						if (combostate != COMBOSTATE_SELECTING && combostate != COMBOSTATE_INACTIVE)
+						{
+							if (combostate == COMBOSTATE_SCROLLBAR_GRABBED || pointerHitbox.intersects(Hitbox2D(XMFLOAT2(drop_x + drop_width + 1, translation.y + scale.y + drop_offset), XMFLOAT2(scale.y, (float)std::min(maxVisibleItemCount, filteredItemCount) * combo_height()))))
 							{
-								combostate = COMBOSTATE_SCROLLBAR_GRABBED;
-								scrollbar_delta = wi::math::Clamp(pointerHitbox.pos.y, scrollbar_begin, scrollbar_end) - scrollbar_begin;
-								const float scrollbar_value = wi::math::InverseLerp(scrollbar_begin, scrollbar_end, scrollbar_begin + scrollbar_delta);
-								firstItemVisible = int(float(std::max(0, (int)items.size() - maxVisibleItemCount)) * scrollbar_value + 0.5f);
-								firstItemVisible = std::max(0, std::min((int)items.size() - maxVisibleItemCount, firstItemVisible));
+								if (click_down)
+								{
+									filter.SetAsActive();
+									combostate = COMBOSTATE_SCROLLBAR_GRABBED;
+									scrollbar_delta = wi::math::Clamp(pointerHitbox.pos.y, scrollbar_begin, scrollbar_end) - scrollbar_begin;
+									const float scrollbar_value = wi::math::InverseLerp(scrollbar_begin, scrollbar_end, scrollbar_begin + scrollbar_delta);
+									firstItemVisible = int(float(std::max(0, filteredItemCount - maxVisibleItemCount)) * scrollbar_value + 0.5f);
+									firstItemVisible = std::max(0, std::min(filteredItemCount - maxVisibleItemCount, firstItemVisible));
+								}
+								else
+								{
+									combostate = COMBOSTATE_SCROLLBAR_HOVER;
+								}
+							}
+							else if (!click_down)
+							{
+								combostate = COMBOSTATE_HOVER;
+							}
+						}
+					}
+
+					if (combostate == COMBOSTATE_INACTIVE)
+					{
+						combostate = COMBOSTATE_HOVER;
+						filter.SetAsActive();
+					}
+					else if (combostate == COMBOSTATE_SELECTING || wi::input::Press(wi::input::KEYBOARD_BUTTON_ESCAPE))
+					{
+						Deactivate();
+						combostate = COMBOSTATE_INACTIVE;
+					}
+					else if (combostate == COMBOSTATE_HOVER && scroll_allowed)
+					{
+						scroll_allowed = false;
+
+						if (HasScrollbar())
+						{
+							int scroll = int(wi::input::GetPointer().z - wi::input::GetTouchPan().y * 0.1f);
+							firstItemVisible -= scroll;
+							firstItemVisible = std::max(0, std::min(filteredItemCount - maxVisibleItemCount, firstItemVisible));
+							if (scroll)
+							{
+								const float scrollbar_value = wi::math::InverseLerp(0, float(std::max(0, filteredItemCount - maxVisibleItemCount)), float(firstItemVisible));
+								scrollbar_delta = wi::math::Lerp(scrollbar_begin, scrollbar_end, scrollbar_value) - scrollbar_begin;
+							}
+						}
+
+						hovered = -1;
+						int visible_items = 0;
+						for (int i = firstItemVisible; (i < (int)items.size()) && (visible_items < maxVisibleItemCount); ++i)
+						{
+							if (!filterText.empty() && wi::helper::toUpper(items[i].name).find(filterText) == std::string::npos)
+								continue;
+							visible_items++;
+							Hitbox2D itembox;
+							itembox.pos.x = drop_x;
+							itembox.pos.y = translation.y + GetItemOffset(canvas, i);
+							itembox.siz.x = drop_width;
+							itembox.siz.y = combo_height();
+							if (pointerHitbox.intersects(itembox))
+							{
+								hovered = i;
+								break;
+							}
+						}
+
+						if (clicked)
+						{
+							if (pointerHitbox.intersects(filter.hitBox))
+							{
+								combostate = COMBOSTATE_FILTER_INTERACT;
 							}
 							else
 							{
-								combostate = COMBOSTATE_SCROLLBAR_HOVER;
+								combostate = COMBOSTATE_SELECTING;
+								if (hovered >= 0)
+								{
+									SetSelected(hovered);
+								}
 							}
 						}
-						else if (!click_down)
+					}
+					else if (combostate == COMBOSTATE_FILTER_INTERACT)
+					{
+						// nothing here, but this holds main widget active while filter interaction is detected
+						if (clicked && !pointerHitbox.intersects(filter.hitBox))
 						{
-							combostate = COMBOSTATE_HOVER;
+							combostate = COMBOSTATE_INACTIVE;
 						}
 					}
 				}
 
-				if (combostate == COMBOSTATE_INACTIVE)
+				if (state == ACTIVE) // intentionally checks base state again!
 				{
-					combostate = COMBOSTATE_HOVER;
+					filter.Activate();
+					filter.scale_local.x = drop_width;
+					filter.scale_local.y = combo_height() - filter.GetShadowRadius() * 2;
+					filter.translation_local.x = drop_x;
+					filter.translation_local.y = translation.y + scale.y + drop_offset - combo_height() + filter.GetShadowRadius();
+					filter.SetDirty();
+					std::string newFilterText = wi::helper::toUpper(filter.GetText());
+					if (newFilterText != filterText)
+					{
+						firstItemVisible = 0;
+						scrollbar_delta = 0;
+					}
+					filterText = newFilterText;
+					filter.font.params.size = int(filter.scale_local.y - 4);
 				}
-				else if (combostate == COMBOSTATE_SELECTING)
+				else
 				{
-					Deactivate();
-					combostate = COMBOSTATE_INACTIVE;
-				}
-				else if (combostate == COMBOSTATE_HOVER && scroll_allowed)
-				{
-					scroll_allowed = false;
-					int scroll = (int)wi::input::GetPointer().z;
-					firstItemVisible -= scroll;
-					firstItemVisible = std::max(0, std::min((int)items.size() - maxVisibleItemCount, firstItemVisible));
-					if (scroll)
-					{
-						const float scrollbar_value = wi::math::InverseLerp(0, float(std::max(0, (int)items.size() - maxVisibleItemCount)), float(firstItemVisible));
-						scrollbar_delta = wi::math::Lerp(scrollbar_begin, scrollbar_end, scrollbar_value) - scrollbar_begin;
-					}
-
-					hovered = -1;
-					for (int i = firstItemVisible; i < (firstItemVisible + std::min(maxVisibleItemCount, (int)items.size())); ++i)
-					{
-						Hitbox2D itembox;
-						itembox.pos.x = translation.x;
-						itembox.pos.y = translation.y + GetItemOffset(canvas, i);
-						itembox.siz.x = scale.x;
-						itembox.siz.y = scale.y;
-						if (pointerHitbox.intersects(itembox))
-						{
-							hovered = i;
-							break;
-						}
-					}
-
-					if (clicked)
-					{
-						combostate = COMBOSTATE_SELECTING;
-						if (hovered >= 0)
-						{
-							SetSelected(hovered);
-						}
-					}
+					filter.Deactivate();
+					filter.SetText("");
+					filterText = "";
 				}
 			}
+			else
+			{
+				filter.Deactivate();
+			}
 		}
+
+		filter.SetEnabled(enabled);
+		filter.force_disable = force_disable;
+		filter.Update(canvas, dt);
+
+		sprites[state].params.siz.x = scale.x;
+		if (IsDropArrowEnabled())
+		{
+			sprites[state].params.siz.x -= scale.y + 1;
+		}
+
 		font.params.posY = translation.y + sprites[state].params.siz.y * 0.5f;
 
-		selected = std::min((int)items.size(), selected);
+		selected = std::min(selected, (int)items.size() - 1);
 
-		if (selected >= 0)
+		if (selected >= 0 && selected < (int)items.size())
 		{
 			selected_font.SetText(items[selected].name);
 		}
@@ -2275,25 +3137,38 @@ namespace wi::gui
 		{
 			selected_font.SetText(invalid_selection_text);
 		}
-		selected_font.params.posX = translation.x + scale.x * 0.5f;
+		selected_font.params.posX = translation.x + sprites[state].params.siz.x * 0.5f;
 		selected_font.params.posY = translation.y + scale.y * 0.5f;
 		selected_font.Update(dt);
+
+		scissorRect.bottom = (int32_t)std::ceil(translation.y + scale.y);
+		scissorRect.left = (int32_t)std::floor(translation.x);
+		scissorRect.right = (int32_t)std::ceil(translation.x + sprites[state].params.siz.x);
+		scissorRect.top = (int32_t)std::floor(translation.y);
+
+		left_text_width = font.TextWidth();
 	}
 	void ComboBox::Render(const wi::Canvas& canvas, CommandList cmd) const
 	{
+		Widget::Render(canvas, cmd);
 		if (!IsVisible())
 		{
 			return;
 		}
 		GraphicsDevice* device = wi::graphics::GetDevice();
 
+		const float drop_width = fixed_drop_width > 0 ? fixed_drop_width : (scale.x - 1 - scale.y);
+		const float drop_x = GetDropX(canvas);
+
 		// shadow:
 		if (shadow > 0)
 		{
 			wi::image::Params fx = sprites[state].params;
+			fx.gradient = wi::image::Params::Gradient::None;
 			fx.pos.x -= shadow;
 			fx.pos.y -= shadow;
-			fx.siz.x += shadow * 2 + 1 + scale.y;
+			fx.siz.x = scale.x;
+			fx.siz.x += shadow * 2;
 			fx.siz.y += shadow * 2;
 			fx.color = shadow_color;
 			if (fx.isCornerRoundingEnabled())
@@ -2306,7 +3181,18 @@ namespace wi::gui
 					}
 				}
 			}
-			wi::image::Draw(wi::texturehelper::getWhite(), fx, cmd);
+			if (shadow_highlight)
+			{
+				fx.enableHighlight();
+				fx.highlight_pos = GetPointerHighlightPos(canvas);
+				fx.highlight_color = shadow_highlight_color;
+				fx.highlight_spread = shadow_highlight_spread;
+			}
+			else
+			{
+				fx.disableHighlight();
+			}
+			wi::image::Draw(nullptr, fx, cmd);
 		}
 
 		wi::Color color = GetColor();
@@ -2317,56 +3203,60 @@ namespace wi::gui
 
 		font.Draw(cmd);
 
-		struct Vertex
+		const float drop_offset = GetDropOffset(canvas);
+
+		if (drop_arrow)
 		{
-			XMFLOAT4 pos;
-			XMFLOAT4 col;
-		};
-		static GPUBuffer vb_triangle;
-		if (!vb_triangle.IsValid())
-		{
-			Vertex vertices[3];
-			vertices[0].col = XMFLOAT4(1, 1, 1, 1);
-			vertices[1].col = XMFLOAT4(1, 1, 1, 1);
-			vertices[2].col = XMFLOAT4(1, 1, 1, 1);
-			wi::math::ConstructTriangleEquilateral(1, vertices[0].pos, vertices[1].pos, vertices[2].pos);
-
-			GPUBufferDesc desc;
-			desc.bind_flags = BindFlag::VERTEX_BUFFER;
-			desc.size = sizeof(vertices);
-			device->CreateBuffer(&desc, &vertices, &vb_triangle);
-		}
-		const XMMATRIX Projection = canvas.GetProjection();
-
-		float drop_offset = GetDropOffset(canvas);
-
-		// control-arrow-background
-		wi::image::Params fx = sprites[state].params;
-		fx.pos = XMFLOAT3(translation.x + scale.x + 1, translation.y, 0);
-		fx.siz = XMFLOAT2(scale.y, scale.y);
-		wi::image::Draw(wi::texturehelper::getWhite(), fx, cmd);
-
-		// control-arrow-triangle
-		{
-			device->BindPipelineState(&gui_internal().PSO_colored, cmd);
-
-			MiscCB cb;
-			cb.g_xColor = font.params.color;
-			XMStoreFloat4x4(&cb.g_xTransform, XMMatrixScaling(scale.y * 0.25f, scale.y * 0.25f, 1) *
-				XMMatrixRotationZ(drop_offset < 0 ? -XM_PIDIV2 : XM_PIDIV2) *
-				XMMatrixTranslation(translation.x + scale.x + 1 + scale.y * 0.5f, translation.y + scale.y * 0.5f, 0) *
-				Projection
-			);
-			device->BindDynamicConstantBuffer(cb, CBSLOT_RENDERER_MISC, cmd);
-			const GPUBuffer* vbs[] = {
-				&vb_triangle,
+			struct Vertex
+			{
+				XMFLOAT4 pos;
+				XMFLOAT4 col;
 			};
-			const uint32_t strides[] = {
-				sizeof(Vertex),
-			};
-			device->BindVertexBuffers(vbs, 0, arraysize(vbs), strides, nullptr, cmd);
+			static GPUBuffer vb_triangle;
+			if (!vb_triangle.IsValid())
+			{
+				Vertex vertices[3];
+				vertices[0].col = XMFLOAT4(1, 1, 1, 1);
+				vertices[1].col = XMFLOAT4(1, 1, 1, 1);
+				vertices[2].col = XMFLOAT4(1, 1, 1, 1);
+				wi::math::ConstructTriangleEquilateral(1, vertices[0].pos, vertices[1].pos, vertices[2].pos);
 
-			device->Draw(3, 0, cmd);
+				GPUBufferDesc desc;
+				desc.bind_flags = BindFlag::VERTEX_BUFFER;
+				desc.size = sizeof(vertices);
+				device->CreateBuffer(&desc, &vertices, &vb_triangle);
+			}
+			const XMMATRIX Projection = canvas.GetProjection();
+
+			// control-arrow-background
+			wi::image::Params fx = sprites[state].params;
+			fx.disableCornerRounding();
+			fx.pos = XMFLOAT3(translation.x + scale.x - scale.y, translation.y, 0);
+			fx.siz = XMFLOAT2(scale.y, scale.y);
+			wi::image::Draw(nullptr, fx, cmd);
+
+			// control-arrow-triangle
+			{
+				device->BindPipelineState(&gui_internal().PSO_colored, cmd);
+
+				MiscCB cb;
+				cb.g_xColor = font.params.color;
+				XMStoreFloat4x4(&cb.g_xTransform, XMMatrixScaling(scale.y * 0.25f, scale.y * 0.25f, 1) *
+					XMMatrixRotationZ(drop_offset < 0 ? -XM_PIDIV2 : XM_PIDIV2) *
+					XMMatrixTranslation(translation.x + scale.x - scale.y * 0.5f, translation.y + scale.y * 0.5f, 0) *
+					Projection
+				);
+				device->BindDynamicConstantBuffer(cb, CBSLOT_RENDERER_MISC, cmd);
+				const GPUBuffer* vbs[] = {
+					&vb_triangle,
+				};
+				const uint32_t strides[] = {
+					sizeof(Vertex),
+				};
+				device->BindVertexBuffers(vbs, 0, arraysize(vbs), strides, nullptr, cmd);
+
+				device->Draw(3, 0, cmd);
+			}
 		}
 
 		ApplyScissor(canvas, scissorRect, cmd);
@@ -2379,23 +3269,33 @@ namespace wi::gui
 		// drop-down
 		if (state == ACTIVE)
 		{
+			{
+				wi::graphics::Rect fullscissorRect;
+				fullscissorRect.bottom = (int32_t)(canvas.GetPhysicalHeight());
+				fullscissorRect.left = (int32_t)(0);
+				fullscissorRect.right = (int32_t)(canvas.GetPhysicalWidth());
+				fullscissorRect.top = (int32_t)(0);
+				ApplyScissor(canvas, fullscissorRect, cmd);
+				filter.Render(canvas, cmd);
+			}
 
 			if (HasScrollbar())
 			{
-				Rect rect;
-				rect.left = int(translation.x + scale.x + 1);
-				rect.right = int(translation.x + scale.x + 1 + scale.y);
+				wi::graphics::Rect rect;
+				rect.left = int(drop_x + drop_width + 1);
+				rect.right = int(drop_x + drop_width + 1 + scale.y);
 				rect.top = int(translation.y + scale.y + drop_offset);
-				rect.bottom = int(translation.y + scale.y + drop_offset + scale.y * maxVisibleItemCount);
+				rect.bottom = int(translation.y + scale.y + drop_offset + combo_height() * maxVisibleItemCount);
 				ApplyScissor(canvas, rect, cmd, false);
 
 				// control-scrollbar-base
 				{
-					fx = sprites[state].params;
-					fx.pos = XMFLOAT3(translation.x + scale.x + 1, translation.y + scale.y + drop_offset, 0);
-					fx.siz = XMFLOAT2(scale.y, scale.y * maxVisibleItemCount);
+					wi::image::Params fx = sprites[state].params;
+					fx.disableCornerRounding();
+					fx.pos = XMFLOAT3(drop_x + drop_width + 1, translation.y + scale.y + drop_offset, 0);
+					fx.siz = XMFLOAT2(scale.y, combo_height() * maxVisibleItemCount);
 					fx.color = drop_color;
-					wi::image::Draw(wi::texturehelper::getWhite(), fx, cmd);
+					wi::image::Draw(nullptr, fx, cmd);
 				}
 
 				// control-scrollbar-grab
@@ -2410,12 +3310,12 @@ namespace wi::gui
 						col = wi::Color::fromFloat4(sprites[ACTIVE].params.color);
 					}
 					wi::image::Draw(
-						wi::texturehelper::getWhite(),
+						nullptr,
 						wi::image::Params(
-							translation.x + scale.x + 1,
+							drop_x + drop_width + 1,
 							translation.y + scale.y + drop_offset + scrollbar_delta,
 							scale.y,
-							scale.y,
+							combo_height(),
 							col
 						),
 						cmd
@@ -2423,19 +3323,24 @@ namespace wi::gui
 				}
 			}
 
-			Rect rect;
-			rect.left = int(translation.x);
-			rect.right = rect.left + int(scale.x);
+			wi::graphics::Rect rect;
+			rect.left = int(drop_x);
+			rect.right = rect.left + int(drop_width);
 			rect.top = int(translation.y + scale.y + drop_offset);
-			rect.bottom = rect.top + int(scale.y * maxVisibleItemCount);
+			rect.bottom = rect.top + int(combo_height() * maxVisibleItemCount);
 			ApplyScissor(canvas, rect, cmd, false);
 
 			// control-list
-			for (int i = firstItemVisible; i < (firstItemVisible + std::min(maxVisibleItemCount, (int)items.size())); ++i)
+			int visible_items = 0;
+			for (int i = firstItemVisible; (i < (int)items.size()) && (visible_items < maxVisibleItemCount); ++i)
 			{
-				fx = sprites[state].params;
-				fx.pos = XMFLOAT3(translation.x, translation.y + GetItemOffset(canvas, i), 0);
-				fx.siz = XMFLOAT2(scale.x, scale.y);
+				if (!filterText.empty() && wi::helper::toUpper(items[i].name).find(filterText) == std::string::npos)
+					continue;
+				visible_items++;
+				wi::image::Params fx = sprites[state].params;
+				fx.disableCornerRounding();
+				fx.pos = XMFLOAT3(drop_x, translation.y + GetItemOffset(canvas, i), 0);
+				fx.siz = XMFLOAT2(drop_width, combo_height());
 				fx.color = drop_color;
 				if (hovered == i)
 				{
@@ -2448,11 +3353,11 @@ namespace wi::gui
 						fx.color = sprites[ACTIVE].params.color;
 					}
 				}
-				wi::image::Draw(wi::texturehelper::getWhite(), fx, cmd);
+				wi::image::Draw(nullptr, fx, cmd);
 
 				wi::font::Params fp = wi::font::Params(
-					translation.x + scale.x * 0.5f,
-					translation.y + scale.y * 0.5f + GetItemOffset(canvas, i),
+					drop_x + drop_width * 0.5f,
+					translation.y + combo_height() * 0.5f + GetItemOffset(canvas, i),
 					wi::font::WIFONTSIZE_DEFAULT,
 					wi::font::WIFALIGN_CENTER,
 					wi::font::WIFALIGN_CENTER,
@@ -2464,9 +3369,9 @@ namespace wi::gui
 			}
 		}
 	}
-	void ComboBox::OnSelect(std::function<void(EventArgs args)> func)
+	void ComboBox::OnSelect(std::function<void(const EventArgs& args)> func)
 	{
-		onSelect = func;
+		onSelect = std::move(func);
 	}
 	void ComboBox::AddItem(const std::string& name, uint64_t userdata)
 	{
@@ -2501,6 +3406,7 @@ namespace wi::gui
 		items.clear();
 
 		selected = -1;
+		//firstItemVisible = 0;
 	}
 	void ComboBox::SetMaxVisibleItemCount(int value)
 	{
@@ -2547,11 +3453,17 @@ namespace wi::gui
 	}
 	void ComboBox::SetItemText(int index, const std::string& text)
 	{
-		items[index].name = text;
+		if (index >= 0 && index < items.size())
+		{
+			items[index].name = text;
+		}
 	}
 	void ComboBox::SetItemUserdata(int index, uint64_t userdata)
 	{
-		items[index].userdata = userdata;
+		if (index >= 0 && index < items.size())
+		{
+			items[index].userdata = userdata;
+		}
 	}
 	void ComboBox::SetInvalidSelectionText(const std::string& text)
 	{
@@ -2559,7 +3471,7 @@ namespace wi::gui
 	}
 	std::string ComboBox::GetItemText(int index) const
 	{
-		if (index >= 0)
+		if (index >= 0 && index < items.size())
 		{
 			return items[index].name;
 		}
@@ -2567,7 +3479,7 @@ namespace wi::gui
 	}
 	uint64_t ComboBox::GetItemUserData(int index) const
 	{
-		if (index >= 0)
+		if (index >= 0 && index < items.size())
 		{
 			return items[index].userdata;
 		}
@@ -2577,9 +3489,14 @@ namespace wi::gui
 	{
 		return selected;
 	}
+	uint64_t ComboBox::GetSelectedUserdata() const
+	{
+		return GetItemUserData(GetSelected());
+	}
 	void ComboBox::SetColor(wi::Color color, int id)
 	{
 		Widget::SetColor(color, id);
+		filter.SetColor(color, id);
 
 		if (id == WIDGET_ID_COMBO_DROPDOWN)
 		{
@@ -2589,12 +3506,46 @@ namespace wi::gui
 	void ComboBox::SetTheme(const Theme& theme, int id)
 	{
 		Widget::SetTheme(theme, id);
+		filter.SetTheme(theme, id);
 
 		if (id == WIDGET_ID_COMBO_DROPDOWN)
 		{
 			drop_color = wi::Color::fromFloat4(theme.image.color);
 		}
 		theme.font.Apply(selected_font.params);
+	}
+	void ComboBox::ExportLocalization(wi::Localization& localization) const
+	{
+		Widget::ExportLocalization(localization);
+		if (has_flag(localization_enabled, LocalizationEnabled::Items))
+		{
+			wi::Localization& section = localization.GetSection(GetName()).GetSection("items");
+			for (size_t i = 0; i < items.size(); ++i)
+			{
+				section.Add(i, items[i].name.c_str());
+			}
+		}
+	}
+	void ComboBox::ImportLocalization(const wi::Localization& localization)
+	{
+		Widget::ImportLocalization(localization);
+		if (has_flag(localization_enabled, LocalizationEnabled::Items))
+		{
+			const wi::Localization* section = localization.CheckSection(GetName());
+			if (section == nullptr)
+				return;
+			section = section->CheckSection("items");
+			if (section == nullptr)
+				return;
+			for (size_t i = 0; i < items.size(); ++i)
+			{
+				const char* localized_item_name = section->Get(i);
+				if (localized_item_name != nullptr)
+				{
+					items[i].name = localized_item_name;
+				}
+			}
+		}
 	}
 
 
@@ -2610,157 +3561,85 @@ namespace wi::gui
 		SetText(name);
 		SetSize(XMFLOAT2(640, 480));
 
+		controls = window_controls;
+
 		for (int i = IDLE + 1; i < WIDGETSTATE_COUNT; ++i)
 		{
 			sprites[i].params.color = sprites[IDLE].params.color;
 		}
 
-		// Add controls
-		if (has_flag(window_controls, WindowControls::RESIZE_TOPLEFT))
+		if (!has_flag(window_controls, WindowControls::DISABLE_TITLE_BAR))
 		{
-			// Add a resizer control to the upperleft corner
-			resizeDragger_UpperLeft.Create(name + "_resize_dragger_upper_left");
-			resizeDragger_UpperLeft.SetShadowRadius(0);
-			resizeDragger_UpperLeft.SetTooltip("Resize window");
-			resizeDragger_UpperLeft.SetText("«|»");
-			resizeDragger_UpperLeft.font.params.rotation = XM_PIDIV4;
-			resizeDragger_UpperLeft.OnDrag([this](EventArgs args) {
-				auto saved_parent = this->parent;
-				this->Detach();
-				XMFLOAT2 scaleDiff;
-				scaleDiff.x = (scale.x - args.deltaPos.x) / scale.x;
-				scaleDiff.y = (scale.y - args.deltaPos.y) / scale.y;
-				this->Translate(XMFLOAT3(args.deltaPos.x, args.deltaPos.y, 0));
-				this->Scale(XMFLOAT3(scaleDiff.x, scaleDiff.y, 1));
-				this->scale_local = wi::math::Max(this->scale_local, XMFLOAT3(control_size * 3, control_size * 2, 1)); // don't allow resize to negative or too small
-				this->AttachTo(saved_parent);
-				});
-			AddWidget(&resizeDragger_UpperLeft, AttachmentOptions::NONE);
-		}
+			// Add title bar controls
+			if (has_flag(window_controls, WindowControls::MOVE))
+			{
+				// Add a grabber onto the title bar
+				moveDragger.Create(name);
+				moveDragger.SetLocalizationEnabled(LocalizationEnabled::None);
+				moveDragger.SetShadowRadius(0);
+				moveDragger.SetText(name);
+				moveDragger.font.params.h_align = wi::font::WIFALIGN_LEFT;
+				moveDragger.OnDrag([this](const EventArgs& args) {
+					auto saved_parent = this->parent;
+					this->Detach();
+					this->Translate(XMFLOAT3(args.deltaPos.x, args.deltaPos.y, 0));
+					this->AttachTo(saved_parent);
+					});
+				AddWidget(&moveDragger, AttachmentOptions::NONE);
+				has_titlebar = true;
+			}
 
-		if (has_flag(window_controls, WindowControls::RESIZE_TOPRIGHT))
-		{
-			// Add a resizer control to the upperleft corner
-			resizeDragger_UpperRight.Create(name + "_resize_dragger_upper_right");
-			resizeDragger_UpperRight.SetShadowRadius(0);
-			resizeDragger_UpperRight.SetTooltip("Resize window");
-			resizeDragger_UpperRight.SetText("«|»");
-			resizeDragger_UpperRight.font.params.rotation = XM_PIDIV4 * 3;
-			resizeDragger_UpperRight.OnDrag([this](EventArgs args) {
-				auto saved_parent = this->parent;
-				this->Detach();
-				XMFLOAT2 scaleDiff;
-				scaleDiff.x = (scale.x + args.deltaPos.x) / scale.x;
-				scaleDiff.y = (scale.y - args.deltaPos.y) / scale.y;
-				this->Translate(XMFLOAT3(0, args.deltaPos.y, 0));
-				this->Scale(XMFLOAT3(scaleDiff.x, scaleDiff.y, 1));
-				this->scale_local = wi::math::Max(this->scale_local, XMFLOAT3(control_size * 3, control_size * 2, 1)); // don't allow resize to negative or too small
-				this->AttachTo(saved_parent);
-				});
-			AddWidget(&resizeDragger_UpperRight, AttachmentOptions::NONE);
-		}
+			if (has_flag(window_controls, WindowControls::CLOSE))
+			{
+				// Add close button to the top left corner
+				closeButton.Create(name + "_close_button");
+				closeButton.SetLocalizationEnabled(LocalizationEnabled::None);
+				closeButton.SetShadowRadius(0);
+				closeButton.SetText("x");
+				closeButton.OnClick([this](const EventArgs& args) {
+					this->SetVisible(false);
+					if (onClose)
+					{
+						onClose(std::move(args));
+					}
+					});
+				closeButton.SetTooltip("Close window");
+				AddWidget(&closeButton, AttachmentOptions::NONE);
+				has_titlebar = true;
+			}
 
-		if (has_flag(window_controls, WindowControls::RESIZE_BOTTOMLEFT))
-		{
-			// Add a resizer control to the bottom right corner
-			resizeDragger_BottomLeft.Create(name + "_resize_dragger_bottom_left");
-			resizeDragger_BottomLeft.SetShadowRadius(0);
-			resizeDragger_BottomLeft.SetTooltip("Resize window");
-			resizeDragger_BottomLeft.SetText("«|»");
-			resizeDragger_BottomLeft.font.params.rotation = XM_PIDIV4 * 3;
-			resizeDragger_BottomLeft.OnDrag([this](EventArgs args) {
-				auto saved_parent = this->parent;
-				this->Detach();
-				XMFLOAT2 scaleDiff;
-				scaleDiff.x = (scale.x - args.deltaPos.x) / scale.x;
-				scaleDiff.y = (scale.y + args.deltaPos.y) / scale.y;
-				this->Translate(XMFLOAT3(args.deltaPos.x, 0, 0));
-				this->Scale(XMFLOAT3(scaleDiff.x, scaleDiff.y, 1));
-				this->scale_local = wi::math::Max(this->scale_local, XMFLOAT3(control_size * 3, control_size * 2, 1)); // don't allow resize to negative or too small
-				this->AttachTo(saved_parent);
-				});
-			AddWidget(&resizeDragger_BottomLeft, AttachmentOptions::NONE);
-		}
+			if (has_flag(window_controls, WindowControls::COLLAPSE))
+			{
+				// Add minimize button to the top left corner
+				collapseButton.Create(name + "_collapse_button");
+				collapseButton.SetLocalizationEnabled(LocalizationEnabled::None);
+				collapseButton.SetShadowRadius(0);
+				collapseButton.SetText("-");
+				collapseButton.OnClick([this](const EventArgs& args) {
+					this->SetMinimized(!this->IsMinimized());
+					if (onCollapse)
+					{
+						onCollapse({});
+					}
+					});
+				collapseButton.SetTooltip("Collapse/Expand window");
+				AddWidget(&collapseButton, AttachmentOptions::NONE);
+				has_titlebar = true;
+			}
 
-		if (has_flag(window_controls, WindowControls::RESIZE_BOTTOMRIGHT))
-		{
-			// Add a resizer control to the bottom right corner
-			resizeDragger_BottomRight.Create(name + "_resize_dragger_bottom_right");
-			resizeDragger_BottomRight.SetShadowRadius(0);
-			resizeDragger_BottomRight.SetTooltip("Resize window");
-			resizeDragger_BottomRight.SetText("«|»");
-			resizeDragger_BottomRight.font.params.rotation = XM_PIDIV4;
-			resizeDragger_BottomRight.OnDrag([this](EventArgs args) {
-				auto saved_parent = this->parent;
-				this->Detach();
-				XMFLOAT2 scaleDiff;
-				scaleDiff.x = (scale.x + args.deltaPos.x) / scale.x;
-				scaleDiff.y = (scale.y + args.deltaPos.y) / scale.y;
-				this->Scale(XMFLOAT3(scaleDiff.x, scaleDiff.y, 1));
-				this->scale_local = wi::math::Max(this->scale_local, XMFLOAT3(control_size * 3, control_size * 2, 1)); // don't allow resize to negative or too small
-				this->AttachTo(saved_parent);
-				});
-			AddWidget(&resizeDragger_BottomRight, AttachmentOptions::NONE);
-		}
-
-		if (has_flag(window_controls, WindowControls::MOVE))
-		{
-			// Add a grabber onto the title bar
-			moveDragger.Create(name + "_move_dragger");
-			moveDragger.SetShadowRadius(0);
-			moveDragger.SetText(name);
-			moveDragger.font.params.h_align = wi::font::WIFALIGN_LEFT;
-			moveDragger.OnDrag([this](EventArgs args) {
-				auto saved_parent = this->parent;
-				this->Detach();
-				this->Translate(XMFLOAT3(args.deltaPos.x, args.deltaPos.y, 0));
-				this->AttachTo(saved_parent);
-				});
-			AddWidget(&moveDragger, AttachmentOptions::NONE);
-		}
-
-		if (has_flag(window_controls, WindowControls::CLOSE))
-		{
-			// Add close button to the top right corner
-			closeButton.Create(name + "_close_button");
-			closeButton.SetShadowRadius(0);
-			closeButton.SetText("x");
-			closeButton.OnClick([this](EventArgs args) {
-				this->SetVisible(false);
-				if (onClose)
-				{
-					onClose(args);
-				}
-				});
-			closeButton.SetTooltip("Close window");
-			AddWidget(&closeButton, AttachmentOptions::NONE);
-		}
-
-		if (has_flag(window_controls, WindowControls::COLLAPSE))
-		{
-			// Add minimize button to the top right corner
-			collapseButton.Create(name + "_collapse_button");
-			collapseButton.SetShadowRadius(0);
-			collapseButton.SetText("-");
-			collapseButton.OnClick([this](EventArgs args) {
-				this->SetMinimized(!this->IsMinimized());
-				if (onCollapse)
-				{
-					onCollapse({});
-				}
-				});
-			collapseButton.SetTooltip("Collapse/Expand window");
-			AddWidget(&collapseButton, AttachmentOptions::NONE);
-		}
-
-		if (!has_flag(window_controls, WindowControls::MOVE))
-		{
-			// Simple title bar
-			label.Create(name);
-			label.SetShadowRadius(0);
-			label.SetText(name);
-			label.font.params.h_align = wi::font::WIFALIGN_LEFT;
-			AddWidget(&label, AttachmentOptions::NONE);
+			if (!has_flag(window_controls, WindowControls::MOVE) && !name.empty())
+			{
+				// Simple title bar
+				label.Create(name);
+				label.SetLocalizationEnabled(LocalizationEnabled::None);
+				label.SetShadowRadius(0);
+				label.SetText(name);
+				label.font.params.h_align = wi::font::WIFALIGN_LEFT;
+				label.scrollbar.SetEnabled(false);
+				label.SetWrapEnabled(false);
+				AddWidget(&label, AttachmentOptions::NONE);
+				has_titlebar = true;
+			}
 		}
 
 		scrollbar_horizontal.SetVertical(false);
@@ -2769,6 +3648,7 @@ namespace wi::gui
 		scrollbar_horizontal.sprites_knob[ScrollBar::SCROLLBAR_HOVER].params.color = wi::Color(180, 180, 180, 180);
 		scrollbar_horizontal.sprites_knob[ScrollBar::SCROLLBAR_GRABBED].params.color = wi::Color::White();
 		scrollbar_horizontal.knob_inset_border = XMFLOAT2(2, 4);
+		scrollbar_horizontal.SetOverScroll(0.1f);
 		AddWidget(&scrollbar_horizontal);
 
 		scrollbar_vertical.SetVertical(true);
@@ -2777,6 +3657,7 @@ namespace wi::gui
 		scrollbar_vertical.sprites_knob[ScrollBar::SCROLLBAR_HOVER].params.color = wi::Color(180, 180, 180, 180);
 		scrollbar_vertical.sprites_knob[ScrollBar::SCROLLBAR_GRABBED].params.color = wi::Color::White();
 		scrollbar_vertical.knob_inset_border = XMFLOAT2(4, 2);
+		scrollbar_vertical.SetOverScroll(0.1f);
 		AddWidget(&scrollbar_vertical);
 
 		scrollable_area.ClearTransform();
@@ -2789,7 +3670,14 @@ namespace wi::gui
 	void Window::AddWidget(Widget* widget, AttachmentOptions options)
 	{
 		widget->SetEnabled(this->IsEnabled());
-		widget->SetVisible(this->IsVisible());
+		if (IsVisible() && !IsMinimized())
+		{
+			widget->SetVisible(true);
+		}
+		else
+		{
+			widget->SetVisible(false);
+		}
 		if (has_flag(options, AttachmentOptions::SCROLLABLE))
 		{
 			widget->AttachTo(&scrollable_area);
@@ -2824,19 +3712,280 @@ namespace wi::gui
 			return;
 		}
 
+		Hitbox2D pointerHitbox = GetPointerHitbox();
+
+		// Resizer updates:
+		if (IsEnabled())
+		{
+			float vscale = IsCollapsed() ? control_size : scale.y;
+			Hitbox2D lefthitbox;
+			Hitbox2D righthitbox;
+			Hitbox2D tophitbox;
+			Hitbox2D bottomhitbox;
+			Hitbox2D toplefthitbox;
+			Hitbox2D toprighthitbox;
+			Hitbox2D bottomrighthitbox;
+			Hitbox2D bottomlefthitbox;
+			if (has_flag(controls, WindowControls::RESIZE_LEFT))
+			{
+				lefthitbox = Hitbox2D(XMFLOAT2(translation.x - resizehitboxwidth, translation.y), XMFLOAT2(resizehitboxwidth, vscale));
+			}
+			if (has_flag(controls, WindowControls::RESIZE_RIGHT))
+			{
+				righthitbox = Hitbox2D(XMFLOAT2(translation.x + scale.x, translation.y), XMFLOAT2(resizehitboxwidth, vscale));
+			}
+			if (!IsCollapsed())
+			{
+				if (has_flag(controls, WindowControls::RESIZE_TOP))
+				{
+					tophitbox = Hitbox2D(XMFLOAT2(translation.x, translation.y - resizehitboxwidth), XMFLOAT2(scale.x, resizehitboxwidth));
+				}
+				if (has_flag(controls, WindowControls::RESIZE_BOTTOM))
+				{
+					bottomhitbox = Hitbox2D(XMFLOAT2(translation.x, translation.y + vscale), XMFLOAT2(scale.x, resizehitboxwidth));
+				}
+				if (has_flag(controls, WindowControls::RESIZE_TOPLEFT))
+				{
+					toplefthitbox = Hitbox2D(XMFLOAT2(translation.x - resizehitboxwidth, translation.y - resizehitboxwidth), XMFLOAT2(resizehitboxwidth * 2, resizehitboxwidth * 2));
+				}
+				if (has_flag(controls, WindowControls::RESIZE_TOPRIGHT))
+				{
+					toprighthitbox = Hitbox2D(XMFLOAT2(translation.x + scale.x - resizehitboxwidth, translation.y - resizehitboxwidth), XMFLOAT2(resizehitboxwidth * 2, resizehitboxwidth * 2));
+				}
+				if (has_flag(controls, WindowControls::RESIZE_BOTTOMRIGHT))
+				{
+					bottomrighthitbox = Hitbox2D(XMFLOAT2(translation.x + scale.x - resizehitboxwidth, translation.y + vscale - resizehitboxwidth), XMFLOAT2(resizehitboxwidth * 2, resizehitboxwidth * 2));
+				}
+				if (has_flag(controls, WindowControls::RESIZE_BOTTOMLEFT))
+				{
+					bottomlefthitbox = Hitbox2D(XMFLOAT2(translation.x - resizehitboxwidth, translation.y + vscale - resizehitboxwidth), XMFLOAT2(resizehitboxwidth * 2, resizehitboxwidth * 2));
+				}
+			}
+
+			if (resize_state == RESIZE_STATE_NONE && (wi::input::Press(wi::input::MOUSE_BUTTON_LEFT) || wi::input::IsTouchPanStarting()))
+			{
+				if (pointerHitbox.intersects(toplefthitbox))
+				{
+					resize_state = RESIZE_STATE_TOPLEFT;
+					Activate();
+				}
+				else if (pointerHitbox.intersects(toprighthitbox))
+				{
+					resize_state = RESIZE_STATE_TOPRIGHT;
+					Activate();
+				}
+				else if (pointerHitbox.intersects(bottomrighthitbox))
+				{
+					resize_state = RESIZE_STATE_BOTTOMRIGHT;
+					Activate();
+				}
+				else if (pointerHitbox.intersects(bottomlefthitbox))
+				{
+					resize_state = RESIZE_STATE_BOTTOMLEFT;
+					Activate();
+				}
+				else if (pointerHitbox.intersects(lefthitbox))
+				{
+					resize_state = RESIZE_STATE_LEFT;
+					Activate();
+				}
+				else if (pointerHitbox.intersects(righthitbox))
+				{
+					resize_state = RESIZE_STATE_RIGHT;
+					Activate();
+				}
+				else if (pointerHitbox.intersects(tophitbox))
+				{
+					resize_state = RESIZE_STATE_TOP;
+					Activate();
+				}
+				else if (pointerHitbox.intersects(bottomhitbox))
+				{
+					resize_state = RESIZE_STATE_BOTTOM;
+					Activate();
+				}
+				resize_begin = pointerHitbox.pos;
+			}
+			if (wi::input::Down(wi::input::MOUSE_BUTTON_LEFT) || wi::input::IsTouchPanning())
+			{
+				if (resize_state != RESIZE_STATE_NONE)
+				{
+					auto saved_parent = this->parent;
+					this->Detach();
+					float deltaX = pointerHitbox.pos.x - resize_begin.x;
+					float deltaY = pointerHitbox.pos.y - resize_begin.y;
+
+					switch (resize_state)
+					{
+					case wi::gui::Window::RESIZE_STATE_LEFT:
+						this->Translate(XMFLOAT3(deltaX, 0, 0));
+						this->Scale(XMFLOAT3((scale.x - deltaX) / scale.x, 1, 1));
+						break;
+					case wi::gui::Window::RESIZE_STATE_TOP:
+						this->Translate(XMFLOAT3(0, deltaY, 0));
+						this->Scale(XMFLOAT3(1, (scale.y - deltaY) / scale.y, 1));
+						break;
+					case wi::gui::Window::RESIZE_STATE_RIGHT:
+						this->Scale(XMFLOAT3((scale.x + deltaX) / scale.x, 1, 1));
+						break;
+					case wi::gui::Window::RESIZE_STATE_BOTTOM:
+						this->Scale(XMFLOAT3(1, (scale.y + deltaY) / scale.y, 1));
+						break;
+					case wi::gui::Window::RESIZE_STATE_TOPLEFT:
+						this->Translate(XMFLOAT3(deltaX, deltaY, 0));
+						this->Scale(XMFLOAT3((scale.x - deltaX) / scale.x, (scale.y - deltaY) / scale.y, 1));
+						break;
+					case wi::gui::Window::RESIZE_STATE_TOPRIGHT:
+						this->Translate(XMFLOAT3(0, deltaY, 0));
+						this->Scale(XMFLOAT3((scale.x + deltaX) / scale.x, (scale.y - deltaY) / scale.y, 1));
+						break;
+					case wi::gui::Window::RESIZE_STATE_BOTTOMRIGHT:
+						this->Scale(XMFLOAT3((scale.x + deltaX) / scale.x, (scale.y + deltaY) / scale.y, 1));
+						break;
+					case wi::gui::Window::RESIZE_STATE_BOTTOMLEFT:
+						this->Translate(XMFLOAT3(deltaX, 0, 0));
+						this->Scale(XMFLOAT3((scale.x - deltaX) / scale.x, (scale.y + deltaY) / scale.y, 1));
+						break;
+					default:
+						break;
+					}
+
+					this->scale_local = wi::math::Max(this->scale_local, XMFLOAT3(control_size * 3, control_size * 2, 1)); // don't allow resize to negative or too small
+					this->AttachTo(saved_parent);
+					resize_begin = pointerHitbox.pos;
+				}
+			}
+			else
+			{
+				resize_state = RESIZE_STATE_NONE;
+			}
+
+			if (
+				resize_state != RESIZE_STATE_NONE ||
+				pointerHitbox.intersects(toplefthitbox) ||
+				pointerHitbox.intersects(toprighthitbox) ||
+				pointerHitbox.intersects(bottomlefthitbox) ||
+				pointerHitbox.intersects(bottomrighthitbox) ||
+				pointerHitbox.intersects(lefthitbox) ||
+				pointerHitbox.intersects(righthitbox) ||
+				pointerHitbox.intersects(tophitbox) ||
+				pointerHitbox.intersects(bottomhitbox)
+				)
+			{
+				resize_blink_timer += dt;
+			}
+			else
+			{
+				resize_blink_timer = 0;
+			}
+		}
+
+		// Corner rounding update for control widgets:
+		for (int i = 0; i < arraysize(moveDragger.sprites); ++i)
+		{
+			moveDragger.sprites[i].params.disableCornerRounding();
+			label.sprites[i].params.disableCornerRounding();
+			collapseButton.sprites[i].params.disableCornerRounding();
+			closeButton.sprites[i].params.disableCornerRounding();
+			scrollbar_horizontal.sprites[i].params.disableCornerRounding();
+			scrollbar_vertical.sprites[i].params.disableCornerRounding();
+
+			if (sprites[state].params.isCornerRoundingEnabled())
+			{
+				// Left side:
+				if (collapseButton.parent)
+				{
+					collapseButton.sprites[i].params.enableCornerRounding();
+					collapseButton.sprites[i].params.corners_rounding[0].radius = sprites[state].params.corners_rounding[0].radius;
+					if (IsCollapsed())
+					{
+						collapseButton.sprites[i].params.corners_rounding[2].radius = sprites[state].params.corners_rounding[2].radius;
+					}
+					else
+					{
+						collapseButton.sprites[i].params.corners_rounding[2].radius = 0;
+					}
+				}
+				else if (moveDragger.parent)
+				{
+					moveDragger.sprites[i].params.enableCornerRounding();
+					moveDragger.sprites[i].params.corners_rounding[0].radius = sprites[state].params.corners_rounding[0].radius;
+					if (IsCollapsed())
+					{
+						moveDragger.sprites[i].params.corners_rounding[2].radius = sprites[state].params.corners_rounding[2].radius;
+					}
+					else
+					{
+						moveDragger.sprites[i].params.corners_rounding[2].radius = 0;
+					}
+				}
+				else if (label.parent)
+				{
+					label.sprites[i].params.enableCornerRounding();
+					label.sprites[i].params.corners_rounding[0].radius = sprites[state].params.corners_rounding[0].radius;
+					if (IsCollapsed())
+					{
+						label.sprites[i].params.corners_rounding[2].radius = sprites[state].params.corners_rounding[2].radius;
+					}
+					else
+					{
+						label.sprites[i].params.corners_rounding[2].radius = 0;
+					}
+				}
+
+				// Right side:
+				if (closeButton.parent)
+				{
+					closeButton.sprites[i].params.enableCornerRounding();
+					closeButton.sprites[i].params.corners_rounding[1].radius = sprites[state].params.corners_rounding[1].radius;
+					if (IsCollapsed())
+					{
+						closeButton.sprites[i].params.corners_rounding[3].radius = sprites[state].params.corners_rounding[3].radius;
+					}
+					else
+					{
+						closeButton.sprites[i].params.corners_rounding[3].radius = 0;
+					}
+				}
+				else if (moveDragger.parent)
+				{
+					moveDragger.sprites[i].params.enableCornerRounding();
+					moveDragger.sprites[i].params.corners_rounding[1].radius = sprites[state].params.corners_rounding[1].radius;
+					if (IsCollapsed())
+					{
+						moveDragger.sprites[i].params.corners_rounding[3].radius = sprites[state].params.corners_rounding[3].radius;
+					}
+					else
+					{
+						moveDragger.sprites[i].params.corners_rounding[3].radius = 0;
+					}
+				}
+				else if (label.parent)
+				{
+					label.sprites[i].params.enableCornerRounding();
+					label.sprites[i].params.corners_rounding[1].radius = sprites[state].params.corners_rounding[1].radius;
+					if (IsCollapsed())
+					{
+						label.sprites[i].params.corners_rounding[3].radius = sprites[state].params.corners_rounding[3].radius;
+					}
+					else
+					{
+						label.sprites[i].params.corners_rounding[3].radius = 0;
+					}
+				}
+
+				scrollbar_horizontal.sprites[i].params.enableCornerRounding();
+				scrollbar_horizontal.sprites[i].params.corners_rounding[3].radius = sprites[state].params.corners_rounding[3].radius;
+				scrollbar_vertical.sprites[i].params.enableCornerRounding();
+				scrollbar_vertical.sprites[i].params.corners_rounding[3].radius = sprites[state].params.corners_rounding[3].radius;
+			}
+		}
+
 		moveDragger.force_disable = force_disable;
-		resizeDragger_UpperLeft.force_disable = force_disable;
-		resizeDragger_UpperRight.force_disable = force_disable;
-		resizeDragger_BottomLeft.force_disable = force_disable;
-		resizeDragger_BottomRight.force_disable = force_disable;
 		scrollbar_horizontal.force_disable = force_disable;
 		scrollbar_vertical.force_disable = force_disable;
 
 		moveDragger.Update(canvas, dt);
-		resizeDragger_UpperLeft.Update(canvas, dt);
-		resizeDragger_UpperRight.Update(canvas, dt);
-		resizeDragger_BottomLeft.Update(canvas, dt);
-		resizeDragger_BottomRight.Update(canvas, dt);
 
 		// Don't allow moving outside of screen:
 		if (parent == nullptr)
@@ -2850,11 +3999,14 @@ namespace wi::gui
 
 		ResizeLayout();
 
-		Hitbox2D pointerHitbox = GetPointerHitbox();
-
 		uint32_t priority = 0;
 
-		// Compute scrollable area:
+		scrollable_area.scissorRect = scissorRect;
+
+		scrollable_area.Detach();
+		scrollable_area.ClearTransform();
+		scrollable_area.Translate(translation);
+
 		float scroll_length_horizontal = 0;
 		float scroll_length_vertical = 0;
 		for (auto& widget : widgets)
@@ -2868,42 +4020,69 @@ namespace wi::gui
 				scroll_length_vertical = std::max(scroll_length_vertical, widget->translation_local.y + size.y);
 			}
 		}
-		scrollbar_horizontal.SetListLength(scroll_length_horizontal);
-		scrollbar_vertical.SetListLength(scroll_length_vertical);
-		scrollbar_horizontal.Update(canvas, 0);
-		scrollbar_vertical.Update(canvas, 0);
-		scrollable_area.Detach();
-		scrollable_area.ClearTransform();
-		scrollable_area.Translate(translation);
-		scrollable_area.Translate(XMFLOAT3(scrollbar_horizontal.GetOffset(), control_size + 1 + scrollbar_vertical.GetOffset(), 0));
-		scrollable_area.AttachTo(this);
-		scrollable_area.scissorRect = scissorRect;
-		scrollable_area.scissorRect.left += 1;
-		scrollable_area.scissorRect.top += (int32_t)control_size;
-		if (scrollbar_horizontal.parent != nullptr && scrollbar_horizontal.IsScrollbarRequired())
-		{
-			scrollable_area.scissorRect.bottom -= (int32_t)control_size + 1;
-		}
-		if (scrollbar_vertical.parent != nullptr && scrollbar_vertical.IsScrollbarRequired())
-		{
-			scrollable_area.scissorRect.right -= (int32_t)control_size + 1;
-		}
-		scrollable_area.active_area.pos.x = float(scrollable_area.scissorRect.left);
-		scrollable_area.active_area.pos.y = float(scrollable_area.scissorRect.top);
-		scrollable_area.active_area.siz.x = float(scrollable_area.scissorRect.right) - float(scrollable_area.scissorRect.left);
-		scrollable_area.active_area.siz.y = float(scrollable_area.scissorRect.bottom) - float(scrollable_area.scissorRect.top);
-		
 
-		bool focus = false;
+		if (has_flag(controls, WindowControls::FIT_ALL_WIDGETS_VERTICAL))
+		{
+			if (!IsCollapsed())
+			{
+				// it will be dynamically sized to fit all widgets:
+				auto saved_parent = this->parent;
+				this->Detach();
+				scale_local.y = control_size + 1 + scroll_length_vertical + 4; // some padding at the bottom
+				this->AttachTo(saved_parent);
+			}
+		}
+		else
+		{
+			// Compute scrollable area:
+			if (scrollbar_horizontal.parent != nullptr || scrollbar_vertical.parent != nullptr)
+			{
+				scrollbar_horizontal.SetListLength(scroll_length_horizontal);
+				scrollbar_vertical.SetListLength(scroll_length_vertical);
+				scrollbar_horizontal.Update(canvas, 0);
+				scrollbar_vertical.Update(canvas, 0);
+				scrollable_area.Translate(XMFLOAT3(scrollbar_horizontal.GetOffset(), 1 + scrollbar_vertical.GetOffset(), 0));
+				scrollable_area.scissorRect.left += 1;
+				if (scrollbar_horizontal.parent != nullptr && scrollbar_horizontal.IsScrollbarRequired())
+				{
+					scrollable_area.scissorRect.bottom -= (int32_t)control_size + 1;
+				}
+				if (scrollbar_vertical.parent != nullptr && scrollbar_vertical.IsScrollbarRequired())
+				{
+					scrollable_area.scissorRect.right -= (int32_t)control_size + 1;
+				}
+				scrollable_area.active_area.pos.x = float(scrollable_area.scissorRect.left);
+				scrollable_area.active_area.pos.y = float(scrollable_area.scissorRect.top);
+				scrollable_area.active_area.siz.x = float(scrollable_area.scissorRect.right) - float(scrollable_area.scissorRect.left);
+				scrollable_area.active_area.siz.y = float(scrollable_area.scissorRect.bottom) - float(scrollable_area.scissorRect.top);
+			}
+		}
+
+		if (has_titlebar)
+		{
+			scrollable_area.Translate(XMFLOAT3(0, control_size, 0));
+			scrollable_area.scissorRect.top += (int32_t)control_size;
+		}
+
+		scrollable_area.AttachTo(this);
+
+		bool local_force_disable = this->force_disable;
+
 		for (size_t i = 0; i < widgets.size(); ++i)
 		{
 			Widget* widget = widgets[i]; // re index in loop, because widgets can be realloced while updating!
-			widget->force_disable = force_disable || focus;
+			widget->force_disable = local_force_disable;
 			widget->Update(canvas, dt);
 			widget->force_disable = false;
 
+			if (widget->GetState() > IDLE)
+			{
+				local_force_disable = true;
+			}
+
 			if (widget->priority_change)
 			{
+				this->priority_change = true;
 				widget->priority_change = false;
 				widget->priority = priority++;
 			}
@@ -2911,27 +4090,38 @@ namespace wi::gui
 			{
 				widget->priority = ~0u;
 			}
-
-			if (widget->GetState() > IDLE)
-			{
-				focus = true;
-			}
 		}
 
-		if (priority > 0) //Sort only if there are priority changes
-			//Use std::stable_sort instead of std::sort to preserve UI element order with equal priorities
+		if (local_force_disable && state == IDLE)
+		{
+			state = FOCUS;
+		}
+
+		if (priority > 0)
+		{
+			// Sort only if there are priority changes
+			//	Use std::stable_sort instead of std::sort to preserve UI element order with equal priorities
 			std::stable_sort(widgets.begin(), widgets.end(), [](const Widget* a, const Widget* b) {
-			return a->priority < b->priority;
-				});
+				return a->priority < b->priority;
+			});
+		}
 
 		if (!IsMinimized() && IsVisible())
 		{
-			float scroll = wi::input::GetPointer().z * 20;
-			if (scroll && scroll_allowed && scrollbar_vertical.IsScrollbarRequired() && pointerHitbox.intersects(hitBox)) // when window is in focus, but other widgets aren't
+			float wheel_delta = wi::input::GetPointer().z * 60.0f;
+			if (!local_force_disable)
 			{
-				scroll_allowed = false;
-				// This is outside scrollbar code, because it can also be scrolled if parent widget is only in focus
-				scrollbar_vertical.Scroll(scroll);
+				wheel_delta -= wi::input::GetTouchPan().y;
+			}
+			if (wheel_delta != 0.0f && scroll_allowed && scrollbar_vertical.IsScrollbarRequired() && pointerHitbox.intersects(hitBox)) // when window is in focus, but other widgets aren't
+			{
+				const bool at_begin = (wheel_delta > 0 && scrollbar_vertical.IsScrolledToBegin());
+				if (!at_begin)
+				{
+					scroll_allowed = false;
+					// This is outside scrollbar code, because it can also be scrolled if parent widget is only in focus
+					scrollbar_vertical.Scroll(wheel_delta);
+				}
 			}
 		}
 
@@ -2992,9 +4182,13 @@ namespace wi::gui
 		{
 			state = IDLE;
 		}
+
+		if (state == IDLE && resize_blink_timer > 0)
+			state = FOCUS;
 	}
 	void Window::Render(const wi::Canvas& canvas, CommandList cmd) const
 	{
+		Widget::Render(canvas, cmd);
 		if (!IsVisible())
 		{
 			return;
@@ -3008,6 +4202,7 @@ namespace wi::gui
 		if (shadow > 0)
 		{
 			wi::image::Params fx = sprites[state].params;
+			fx.gradient = wi::image::Params::Gradient::None;
 			fx.pos.x -= shadow;
 			fx.pos.y -= shadow;
 			fx.siz.x += shadow * 2;
@@ -3027,13 +4222,194 @@ namespace wi::gui
 					}
 				}
 			}
-			wi::image::Draw(wi::texturehelper::getWhite(), fx, cmd);
+			if (shadow_highlight)
+			{
+				fx.enableHighlight();
+				fx.highlight_pos = GetPointerHighlightPos(canvas);
+				fx.highlight_color = shadow_highlight_color;
+				fx.highlight_spread = shadow_highlight_spread;
+			}
+			else
+			{
+				fx.disableHighlight();
+			}
+			wi::image::Draw(nullptr, fx, cmd);
+		}
+
+		// resize indicator:
+		{
+			// hitboxes are recomputed because window transform might have changed since update!!
+			float vscale = IsCollapsed() ? control_size : scale.y;
+			Hitbox2D lefthitbox;
+			Hitbox2D righthitbox;
+			Hitbox2D tophitbox;
+			Hitbox2D bottomhitbox;
+			Hitbox2D toplefthitbox;
+			Hitbox2D toprighthitbox;
+			Hitbox2D bottomrighthitbox;
+			Hitbox2D bottomlefthitbox;
+			if (has_flag(controls, WindowControls::RESIZE_LEFT))
+			{
+				lefthitbox = Hitbox2D(XMFLOAT2(translation.x - resizehitboxwidth, translation.y), XMFLOAT2(resizehitboxwidth, vscale));
+			}
+			if (has_flag(controls, WindowControls::RESIZE_RIGHT))
+			{
+				righthitbox = Hitbox2D(XMFLOAT2(translation.x + scale.x, translation.y), XMFLOAT2(resizehitboxwidth, vscale));
+			}
+			if (!IsCollapsed())
+			{
+				if (has_flag(controls, WindowControls::RESIZE_TOP))
+				{
+					tophitbox = Hitbox2D(XMFLOAT2(translation.x, translation.y - resizehitboxwidth), XMFLOAT2(scale.x, resizehitboxwidth));
+				}
+				if (has_flag(controls, WindowControls::RESIZE_BOTTOM))
+				{
+					bottomhitbox = Hitbox2D(XMFLOAT2(translation.x, translation.y + vscale), XMFLOAT2(scale.x, resizehitboxwidth));
+				}
+				if (has_flag(controls, WindowControls::RESIZE_TOPLEFT))
+				{
+					toplefthitbox = Hitbox2D(XMFLOAT2(translation.x - resizehitboxwidth, translation.y - resizehitboxwidth), XMFLOAT2(resizehitboxwidth * 2, resizehitboxwidth * 2));
+				}
+				if (has_flag(controls, WindowControls::RESIZE_TOPRIGHT))
+				{
+					toprighthitbox = Hitbox2D(XMFLOAT2(translation.x + scale.x - resizehitboxwidth, translation.y - resizehitboxwidth), XMFLOAT2(resizehitboxwidth * 2, resizehitboxwidth * 2));
+				}
+				if (has_flag(controls, WindowControls::RESIZE_BOTTOMRIGHT))
+				{
+					bottomrighthitbox = Hitbox2D(XMFLOAT2(translation.x + scale.x - resizehitboxwidth, translation.y + vscale - resizehitboxwidth), XMFLOAT2(resizehitboxwidth * 2, resizehitboxwidth * 2));
+				}
+				if (has_flag(controls, WindowControls::RESIZE_BOTTOMLEFT))
+				{
+					bottomlefthitbox = Hitbox2D(XMFLOAT2(translation.x - resizehitboxwidth, translation.y + vscale - resizehitboxwidth), XMFLOAT2(resizehitboxwidth * 2, resizehitboxwidth * 2));
+				}
+			}
+
+			const Hitbox2D pointerHitbox = GetPointerHitbox();
+
+			wi::image::Params fx = sprites[state].params;
+			fx.blendFlag = wi::enums::BLENDMODE_ALPHA;
+			fx.pos.x -= resizehitboxwidth;
+			fx.pos.y -= resizehitboxwidth;
+			fx.siz.x += resizehitboxwidth * 2;
+			fx.siz.y += resizehitboxwidth * 2;
+			fx.color = resize_state == RESIZE_STATE_NONE ? sprites[FOCUS].params.color : sprites[ACTIVE].params.color;
+			if (IsMinimized())
+			{
+				fx.siz.y = control_size + resizehitboxwidth * 2;
+			}
+			if (fx.isCornerRoundingEnabled())
+			{
+				for (auto& corner_rounding : fx.corners_rounding)
+				{
+					if (corner_rounding.radius > 0)
+					{
+						corner_rounding.radius += resizehitboxwidth;
+					}
+				}
+			}
+			//fx.border_soften = 0.01f;
+
+			if (resize_state == RESIZE_STATE_TOPLEFT || pointerHitbox.intersects(toplefthitbox))
+			{
+				fx.angular_softness_outer_angle = XM_PI * 0.03f;
+				fx.angular_softness_inner_angle = XM_PI * wi::math::Lerp(0.0f, 0.025f, std::abs(std::sin(resize_blink_timer * 4)));
+				XMStoreFloat2(&fx.angular_softness_direction, XMVector2Normalize(XMVectorSet(-1, -1, 0, 0)));
+				wi::image::Draw(nullptr, fx, cmd);
+				wi::input::SetCursor(wi::input::CURSOR_RESIZE_NWSE);
+			}
+			else if (resize_state == RESIZE_STATE_TOPRIGHT || pointerHitbox.intersects(toprighthitbox))
+			{
+				fx.angular_softness_outer_angle = XM_PI * 0.03f;
+				fx.angular_softness_inner_angle = XM_PI * wi::math::Lerp(0.0f, 0.025f, std::abs(std::sin(resize_blink_timer * 4)));
+				XMStoreFloat2(&fx.angular_softness_direction, XMVector2Normalize(XMVectorSet(1, -1, 0, 0)));
+				wi::image::Draw(nullptr, fx, cmd);
+				wi::input::SetCursor(wi::input::CURSOR_RESIZE_NESW);
+			}
+			else if (resize_state == RESIZE_STATE_BOTTOMRIGHT || pointerHitbox.intersects(bottomrighthitbox))
+			{
+				fx.angular_softness_outer_angle = XM_PI * 0.03f;
+				fx.angular_softness_inner_angle = XM_PI * wi::math::Lerp(0.0f, 0.025f, std::abs(std::sin(resize_blink_timer * 4)));
+				XMStoreFloat2(&fx.angular_softness_direction, XMVector2Normalize(XMVectorSet(1, 1, 0, 0)));
+				wi::image::Draw(nullptr, fx, cmd);
+				wi::input::SetCursor(wi::input::CURSOR_RESIZE_NWSE);
+			}
+			else if (resize_state == RESIZE_STATE_BOTTOMLEFT || pointerHitbox.intersects(bottomlefthitbox))
+			{
+				fx.angular_softness_outer_angle = XM_PI * 0.03f;
+				fx.angular_softness_inner_angle = XM_PI * wi::math::Lerp(0.0f, 0.025f, std::abs(std::sin(resize_blink_timer * 4)));
+				XMStoreFloat2(&fx.angular_softness_direction, XMVector2Normalize(XMVectorSet(-1, 1, 0, 0)));
+				wi::image::Draw(nullptr, fx, cmd);
+				wi::input::SetCursor(wi::input::CURSOR_RESIZE_NESW);
+			}
+			else if (resize_state == RESIZE_STATE_LEFT || pointerHitbox.intersects(lefthitbox))
+			{
+				fx.angular_softness_outer_angle = XM_PI * 0.25f;
+				fx.angular_softness_inner_angle = XM_PI * wi::math::Lerp(0.0f, 0.24f, std::abs(std::sin(resize_blink_timer * 4)));
+				fx.angular_softness_direction = XMFLOAT2(-1, 0);
+				wi::image::Draw(nullptr, fx, cmd);
+				wi::input::SetCursor(wi::input::CURSOR_RESIZE_EW);
+			}
+			else if (resize_state == RESIZE_STATE_RIGHT || pointerHitbox.intersects(righthitbox))
+			{
+				fx.angular_softness_outer_angle = XM_PI * 0.25f;
+				fx.angular_softness_inner_angle = XM_PI * wi::math::Lerp(0.0f, 0.24f, std::abs(std::sin(resize_blink_timer * 4)));
+				fx.angular_softness_direction = XMFLOAT2(1, 0);
+				wi::image::Draw(nullptr, fx, cmd);
+				wi::input::SetCursor(wi::input::CURSOR_RESIZE_EW);
+			}
+			else if (resize_state == RESIZE_STATE_TOP || pointerHitbox.intersects(tophitbox))
+			{
+				fx.angular_softness_outer_angle = XM_PI * 0.25f;
+				fx.angular_softness_inner_angle = XM_PI * wi::math::Lerp(0.0f, 0.24f, std::abs(std::sin(resize_blink_timer * 4)));
+				fx.angular_softness_direction = XMFLOAT2(0, -1);
+				wi::image::Draw(nullptr, fx, cmd);
+				wi::input::SetCursor(wi::input::CURSOR_RESIZE_NS);
+			}
+			else if (resize_state == RESIZE_STATE_BOTTOM || pointerHitbox.intersects(bottomhitbox))
+			{
+				fx.angular_softness_outer_angle = XM_PI * 0.25f;
+				fx.angular_softness_inner_angle = XM_PI * wi::math::Lerp(0.0f, 0.24f, std::abs(std::sin(resize_blink_timer * 4)));
+				fx.angular_softness_direction = XMFLOAT2(0, 1);
+				wi::image::Draw(nullptr, fx, cmd);
+				wi::input::SetCursor(wi::input::CURSOR_RESIZE_NS);
+			}
 		}
 
 		// base:
 		if (!IsCollapsed())
 		{
-			sprites[IDLE].Draw(cmd);
+			wi::image::Params params = sprites[IDLE].params;
+			const wi::Resource& res = sprites[IDLE].textureResource;
+			if (res.IsValid())
+			{
+				params.sampleFlag = wi::image::SAMPLEMODE_WRAP;
+				const Texture& tex = res.GetTexture();
+				const float widget_aspect = scale_local.x / scale_local.y;
+				const float image_aspect = float(tex.desc.width) / float(tex.desc.height);
+				if (widget_aspect > image_aspect)
+				{
+					// display aspect is wider than image:
+					params.texMulAdd.y *= image_aspect / widget_aspect;
+				}
+				else
+				{
+					// image aspect is wider or equal to display
+					params.texMulAdd.x *= widget_aspect / image_aspect;
+					if (right_aligned_image)
+					{
+						params.texMulAdd.z = 1.0f - params.texMulAdd.x;
+					}
+				}
+			}
+			wi::image::Draw(sprites[IDLE].GetTexture(), params, cmd);
+
+			if (background_overlay.IsValid())
+			{
+				params.blendFlag = wi::enums::BLENDMODE_ADDITIVE;
+				params.color.w = 0;
+				params.setBackgroundMap(&background_overlay);
+				wi::image::Draw(nullptr, params, cmd);
+			}
 		}
 
 		for (size_t i = 0; i < widgets.size(); ++i)
@@ -3050,7 +4426,6 @@ namespace wi::gui
 			widget->Render(canvas, cmd);
 		}
 
-
 		//Rect scissorRect;
 		//scissorRect.bottom = (int32_t)(canvas.GetPhysicalHeight());
 		//scissorRect.left = (int32_t)(0);
@@ -3058,19 +4433,19 @@ namespace wi::gui
 		//scissorRect.top = (int32_t)(0);
 		//GraphicsDevice* device = wi::graphics::GetDevice();
 		//device->BindScissorRects(1, &scissorRect, cmd);
-		//wi::image::Draw(wi::texturehelper::getWhite(), wi::image::Params(scrollable_area.active_area.pos.x, scrollable_area.active_area.pos.y, scrollable_area.active_area.siz.x, scrollable_area.active_area.siz.y, wi::Color(255,0,255,100)), cmd);
+		//wi::image::Draw(nullptr, wi::image::Params(scrollable_area.active_area.pos.x, scrollable_area.active_area.pos.y, scrollable_area.active_area.siz.x, scrollable_area.active_area.siz.y, wi::Color(255,0,255,100)), cmd);
 		//Hitbox2D p = scrollable_area.GetPointerHitbox();
-		//wi::image::Draw(wi::texturehelper::getWhite(), wi::image::Params(p.pos.x, p.pos.y, p.siz.x * 10, p.siz.y * 10, wi::Color(255,0,0,100)), cmd);
+		//wi::image::Draw(nullptr, wi::image::Params(p.pos.x, p.pos.y, p.siz.x * 10, p.siz.y * 10, wi::Color(255,0,0,100)), cmd);
 		//if (!IsCollapsed())
 		//{
-		//	wi::image::Draw(wi::texturehelper::getWhite(), wi::image::Params(scrollable_area.translation.x, scrollable_area.translation.y, scale.x, 10, wi::Color(255,0,255,100)), cmd);
+		//	wi::image::Draw(nullptr, wi::image::Params(scrollable_area.translation.x, scrollable_area.translation.y, scale.x, 10, wi::Color(255,0,255,100)), cmd);
 		//}
 
 		GetDevice()->EventEnd(cmd);
 	}
 	void Window::RenderTooltip(const wi::Canvas& canvas, wi::graphics::CommandList cmd) const
 	{
-		Widget::RenderTooltip(canvas, cmd);
+		// Window base tooltip is not rendered
 		for (auto& x : widgets)
 		{
 			x->RenderTooltip(canvas, cmd);
@@ -3079,12 +4454,21 @@ namespace wi::gui
 	void Window::SetVisible(bool value)
 	{
 		Widget::SetVisible(value);
-		//SetMinimized(!value);
-		if (!IsMinimized())
+		bool minimized = IsMinimized();
+		for (auto& x : widgets)
 		{
-			for (auto& x : widgets)
+			if (
+				x == &closeButton ||
+				x == &collapseButton ||
+				x == &moveDragger ||
+				x == &label
+				)
 			{
 				x->SetVisible(value);
+			}
+			else
+			{
+				x->SetVisible(!minimized);
 			}
 		}
 	}
@@ -3098,14 +4482,6 @@ namespace wi::gui
 			if (x == &collapseButton)
 				continue;
 			if (x == &closeButton)
-				continue;
-			if (x == &resizeDragger_UpperLeft)
-				continue;
-			if (x == &resizeDragger_UpperRight)
-				continue;
-			if (x == &resizeDragger_BottomLeft)
-				continue;
-			if (x == &resizeDragger_BottomRight)
 				continue;
 			if (x == &scrollbar_horizontal)
 				continue;
@@ -3126,18 +4502,21 @@ namespace wi::gui
 	{
 		minimized = value;
 
-		scrollable_area.SetVisible(!value);
-		if (resizeDragger_BottomLeft.parent != nullptr)
+		for (auto& x : widgets)
 		{
-			resizeDragger_BottomLeft.SetVisible(!value);
-		}
-		if (resizeDragger_BottomRight.parent != nullptr)
-		{
-			resizeDragger_BottomRight.SetVisible(!value);
+			if (
+				x == &closeButton ||
+				x == &collapseButton ||
+				x == &moveDragger ||
+				x == &label
+				)
+			{
+				continue;
+			}
+			x->SetVisible(!value);
 		}
 
-		scrollbar_horizontal.SetVisible(!value);
-		scrollbar_vertical.SetVisible(!value);
+		scrollable_area.SetVisible(!value);
 
 		if (IsMinimized())
 		{
@@ -3184,13 +4563,17 @@ namespace wi::gui
 		}
 		return size;
 	}
-	void Window::OnClose(std::function<void(EventArgs args)> func)
+	void Window::OnClose(std::function<void(const EventArgs& args)> func)
 	{
-		onClose = func;
+		onClose = std::move(func);
 	}
-	void Window::OnCollapse(std::function<void(EventArgs args)> func)
+	void Window::OnCollapse(std::function<void(const EventArgs& args)> func)
 	{
-		onCollapse = func;
+		onCollapse = std::move(func);
+	}
+	void Window::OnResize(std::function<void()> func)
+	{
+		onResize = std::move(func);
 	}
 	void Window::SetColor(wi::Color color, int id)
 	{
@@ -3203,6 +4586,19 @@ namespace wi::gui
 		if (id == WIDGET_ID_WINDOW_BASE)
 		{
 			sprites[IDLE].params.color = color;
+		}
+	}
+	void Window::SetImage(wi::Resource resource, int id)
+	{
+		Widget::SetImage(resource, id);
+		for (auto& widget : widgets)
+		{
+			widget->SetImage(resource, id);
+		}
+
+		if (id == WIDGET_ID_WINDOW_BASE)
+		{
+			sprites[IDLE].textureResource = resource;
 		}
 	}
 	void Window::SetShadowColor(wi::Color color)
@@ -3224,6 +4620,7 @@ namespace wi::gui
 	void Window::ResizeLayout()
 	{
 		Widget::ResizeLayout();
+		layout.reset(*this);
 		for (auto& widget : widgets)
 		{
 			widget->ResizeLayout();
@@ -3241,17 +4638,9 @@ namespace wi::gui
 			{
 				rem++;
 			}
-			if (resizeDragger_UpperLeft.parent != nullptr)
-			{
-				rem++;
-			}
-			if (resizeDragger_UpperRight.parent != nullptr)
-			{
-				rem++;
-			}
 			moveDragger.SetSize(XMFLOAT2(scale.x - control_size * rem, control_size));
 			float offset = 0;
-			if (resizeDragger_UpperLeft.parent != nullptr)
+			if (collapseButton.parent != nullptr)
 			{
 				offset++;
 			}
@@ -3262,57 +4651,15 @@ namespace wi::gui
 		{
 			closeButton.Detach();
 			closeButton.SetSize(XMFLOAT2(control_size, control_size));
-			float offset = 1;
-			if (resizeDragger_UpperRight.parent != nullptr)
-			{
-				offset++;
-			}
-			closeButton.SetPos(XMFLOAT2(translation.x + scale.x - control_size * offset, translation.y));
+			closeButton.SetPos(XMFLOAT2(translation.x + scale.x - control_size, translation.y));
 			closeButton.AttachTo(this);
 		}
 		if (collapseButton.parent != nullptr)
 		{
 			collapseButton.Detach();
 			collapseButton.SetSize(XMFLOAT2(control_size, control_size));
-			float offset = 1;
-			if (closeButton.parent != nullptr)
-			{
-				offset++;
-			}
-			if (resizeDragger_UpperRight.parent != nullptr)
-			{
-				offset++;
-			}
-			collapseButton.SetPos(XMFLOAT2(translation.x + scale.x - control_size * offset, translation.y));
+			collapseButton.SetPos(XMFLOAT2(translation.x, translation.y));
 			collapseButton.AttachTo(this);
-		}
-		if (resizeDragger_UpperLeft.parent != nullptr)
-		{
-			resizeDragger_UpperLeft.Detach();
-			resizeDragger_UpperLeft.SetSize(XMFLOAT2(control_size, control_size));
-			resizeDragger_UpperLeft.SetPos(XMFLOAT2(translation.x, translation.y));
-			resizeDragger_UpperLeft.AttachTo(this);
-		}
-		if (resizeDragger_UpperRight.parent != nullptr)
-		{
-			resizeDragger_UpperRight.Detach();
-			resizeDragger_UpperRight.SetSize(XMFLOAT2(control_size, control_size));
-			resizeDragger_UpperRight.SetPos(XMFLOAT2(translation.x + scale.x - control_size, translation.y));
-			resizeDragger_UpperRight.AttachTo(this);
-		}
-		if (resizeDragger_BottomLeft.parent != nullptr)
-		{
-			resizeDragger_BottomLeft.Detach();
-			resizeDragger_BottomLeft.SetSize(XMFLOAT2(control_size, control_size));
-			resizeDragger_BottomLeft.SetPos(XMFLOAT2(translation.x, translation.y + scale.y - control_size));
-			resizeDragger_BottomLeft.AttachTo(this);
-		}
-		if (resizeDragger_BottomRight.parent != nullptr)
-		{
-			resizeDragger_BottomRight.Detach();
-			resizeDragger_BottomRight.SetSize(XMFLOAT2(control_size, control_size));
-			resizeDragger_BottomRight.SetPos(XMFLOAT2(translation.x + scale.x - control_size, translation.y + scale.y - control_size));
-			resizeDragger_BottomRight.AttachTo(this);
 		}
 		if (label.parent != nullptr)
 		{
@@ -3320,15 +4667,6 @@ namespace wi::gui
 			label.Detach();
 			XMFLOAT2 label_size = XMFLOAT2(scale.x, control_size);
 			XMFLOAT2 label_pos = XMFLOAT2(translation.x, translation.y);
-			if (resizeDragger_UpperLeft.parent != nullptr)
-			{
-				label_size.x -= control_size;
-				label_pos.x += control_size;
-			}
-			if (resizeDragger_UpperRight.parent != nullptr)
-			{
-				label_size.x -= control_size;
-			}
 			if (closeButton.parent != nullptr)
 			{
 				label_size.x -= control_size;
@@ -3336,6 +4674,7 @@ namespace wi::gui
 			if (collapseButton.parent != nullptr)
 			{
 				label_size.x -= control_size;
+				label_pos.x += control_size;
 			}
 			label.SetSize(label_size);
 			label.SetPos(label_pos);
@@ -3344,27 +4683,59 @@ namespace wi::gui
 		if (scrollbar_horizontal.parent != nullptr)
 		{
 			scrollbar_horizontal.Detach();
-			float offset = 0;
-			if (resizeDragger_BottomLeft.parent != nullptr)
-			{
-				offset++;
-			}
-			scrollbar_horizontal.SetSize(XMFLOAT2(GetWidgetAreaSize().x - control_size * (offset + 1), control_size));
-			scrollbar_horizontal.SetPos(XMFLOAT2(translation.x + control_size * offset, translation.y + scale.y - control_size));
+			scrollbar_horizontal.SetSize(XMFLOAT2(GetWidgetAreaSize().x - control_size, control_size));
+			scrollbar_horizontal.SetPos(XMFLOAT2(translation.x + control_size, translation.y + scale.y - control_size));
 			scrollbar_horizontal.AttachTo(this);
+			scrollbar_horizontal.SetSafeArea(control_size * 2);
+			// Keep the scrollbar reserved until content fits by its own
+			// reserved width, so aspect-scaled content can't flicker it on/off
+			// each frame.
+			scrollbar_horizontal.SetHysteresis(control_size);
 		}
 		if (scrollbar_vertical.parent != nullptr)
 		{
 			scrollbar_vertical.Detach();
-			float offset = 1;
-			if (resizeDragger_BottomRight.parent != nullptr)
-			{
-				offset++;
-			}
-			scrollbar_vertical.SetSize(XMFLOAT2(control_size, GetWidgetAreaSize().y - (control_size + 1) * offset));
-			scrollbar_vertical.SetPos(XMFLOAT2(translation.x + scale.x - control_size, translation.y + 1 + control_size));
+			scrollbar_vertical.SetSize(XMFLOAT2(control_size, GetWidgetAreaSize().y - control_size));
+			scrollbar_vertical.SetPos(XMFLOAT2(translation.x + scale.x - control_size, translation.y + control_size));
 			scrollbar_vertical.AttachTo(this);
+			// See the horizontal scrollbar above: hysteresis prevents an on/off
+			// oscillation when reserving the scrollbar width shortens
+			// width-derived content (e.g. add_fullwidth_aspect previews).
+			scrollbar_vertical.SetHysteresis(control_size);
 		}
+
+		if (onResize)
+		{
+			onResize();
+		}
+	}
+	void Window::ExportLocalization(wi::Localization& localization) const
+	{
+		Widget::ExportLocalization(localization);
+		if (has_flag(localization_enabled, LocalizationEnabled::Children))
+		{
+			wi::Localization& section = localization.GetSection(GetName());
+			for (auto& widget : widgets)
+			{
+				widget->ExportLocalization(section);
+			}
+		}
+	}
+	void Window::ImportLocalization(const wi::Localization& localization)
+	{
+		Widget::ImportLocalization(localization);
+		if (has_flag(localization_enabled, LocalizationEnabled::Children))
+		{
+			const wi::Localization* section = localization.CheckSection(GetName());
+			if (section == nullptr)
+				return;
+			for (auto& widget : widgets)
+			{
+				widget->ImportLocalization(*section);
+			}
+		}
+		label.SetText(GetText());
+		moveDragger.SetText(GetText());
 	}
 
 
@@ -3405,7 +4776,7 @@ namespace wi::gui
 			out.s = (delta / max);                  // s
 		}
 		else {
-			// if max is 0, then r = g = b = 0              
+			// if max is 0, then r = g = b = 0
 			// s = 0, h is undefined
 			out.s = 0.0f;
 			out.h = NAN;                            // its now undefined
@@ -3494,16 +4865,17 @@ namespace wi::gui
 		SetColor(wi::Color(100, 100, 100, 100));
 
 		float x = 250;
-		float y = 100;
+		float y = 80;
 		float step = 20;
 
 		text_R.Create("R");
+		text_R.SetLocalizationEnabled(LocalizationEnabled::Tooltip);
 		text_R.SetPos(XMFLOAT2(x, y += step));
 		text_R.SetSize(XMFLOAT2(40, 18));
 		text_R.SetText("");
 		text_R.SetTooltip("Enter value for RED channel (0-255)");
 		text_R.SetDescription("R: ");
-		text_R.OnInputAccepted([this](EventArgs args) {
+		text_R.OnInputAccepted([this](const EventArgs& args) {
 			wi::Color color = GetPickColor();
 			color.setR((uint8_t)args.iValue);
 			SetPickColor(color);
@@ -3512,12 +4884,13 @@ namespace wi::gui
 		AddWidget(&text_R);
 
 		text_G.Create("G");
+		text_G.SetLocalizationEnabled(LocalizationEnabled::Tooltip);
 		text_G.SetPos(XMFLOAT2(x, y += step));
 		text_G.SetSize(XMFLOAT2(40, 18));
 		text_G.SetText("");
 		text_G.SetTooltip("Enter value for GREEN channel (0-255)");
 		text_G.SetDescription("G: ");
-		text_G.OnInputAccepted([this](EventArgs args) {
+		text_G.OnInputAccepted([this](const EventArgs& args) {
 			wi::Color color = GetPickColor();
 			color.setG((uint8_t)args.iValue);
 			SetPickColor(color);
@@ -3526,12 +4899,13 @@ namespace wi::gui
 		AddWidget(&text_G);
 
 		text_B.Create("B");
+		text_B.SetLocalizationEnabled(LocalizationEnabled::Tooltip);
 		text_B.SetPos(XMFLOAT2(x, y += step));
 		text_B.SetSize(XMFLOAT2(40, 18));
 		text_B.SetText("");
 		text_B.SetTooltip("Enter value for BLUE channel (0-255)");
 		text_B.SetDescription("B: ");
-		text_B.OnInputAccepted([this](EventArgs args) {
+		text_B.OnInputAccepted([this](const EventArgs& args) {
 			wi::Color color = GetPickColor();
 			color.setB((uint8_t)args.iValue);
 			SetPickColor(color);
@@ -3541,47 +4915,66 @@ namespace wi::gui
 
 
 		text_H.Create("H");
+		text_H.SetLocalizationEnabled(LocalizationEnabled::Tooltip);
 		text_H.SetPos(XMFLOAT2(x, y += step));
 		text_H.SetSize(XMFLOAT2(40, 18));
 		text_H.SetText("");
 		text_H.SetTooltip("Enter value for HUE channel (0-360)");
 		text_H.SetDescription("H: ");
-		text_H.OnInputAccepted([this](EventArgs args) {
+		text_H.OnInputAccepted([this](const EventArgs& args) {
 			hue = wi::math::Clamp(args.fValue, 0, 360.0f);
 			FireEvents();
 			});
 		AddWidget(&text_H);
 
 		text_S.Create("S");
+		text_S.SetLocalizationEnabled(LocalizationEnabled::Tooltip);
 		text_S.SetPos(XMFLOAT2(x, y += step));
 		text_S.SetSize(XMFLOAT2(40, 18));
 		text_S.SetText("");
 		text_S.SetTooltip("Enter value for SATURATION channel (0-100)");
 		text_S.SetDescription("S: ");
-		text_S.OnInputAccepted([this](EventArgs args) {
+		text_S.OnInputAccepted([this](const EventArgs& args) {
 			saturation = wi::math::Clamp(args.fValue / 100.0f, 0, 1);
 			FireEvents();
 			});
 		AddWidget(&text_S);
 
 		text_V.Create("V");
+		text_V.SetLocalizationEnabled(LocalizationEnabled::Tooltip);
 		text_V.SetPos(XMFLOAT2(x, y += step));
 		text_V.SetSize(XMFLOAT2(40, 18));
 		text_V.SetText("");
 		text_V.SetTooltip("Enter value for LUMINANCE channel (0-100)");
 		text_V.SetDescription("V: ");
-		text_V.OnInputAccepted([this](EventArgs args) {
+		text_V.OnInputAccepted([this](const EventArgs& args) {
 			luminance = wi::math::Clamp(args.fValue / 100.0f, 0, 1);
 			FireEvents();
 			});
 		AddWidget(&text_V);
 
+		text_hex.Create("Hex");
+		text_hex.SetLocalizationEnabled(LocalizationEnabled::Tooltip);
+		text_hex.SetPos(XMFLOAT2(x, y += step));
+		text_hex.SetSize(XMFLOAT2(80, 18));
+		text_hex.SetText("");
+		text_hex.SetTooltip("Enter RGBA hex value");
+		text_hex.SetDescription("#");
+		text_hex.font_description.params.scaling = 1.2f;
+		text_hex.OnInputAccepted([this](const EventArgs& args) {
+			wi::Color color(args.sValue.c_str());
+			SetPickColor(color);
+			FireEvents();
+			});
+		AddWidget(&text_hex);
+
 		alphaSlider.Create(0, 255, 255, 255, "");
+		alphaSlider.SetLocalizationEnabled(LocalizationEnabled::Tooltip);
 		alphaSlider.SetPos(XMFLOAT2(20, y));
 		alphaSlider.SetSize(XMFLOAT2(150, 18));
 		alphaSlider.SetText("A: ");
 		alphaSlider.SetTooltip("Value for ALPHA - TRANSPARENCY channel (0-255)");
-		alphaSlider.OnSlide([this](EventArgs args) {
+		alphaSlider.OnSlide([this](const EventArgs& args) {
 			FireEvents();
 			});
 		AddWidget(&alphaSlider);
@@ -3634,7 +5027,7 @@ namespace wi::gui
 
 			bool dragged = false;
 
-			if (wi::input::Press(wi::input::MOUSE_BUTTON_LEFT))
+			if (wi::input::Press(wi::input::MOUSE_BUTTON_LEFT) || wi::input::IsTouchPanning())
 			{
 				if (hover_hue)
 				{
@@ -3648,7 +5041,7 @@ namespace wi::gui
 				}
 			}
 
-			if (wi::input::Down(wi::input::MOUSE_BUTTON_LEFT))
+			if (wi::input::Down(wi::input::MOUSE_BUTTON_LEFT) || wi::input::IsTouchPanning())
 			{
 				if (colorpickerstate > CPS_IDLE)
 				{
@@ -3661,7 +5054,6 @@ namespace wi::gui
 				colorpickerstate = CPS_IDLE;
 			}
 
-			dragged = dragged;
 			if (colorpickerstate == CPS_HUE && dragged)
 			{
 				//hue pick
@@ -3711,6 +5103,7 @@ namespace wi::gui
 			text_H.SetValue(int(hue));
 			text_S.SetValue(int(saturation * 100));
 			text_V.SetValue(int(luminance * 100));
+			text_hex.SetText(color.to_hex());
 
 			if (dragged)
 			{
@@ -4062,8 +5455,7 @@ namespace wi::gui
 		// render preview
 		{
 			XMStoreFloat4x4(&cb.g_xTransform,
-				XMMatrixScaling(sca, sca, 1) *
-				XMMatrixTranslation(translation.x + scale.x - sca - 4, translation.y + control_size + 4, 0) *
+				XMMatrixTranslation(translation.x + scale.x - sca - 2, translation.y + control_size + 4 + 22, 0) *
 				Projection
 			);
 			cb.g_xColor = final_color.toFloat4();
@@ -4090,12 +5482,12 @@ namespace wi::gui
 			if (!widget.IsVisible())
 				return;
 			const float margin_left = 20;
-			const float margin_right = 120;
+			const float margin_right = 80;
 			y -= widget.GetSize().y;
 			y -= padding;
 			widget.SetPos(XMFLOAT2(margin_left, y));
-			widget.SetSize(XMFLOAT2(width - margin_left - margin_right, widget.GetScale().y));
-		};
+			widget.SetSize(XMFLOAT2(width - margin_left - margin_right, widget.GetSize().y));
+			};
 		auto add_right = [&](wi::gui::Widget& widget) {
 			if (!widget.IsVisible())
 				return;
@@ -4103,7 +5495,7 @@ namespace wi::gui
 			y -= widget.GetSize().y;
 			y -= padding;
 			widget.SetPos(XMFLOAT2(width - margin_right - widget.GetSize().x, y));
-		};
+			};
 
 		add(alphaSlider);
 		y += alphaSlider.GetSize().y;
@@ -4118,6 +5510,27 @@ namespace wi::gui
 		add_right(text_B);
 		add_right(text_G);
 		add_right(text_R);
+
+		y = control_size + 4;
+		add_right(text_hex);
+	}
+	void ColorPicker::SetColor(wi::Color color, int id)
+	{
+		Window::SetColor(color, id);
+
+		if (id == WIDGET_ID_COLORPICKER_BASE)
+		{
+			sprites[IDLE].params.color = color;
+		}
+	}
+	void ColorPicker::SetImage(wi::Resource resource, int id)
+	{
+		Window::SetImage(resource, id);
+
+		if (id == WIDGET_ID_COLORPICKER_BASE)
+		{
+			sprites[IDLE].textureResource = resource;
+		}
 	}
 	wi::Color ColorPicker::GetPickColor() const
 	{
@@ -4157,9 +5570,9 @@ namespace wi::gui
 		args.color = GetPickColor();
 		onColorChanged(args);
 	}
-	void ColorPicker::OnColorChanged(std::function<void(EventArgs args)> func)
+	void ColorPicker::OnColorChanged(std::function<void(const EventArgs& args)> func)
 	{
-		onColorChanged = func;
+		onColorChanged = std::move(func);
 	}
 
 
@@ -4170,7 +5583,7 @@ namespace wi::gui
 	{
 		SetName(name);
 		SetText(name);
-		OnSelect([](EventArgs args) {});
+		OnSelect([](const EventArgs& args) {});
 
 		SetColor(wi::Color(100, 100, 100, 100), wi::gui::IDLE);
 		for (int i = FOCUS + 1; i < WIDGETSTATE_COUNT; ++i)
@@ -4185,6 +5598,16 @@ namespace wi::gui
 		scrollbar.sprites_knob[ScrollBar::SCROLLBAR_HOVER].params.color = wi::Color(180, 180, 180, 180);
 		scrollbar.sprites_knob[ScrollBar::SCROLLBAR_GRABBED].params.color = wi::Color::White();
 		scrollbar.SetOverScroll(0.25f);
+
+		SetSize(XMFLOAT2(100, 200));
+	}
+	bool TreeList::DoesItemHaveChildren(int index) const
+	{
+		if (items.size() <= size_t(index + 1)) // if item doesn't exist or last then no children
+			return false;
+		if (items[index].level + 1 == items[index + 1].level) // if item after index is exactly one level down, then it is its child
+			return true;
+		return false;
 	}
 	float TreeList::GetItemOffset(int index) const
 	{
@@ -4214,7 +5637,9 @@ namespace wi::gui
 	Hitbox2D TreeList::GetHitbox_ItemOpener(int visible_count, int level) const
 	{
 		XMFLOAT2 pos = XMFLOAT2(translation.x + 2 + level * item_height(), translation.y + GetItemOffset(visible_count) + item_height() * 0.5f);
-		return Hitbox2D(XMFLOAT2(pos.x, pos.y - item_height() * 0.25f), XMFLOAT2(item_height() * 0.5f, item_height() * 0.5f));
+		Hitbox2D hb = Hitbox2D(XMFLOAT2(pos.x, pos.y - item_height() * 0.25f), XMFLOAT2(item_height() * 0.5f, item_height() * 0.5f));
+		HitboxConstrain(hb);
+		return hb;
 	}
 	bool TreeList::HasScrollbar() const
 	{
@@ -4229,23 +5654,74 @@ namespace wi::gui
 
 		Widget::Update(canvas, dt);
 
-		// compute control-list height
-		float scroll_length = 0;
+		// Resizer updates:
+		if (IsEnabled())
 		{
-			int parent_level = 0;
-			bool parent_open = true;
-			for (const Item& item : items)
+			Hitbox2D pointerHitbox = GetPointerHitbox(false);
+
+			float vscale = scale.y;
+			Hitbox2D bottomhitbox = Hitbox2D(XMFLOAT2(translation.x, translation.y + vscale), XMFLOAT2(scale.x, resizehitboxwidth));
+
+			if (resize_state == RESIZE_STATE_NONE && (wi::input::Press(wi::input::MOUSE_BUTTON_LEFT) || wi::input::IsTouchPanStarting()))
 			{
-				if (!parent_open && item.level > parent_level)
+				if (pointerHitbox.intersects(bottomhitbox))
 				{
-					continue;
+					resize_state = RESIZE_STATE_BOTTOM;
+					Activate();
+					force_disable = true;
 				}
-				parent_open = item.open;
-				parent_level = item.level;
-				scroll_length += item_height();
+				resize_begin = pointerHitbox.pos;
+			}
+			if (wi::input::Down(wi::input::MOUSE_BUTTON_LEFT) || wi::input::IsTouchPanning())
+			{
+				if (resize_state != RESIZE_STATE_NONE)
+				{
+					auto saved_parent = this->parent;
+					this->Detach();
+					float deltaX = pointerHitbox.pos.x - resize_begin.x;
+					float deltaY = pointerHitbox.pos.y - resize_begin.y;
+
+					switch (resize_state)
+					{
+					case RESIZE_STATE_BOTTOM:
+						this->Scale(XMFLOAT3(1, (scale.y + deltaY) / scale.y, 1));
+						break;
+					default:
+						break;
+					}
+
+					this->scale_local = wi::math::Max(this->scale_local, XMFLOAT3(item_height() * 3, item_height() * 3, 1)); // don't allow resize to negative or too small
+					this->scale = this->scale_local;
+					this->AttachTo(saved_parent);
+					resize_begin = pointerHitbox.pos;
+				}
+			}
+			else
+			{
+				resize_state = RESIZE_STATE_NONE;
+			}
+
+			if (
+				resize_state != RESIZE_STATE_NONE ||
+				pointerHitbox.intersects(bottomhitbox)
+				)
+			{
+				resize_blink_timer += dt;
+			}
+			else
+			{
+				resize_blink_timer = 0;
 			}
 		}
-		scrollbar.SetListLength(scroll_length);
+
+		active_area.pos.x = float(scissorRect.left);
+		active_area.pos.y = float(scissorRect.top);
+		active_area.siz.x = float(scissorRect.right) - float(scissorRect.left);
+		active_area.siz.y = float(scissorRect.bottom) - float(scissorRect.top);
+
+		Hitbox2D pointerHitbox = GetPointerHitbox();
+
+		ComputeScrollbarLength();
 
 		const float scrollbar_width = 12;
 		scrollbar.SetSize(XMFLOAT2(scrollbar_width - 1, scale.y - 1 - item_height()));
@@ -4272,7 +5748,6 @@ namespace wi::gui
 			}
 
 			Hitbox2D hitbox = Hitbox2D(XMFLOAT2(translation.x, translation.y), XMFLOAT2(scale.x, scale.y));
-			Hitbox2D pointerHitbox = GetPointerHitbox();
 
 			if (state == IDLE && hitbox.intersects(pointerHitbox))
 			{
@@ -4280,12 +5755,12 @@ namespace wi::gui
 			}
 
 			bool clicked = false;
-			if (wi::input::Press(wi::input::MOUSE_BUTTON_LEFT))
+			if (wi::input::Press(wi::input::MOUSE_BUTTON_LEFT) || wi::input::IsTouchPanning())
 			{
 				clicked = true;
 			}
 
-			if (onDelete && state == FOCUS && wi::input::Press(wi::input::KEYBOARD_BUTTON_DELETE))
+			if (onDelete && state == FOCUS && wi::input::Press(wi::input::KEYBOARD_BUTTON_DELETE) && !typing_active)
 			{
 				int index = 0;
 				for (auto& item : items)
@@ -4303,7 +5778,7 @@ namespace wi::gui
 			}
 
 			bool click_down = false;
-			if (wi::input::Down(wi::input::MOUSE_BUTTON_LEFT))
+			if (wi::input::Down(wi::input::MOUSE_BUTTON_LEFT) || wi::input::IsTouchPanning())
 			{
 				click_down = true;
 				if (state == FOCUS || state == DEACTIVATING)
@@ -4313,21 +5788,78 @@ namespace wi::gui
 				}
 			}
 
-			float scroll = wi::input::GetPointer().z * 10;
-			if (scroll && scroll_allowed && scrollbar.IsScrollbarRequired() && pointerHitbox.intersects(hitBox))
+			const float wheel_delta = wi::input::GetPointer().z;
+			if (wheel_delta != 0.0f && scroll_allowed && scrollbar.IsScrollbarRequired() && pointerHitbox.intersects(hitBox))
 			{
-				scroll_allowed = false;
-				// This is outside scrollbar code, because it can also be scrolled if parent widget is only in focus
-				scrollbar.Scroll(scroll);
+				const bool at_begin = (wheel_delta > 0 && scrollbar.IsScrolledToBegin());
+				if (!at_begin)
+				{
+					scroll_allowed = false;
+					// This is outside scrollbar code, because it can also be scrolled if parent widget is only in focus
+					scrollbar.Scroll(wheel_delta * 40.0f);
+				}
 			}
 
 			Hitbox2D itemlist_box = GetHitbox_ListArea();
+
+			// Finalize drag-and-drop when mouse is released
+			if (onReorder && dragging && !click_down)
+			{
+				if (drag_source >= 0)
+				{
+					if (drag_reparent_target >= 0 && drag_reparent_target != drag_source)
+					{
+						// Re-parent: drop ON another item
+						EventArgs args;
+						args.iValue = drag_source;
+						args.iValue2 = drag_reparent_target;
+						args.userdata = items[drag_source].userdata;
+						args.bValue = true;
+						onReorder(args);
+					}
+					else if (!hitbox.intersects(GetPointerHitbox(false)))
+					{
+						// Dropped outside the widget -> go one level up in hierarchy
+						EventArgs args;
+						args.iValue = drag_source;
+						args.iValue2 = -1;
+						args.userdata = items[drag_source].userdata;
+						args.bValue = true;
+						onReorder(args);
+					}
+					else if (drag_reparent_target < 0 && drag_target >= 0 &&
+						((drag_target != drag_source && drag_target != drag_source + 1) ||
+							(drag_source >= 0 && drag_source < (int)items.size() && drag_target_level != items[drag_source].level)))
+					{
+						// Reorder: drop BETWEEN items
+						EventArgs args;
+						args.iValue = drag_source;
+						args.iValue2 = drag_target;
+						args.fValue = (float)drag_target_level;
+						args.userdata = items[drag_source].userdata;
+						args.bValue = false;
+						onReorder(args);
+					}
+				}
+				dragging = false;
+				drag_source = -1;
+				drag_target = -1;
+				drag_reparent_target = -1;
+				drag_target_level = 0;
+			}
+			if (!click_down && !clicked)
+			{
+				// Reset potential drag if mouse was released without dragging
+				if (!dragging)
+					drag_source = -1;
+			}
 
 			tooltipFont.text.clear();
 
 			// control-list
 			item_highlight = -1;
 			opener_highlight = -1;
+			int first_selected = -1;
 			if (scrollbar.GetState() == IDLE)
 			{
 				int i = -1;
@@ -4337,6 +5869,10 @@ namespace wi::gui
 				for (Item& item : items)
 				{
 					i++;
+					if (item.selected && first_selected < 0)
+					{
+						first_selected = i;
+					}
 					if (!parent_open && item.level > parent_level)
 					{
 						continue;
@@ -4371,18 +5907,153 @@ namespace wi::gui
 							SetTooltip(item.name);
 							if (clicked)
 							{
-								if (!wi::input::Down(wi::input::KEYBOARD_BUTTON_LCONTROL) && !wi::input::Down(wi::input::KEYBOARD_BUTTON_RCONTROL)
-									&& !wi::input::Down(wi::input::KEYBOARD_BUTTON_LSHIFT) && !wi::input::Down(wi::input::KEYBOARD_BUTTON_RSHIFT))
+								// Start potential drag (activated on movement threshold)
+								if (onReorder)
 								{
-									ClearSelection();
+									drag_source = i;
+									drag_start_pos = pointerHitbox.pos;
 								}
-								Select(i);
+
+								if (wi::input::IsDoubleClicked() && onDoubleClick != nullptr)
+								{
+									EventArgs args;
+									args.iValue = i;
+									args.sValue = items[i].name;
+									args.userdata = items[i].userdata;
+									onDoubleClick(args);
+								}
+								else
+								{
+									if (wi::input::Down(wi::input::KEYBOARD_BUTTON_LCONTROL) || wi::input::Down(wi::input::KEYBOARD_BUTTON_RCONTROL))
+									{
+										// control: nothing
+									}
+									else if (wi::input::Down(wi::input::KEYBOARD_BUTTON_LSHIFT) || wi::input::Down(wi::input::KEYBOARD_BUTTON_RSHIFT))
+									{
+										if (first_selected >= 0)
+										{
+											// shift: select range from first selected up to current:
+											for (int j = first_selected; j < i; ++j)
+											{
+												Select(j, false);
+											}
+										}
+									}
+									else
+									{
+										// no control, no shift then only this will be selected
+										ClearSelection();
+									}
+									Select(i);
+								}
 								Activate();
 							}
 						}
 					}
 				}
 			}
+			// Activate drag mode after movement threshold
+			if (onReorder && drag_source >= 0 && click_down && !dragging)
+			{
+				float dx = pointerHitbox.pos.x - drag_start_pos.x;
+				float dy = pointerHitbox.pos.y - drag_start_pos.y;
+				if (dx * dx + dy * dy > 16.0f) // 4 px threshold
+				{
+					dragging = true;
+				}
+			}
+
+			// Compute drag_target, drag_reparent_target, and drag_indicator_y while dragging
+			if (onReorder && dragging && click_down)
+			{
+				item_highlight = drag_source;
+				drag_target = (int)items.size(); // default: insert after all items
+				drag_reparent_target = -1;
+				drag_target_level = 0;
+				drag_indicator_y = 0;
+				auto compute_drag_target_level = [&](int max_level) {
+					int source_level = 0;
+					if (drag_source >= 0 && drag_source < (int)items.size())
+					{
+						source_level = items[drag_source].level;
+					}
+					const float level_delta = (pointerHitbox.pos.x - drag_start_pos.x) / item_height();
+					const int level = source_level + (int)std::round(level_delta);
+					return std::max(0, std::min(level, max_level));
+				};
+
+				int dc = 0;
+				int dp = 0;
+				bool dpo = true;
+				int di = -1;
+				int last_visible = 0;
+				int last_visible_level = 0;
+				for (const Item& item : items)
+				{
+					di++;
+					if (!dpo && item.level > dp)
+						continue;
+					dc++;
+					dpo = item.open;
+					dp = item.level;
+					last_visible = dc;
+					last_visible_level = item.level;
+
+					float item_top_y = translation.y + GetItemOffset(dc);
+					float item_bot_y = item_top_y + item_height();
+					if (pointerHitbox.pos.y < item_top_y + item_height() * 0.25f)
+					{
+						// Top 25%: insert BEFORE this item
+						drag_target = di;
+						drag_reparent_target = -1;
+						drag_target_level = item.level;
+						drag_indicator_y = item_top_y;
+						break;
+					}
+					else if (pointerHitbox.pos.y < item_bot_y - item_height() * 0.25f)
+					{
+						// Middle 50%: drop ON this item (re-parent)
+						if (di != drag_source)
+						{
+							drag_reparent_target = di;
+							drag_target = (int)items.size();
+							drag_target_level = item.level + 1;
+							drag_indicator_y = 0;
+						}
+						else
+						{
+							drag_target = drag_source;
+							drag_target_level = item.level;
+							drag_indicator_y = 0;
+						}
+						break;
+					}
+					else if (pointerHitbox.pos.y < item_bot_y)
+					{
+						// Bottom 25%: insert AFTER this item
+						drag_target = di + 1;
+						drag_reparent_target = -1;
+						drag_target_level = item.level;
+						drag_indicator_y = item_bot_y;
+						break;
+					}
+				}
+				if (drag_reparent_target < 0 && drag_target == (int)items.size())
+				{
+					drag_target_level = compute_drag_target_level(last_visible_level);
+					drag_indicator_y = translation.y + GetItemOffset(last_visible) + item_height();
+				}
+				// Clamp indicator line to list area (only when not re-parenting)
+				if (drag_reparent_target < 0)
+				{
+					drag_indicator_y = std::max(drag_indicator_y, itemlist_box.pos.y);
+					drag_indicator_y = std::min(drag_indicator_y, itemlist_box.pos.y + itemlist_box.siz.y - 2.0f);
+				}
+				drag_pointer_pos = pointerHitbox.pos;
+			}
+
+			if (state == IDLE && resize_blink_timer > 0)
+				state = FOCUS;
 		}
 
 		sprites[state].params.siz.y = item_height();
@@ -4391,6 +6062,7 @@ namespace wi::gui
 	}
 	void TreeList::Render(const wi::Canvas& canvas, CommandList cmd) const
 	{
+		Widget::Render(canvas, cmd);
 		if (!IsVisible())
 		{
 			return;
@@ -4401,6 +6073,7 @@ namespace wi::gui
 		if (shadow > 0)
 		{
 			wi::image::Params fx = sprites[state].params;
+			fx.gradient = wi::image::Params::Gradient::None;
 			fx.pos.x -= shadow;
 			fx.pos.y -= shadow;
 			fx.siz.x += shadow * 2;
@@ -4416,7 +6089,55 @@ namespace wi::gui
 					}
 				}
 			}
-			wi::image::Draw(wi::texturehelper::getWhite(), fx, cmd);
+			if (shadow_highlight)
+			{
+				fx.enableHighlight();
+				fx.highlight_pos = GetPointerHighlightPos(canvas);
+				fx.highlight_color = shadow_highlight_color;
+				fx.highlight_spread = shadow_highlight_spread;
+			}
+			else
+			{
+				fx.disableHighlight();
+			}
+			wi::image::Draw(nullptr, fx, cmd);
+		}
+
+		// resize indicator:
+		{
+			// hitboxes are recomputed because window transform might have changed since update!!
+			float vscale = scale.y;
+			Hitbox2D bottomhitbox = Hitbox2D(XMFLOAT2(translation.x, translation.y + vscale), XMFLOAT2(scale.x, resizehitboxwidth));
+
+			const Hitbox2D pointerHitbox = GetPointerHitbox(false);
+
+			wi::image::Params fx = sprites[state].params;
+			fx.blendFlag = wi::enums::BLENDMODE_ALPHA;
+			fx.pos.x -= resizehitboxwidth;
+			fx.pos.y -= resizehitboxwidth;
+			fx.siz.x += resizehitboxwidth * 2;
+			fx.siz.y = scale.y + resizehitboxwidth * 2;
+			fx.color = resize_state == RESIZE_STATE_NONE ? sprites[FOCUS].params.color : sprites[ACTIVE].params.color;
+			if (fx.isCornerRoundingEnabled())
+			{
+				for (auto& corner_rounding : fx.corners_rounding)
+				{
+					if (corner_rounding.radius > 0)
+					{
+						corner_rounding.radius += resizehitboxwidth;
+					}
+				}
+			}
+			//fx.border_soften = 0.01f;
+
+			if (resize_state == RESIZE_STATE_BOTTOM || pointerHitbox.intersects(bottomhitbox))
+			{
+				fx.angular_softness_outer_angle = XM_PI * 0.25f;
+				fx.angular_softness_inner_angle = XM_PI * wi::math::Lerp(0.0f, 0.24f, std::abs(std::sin(resize_blink_timer * 4)));
+				fx.angular_softness_direction = XMFLOAT2(0, 1);
+				wi::image::Draw(nullptr, fx, cmd);
+				wi::input::SetCursor(wi::input::CURSOR_RESIZE_NS);
+			}
 		}
 
 		// control-base
@@ -4434,9 +6155,9 @@ namespace wi::gui
 		fx.color = sprites[IDLE].params.color;
 		fx.pos = XMFLOAT3(itemlist_box.pos.x, itemlist_box.pos.y, 0);
 		fx.siz = XMFLOAT2(itemlist_box.siz.x, itemlist_box.siz.y);
-		wi::image::Draw(wi::texturehelper::getWhite(), fx, cmd);
+		wi::image::Draw(nullptr, fx, cmd);
 
-		Rect rect_without_scrollbar;
+		wi::graphics::Rect rect_without_scrollbar;
 		rect_without_scrollbar.left = (int)itemlist_box.pos.x;
 		rect_without_scrollbar.right = (int)(itemlist_box.pos.x + itemlist_box.siz.x);
 		rect_without_scrollbar.top = (int)itemlist_box.pos.y;
@@ -4491,12 +6212,23 @@ namespace wi::gui
 			// selected box:
 			if (item.selected || item_highlight == i)
 			{
-				wi::image::Draw(wi::texturehelper::getWhite()
+				wi::image::Draw(nullptr
 					, wi::image::Params(name_box.pos.x, name_box.pos.y, name_box.siz.x, name_box.siz.y,
 						sprites[item.selected ? FOCUS : IDLE].params.color), cmd);
 			}
 
+			// Re-parent drop target highlight
+			if (drag_reparent_target == i)
+			{
+				wi::image::Params rp_fx = sprites[ACTIVE].params;
+				rp_fx.pos = XMFLOAT3(name_box.pos.x, name_box.pos.y, 0);
+				rp_fx.siz = XMFLOAT2(name_box.siz.x, name_box.siz.y);
+				rp_fx.color.w *= 0.5f;
+				wi::image::Draw(nullptr, rp_fx, cmd);
+			}
+
 			// opened flag triangle:
+			if(DoesItemHaveChildren(i))
 			{
 				device->BindPipelineState(&gui_internal().PSO_colored, cmd);
 
@@ -4531,15 +6263,77 @@ namespace wi::gui
 			);
 			fp.style = font.params.style;
 			wi::font::Draw(item.name, fp, cmd);
+			// Drag handle dots on the right side of each item
+			if (onReorder)
+			{
+				float ds = std::max(2.0f, std::round(item_height() * 0.12f));
+				float dg = ds * 1.5f;
+				float hx = name_box.pos.x + name_box.siz.x - ds * 2 - dg - ds;
+				float hy = name_box.pos.y + (name_box.siz.y - (ds * 3 + dg * 2)) * 0.5f;
+				XMFLOAT4 dot_color = drag_source == i ? sprites[ACTIVE].params.color : sprites[FOCUS].params.color;
+				if (drag_source != i)
+					dot_color.w *= 0.45f;
+				for (int row = 0; row < 3; ++row)
+				{
+					for (int col = 0; col < 2; ++col)
+					{
+						wi::image::Draw(nullptr,
+						    wi::image::Params(hx + col * (ds + dg), hy + row * (ds + dg), ds, ds, dot_color),
+						    cmd);
+					}
+				}
+			}
+		}
+
+		// Drop indicator line for drag-and-drop reorder (not shown when re-parenting)
+		if (dragging && drag_source >= 0 && drag_target >= 0 && drag_reparent_target < 0)
+		{
+			wi::image::Params indicator_fx = sprites[ACTIVE].params;
+			const float indicator_indent = std::max(0, drag_target_level) * item_height();
+			indicator_fx.pos = XMFLOAT3(itemlist_box.pos.x + indicator_indent, drag_indicator_y - 1.0f, 0);
+			indicator_fx.siz = XMFLOAT2(std::max(2.0f, itemlist_box.siz.x - indicator_indent), 2.0f);
+			wi::image::Draw(nullptr, indicator_fx, cmd);
+		}
+		// Floating ghost: semi-transparent label following the cursor while dragging
+		if (dragging && drag_source >= 0 && drag_source < (int)items.size())
+		{
+			const Item& src_item = items[drag_source];
+			float ghost_h = item_height();
+			float ghost_w = itemlist_box.siz.x * 0.65f;
+			float ghost_x = drag_pointer_pos.x + 18.0f;
+			float ghost_y = drag_pointer_pos.y - ghost_h * 0.5f;
+			wi::image::Params ghost_bg = sprites[ACTIVE].params;
+			ghost_bg.pos = XMFLOAT3(ghost_x, ghost_y, 0);
+			ghost_bg.siz = XMFLOAT2(ghost_w, ghost_h);
+			ghost_bg.color.w *= 0.75f;
+			wi::image::Draw(nullptr, ghost_bg, cmd);
+			wi::font::Params gfp(
+				ghost_x + 6.0f,
+				ghost_y + ghost_h * 0.5f,
+				wi::font::WIFONTSIZE_DEFAULT,
+				wi::font::WIFALIGN_LEFT,
+				wi::font::WIFALIGN_CENTER,
+				font.params.color,
+				font.params.shadowColor);
+			gfp.style = font.params.style;
+			wi::font::Draw(src_item.name, gfp, cmd);
 		}
 	}
-	void TreeList::OnSelect(std::function<void(EventArgs args)> func)
+	void TreeList::OnSelect(std::function<void(const EventArgs& args)> func)
 	{
-		onSelect = func;
+		onSelect = std::move(func);
 	}
-	void TreeList::OnDelete(std::function<void(EventArgs args)> func)
+	void TreeList::OnDelete(std::function<void(const EventArgs& args)> func)
 	{
-		onDelete = func;
+		onDelete = std::move(func);
+	}
+	void TreeList::OnDoubleClick(std::function<void(const EventArgs& args)> func)
+	{
+		onDoubleClick = std::move(func);
+	}
+	void TreeList::OnReorder(std::function<void(const EventArgs& args)> func)
+	{
+		onReorder = std::move(func);
 	}
 	void TreeList::AddItem(const Item& item)
 	{
@@ -4566,15 +6360,105 @@ namespace wi::gui
 		args.iValue = -1;
 		onSelect(args);
 	}
-	void TreeList::Select(int index)
+	void TreeList::Select(int index, bool allow_deselect)
 	{
-		items[index].selected = true;
+		int selected_count = 0;
+		if (allow_deselect)
+		{
+			for (auto& x : items)
+			{
+				if (x.selected)
+					selected_count++;
+			}
+		}
+
+		if (selected_count > 1)
+		{
+			// If multiple are selected, then we can deselect:
+			items[index].selected = !items[index].selected;
+		}
+		else
+		{
+			items[index].selected = true;
+		}
 
 		EventArgs args;
 		args.iValue = index;
 		args.sValue = items[index].name;
 		args.userdata = items[index].userdata;
 		onSelect(args);
+	}
+	void TreeList::ComputeScrollbarLength()
+	{
+		float scroll_length = 0;
+		{
+			int parent_level = 0;
+			bool parent_open = true;
+			for (const Item& item : items)
+			{
+				if (!parent_open && item.level > parent_level)
+				{
+					continue;
+				}
+				parent_open = item.open;
+				parent_level = item.level;
+				scroll_length += item_height();
+			}
+		}
+		scrollbar.SetListLength(scroll_length);
+		scrollbar.Update({}, 0);
+	}
+	void TreeList::FocusOnItem(int index)
+	{
+		if (index < 0 || index >= items.size())
+			return;
+
+		// Open parent items of target:
+		int target = index;
+		int target_level = items[target].level;
+		while (target_level > 0)
+		{
+			if (items[target - 1].level == target_level - 1)
+			{
+				items[target - 1].open = true;
+				target_level--;
+			}
+			target--;
+		}
+
+		// Recompute scrollbar after opened tree leading to target item:
+		ComputeScrollbarLength();
+
+		// Count visible items before target:
+		int visible_count = 0;
+		int parent_level = 0;
+		bool parent_open = true;
+		for (int i = 0; i <= index; ++i)
+		{
+			auto& item = items[i];
+			if (!parent_open && item.level > parent_level)
+			{
+				continue;
+			}
+			visible_count++;
+			parent_open = item.open;
+			parent_level = item.level;
+		}
+
+		// Set scrollbar offset:
+		float offset = visible_count * item_height();
+		scrollbar.SetOffset(offset);
+	}
+	void TreeList::FocusOnItemByUserdata(uint64_t userdata)
+	{
+		for (size_t i = 0; i < items.size(); ++i)
+		{
+			if (items[i].userdata == userdata)
+			{
+				FocusOnItem(int(i));
+				break;
+			}
+		}
 	}
 	const TreeList::Item& TreeList::GetItem(int index) const
 	{

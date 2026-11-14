@@ -4,11 +4,10 @@
 namespace wi::lua
 {
 
-	const char Input_BindLua::className[] = "Input";
-
 	Luna<Input_BindLua>::FunctionType Input_BindLua::methods[] = {
 		lunamethod(Input_BindLua, Down),
 		lunamethod(Input_BindLua, Press),
+		lunamethod(Input_BindLua, Release),
 		lunamethod(Input_BindLua, Hold),
 		lunamethod(Input_BindLua, GetPointer),
 		lunamethod(Input_BindLua, SetPointer),
@@ -17,6 +16,18 @@ namespace wi::lua
 		lunamethod(Input_BindLua, GetAnalog),
 		lunamethod(Input_BindLua, GetTouches),
 		lunamethod(Input_BindLua, SetControllerFeedback),
+		lunamethod(Input_BindLua, WhatIsPressed),
+		lunamethod(Input_BindLua, IsGamepadButton),
+		lunamethod(Input_BindLua, ButtonToString),
+		lunamethod(Input_BindLua, StringToButton),
+		lunamethod(Input_BindLua, SetCursor),
+		lunamethod(Input_BindLua, SetCursorFromFile),
+		lunamethod(Input_BindLua, ResetCursor),
+		lunamethod(Input_BindLua, ResetCursors),
+		lunamethod(Input_BindLua, GetTouchPinch),
+		lunamethod(Input_BindLua, GetTouchPan),
+		lunamethod(Input_BindLua, IsTouchPanning),
+		lunamethod(Input_BindLua, IsTouchPanStarting),
 		{ NULL, NULL }
 	};
 	Luna<Input_BindLua>::PropertyType Input_BindLua::properties[] = {
@@ -59,6 +70,24 @@ namespace wi::lua
 			wi::lua::SError(L, "Press(int code, opt int playerindex = 0) not enough arguments!");
 		return 0;
 	}
+	int Input_BindLua::Release(lua_State* L)
+	{
+		int argc = wi::lua::SGetArgCount(L);
+		if (argc > 0)
+		{
+			wi::input::BUTTON code = (wi::input::BUTTON)wi::lua::SGetInt(L, 1);
+			int playerindex = 0;
+			if (argc > 1)
+			{
+				playerindex = wi::lua::SGetInt(L, 2);
+			}
+			wi::lua::SSetBool(L, wi::input::Release(code, playerindex));
+			return 1;
+		}
+		else
+			wi::lua::SError(L, "Release(int code, opt int playerindex = 0) not enough arguments!");
+		return 0;
+	}
 	int Input_BindLua::Hold(lua_State* L)
 	{
 		int argc = wi::lua::SGetArgCount(L);
@@ -90,7 +119,7 @@ namespace wi::lua
 	int Input_BindLua::GetPointer(lua_State* L)
 	{
 		XMFLOAT4 P = wi::input::GetPointer();
-		Luna<Vector_BindLua>::push(L, new Vector_BindLua(XMLoadFloat4(&P)));
+		Luna<Vector_BindLua>::push(L, XMLoadFloat4(&P));
 		return 1;
 	}
 	int Input_BindLua::SetPointer(lua_State* L)
@@ -112,7 +141,7 @@ namespace wi::lua
 	}
 	int Input_BindLua::GetPointerDelta(lua_State* L)
 	{
-		Luna<Vector_BindLua>::push(L, new Vector_BindLua(XMLoadFloat2(&wi::input::GetMouseState().delta_position)));
+		Luna<Vector_BindLua>::push(L, XMLoadFloat2(&wi::input::GetMouseState().delta_position));
 		return 1;
 	}
 	int Input_BindLua::HidePointer(lua_State* L)
@@ -144,7 +173,7 @@ namespace wi::lua
 		else
 			wi::lua::SError(L, "GetAnalog(int type, opt int playerindex = 0) not enough arguments!");
 
-		Luna<Vector_BindLua>::push(L, new Vector_BindLua(XMLoadFloat4(&result)));
+		Luna<Vector_BindLua>::push(L, XMLoadFloat4(&result));
 		return 1;
 	}
 	int Input_BindLua::GetTouches(lua_State* L)
@@ -152,7 +181,7 @@ namespace wi::lua
 		auto& touches = wi::input::GetTouches();
 		for (auto& touch : touches)
 		{
-			Luna<Touch_BindLua>::push(L, new Touch_BindLua(touch));
+			Luna<Touch_BindLua>::push(L, touch);
 		}
 		return (int)touches.size();
 	}
@@ -180,6 +209,123 @@ namespace wi::lua
 			wi::lua::SError(L, "SetControllerFeedback(ControllerFeedback feedback, opt int playerindex = 0) not enough arguments!");
 		return 0;
 	}
+	int Input_BindLua::WhatIsPressed(lua_State* L)
+	{
+		int playerindex = 0;
+		int argc = wi::lua::SGetArgCount(L);
+		if (argc > 0)
+		{
+			playerindex = wi::lua::SGetInt(L, 1);
+		}
+		wi::lua::SSetInt(L, (int)wi::input::WhatIsPressed(playerindex));
+		return 1;
+	}
+	int Input_BindLua::IsGamepadButton(lua_State* L)
+	{
+		int argc = wi::lua::SGetArgCount(L);
+		if (argc < 1)
+		{
+			wi::lua::SError(L, "IsGamepadButton(int button) not enough arguments!");
+			return 0;
+		}
+		wi::input::BUTTON button = (wi::input::BUTTON)wi::lua::SGetInt(L, 1);
+		wi::lua::SSetBool(L, wi::input::IsGamepadButton(button));
+		return 1;
+	}
+	int Input_BindLua::ButtonToString(lua_State* L)
+	{
+		int argc = wi::lua::SGetArgCount(L);
+		if (argc > 0)
+		{
+			wi::input::BUTTON button = (wi::input::BUTTON)wi::lua::SGetInt(L, 1);
+			wi::input::CONTROLLER_PREFERENCE preference = wi::input::CONTROLLER_PREFERENCE_GENERIC;
+			if (argc > 1)
+			{
+				preference = (wi::input::CONTROLLER_PREFERENCE)wi::lua::SGetInt(L, 2);
+			}
+			wi::lua::SSetString(L, wi::input::ButtonToString(button, preference));
+			return 1;
+		}
+		wi::lua::SError(L, "ButtonToString(int button, opt int preference = CONTROLLER_PREFERENCE_GENERIC): not enough parameters!");
+		return 0;
+	}
+	int Input_BindLua::StringToButton(lua_State* L)
+	{
+		int argc = wi::lua::SGetArgCount(L);
+		if (argc > 0)
+		{
+			const char* str = wi::lua::SGetString(L, 1);
+			wi::lua::SSetInt(L, (int)wi::input::StringToButton(str));
+			return 1;
+		}
+		wi::lua::SError(L, "StringToButton(string str): not enough parameters!");
+		return 0;
+	}
+	int Input_BindLua::SetCursor(lua_State* L)
+	{
+		int argc = wi::lua::SGetArgCount(L);
+		if (argc > 0)
+		{
+			wi::input::CURSOR cursor = (wi::input::CURSOR)wi::lua::SGetInt(L, 1);
+			wi::input::SetCursor(cursor);
+			return 0;
+		}
+		wi::lua::SError(L, "SetCursor(int cursor) not enough arguments!");
+		return 0;
+	}
+	int Input_BindLua::SetCursorFromFile(lua_State* L)
+	{
+		int argc = wi::lua::SGetArgCount(L);
+		if (argc > 1)
+		{
+			wi::input::CURSOR cursor = (wi::input::CURSOR)wi::lua::SGetInt(L, 1);
+			const char* filename = wi::lua::SGetString(L, 2);
+			wi::input::SetCursorFromFile(cursor, filename);
+			return 0;
+		}
+		wi::lua::SError(L, "SetCursorFromFile(int cursor, string filename) not enough arguments!");
+		return 0;
+	}
+	int Input_BindLua::ResetCursor(lua_State* L)
+	{
+		int argc = wi::lua::SGetArgCount(L);
+		if (argc > 0)
+		{
+			wi::input::CURSOR cursor = (wi::input::CURSOR)wi::lua::SGetInt(L, 1);
+			wi::input::ResetCursor(cursor);
+			return 0;
+		}
+		wi::lua::SError(L, "ResetCursor(int cursor) not enough arguments!");
+		return 0;
+	}
+	int Input_BindLua::ResetCursors(lua_State* L)
+	{
+		wi::input::ResetCursors();
+		return 0;
+	}
+	int Input_BindLua::GetTouchPinch(lua_State* L)
+	{
+		wi::input::Pinch pinch = wi::input::GetTouchPinch();
+		Luna<Vector_BindLua>::push(L, pinch.position);
+		wi::lua::SSetFloat(L, pinch.scale);
+		wi::lua::SSetFloat(L, pinch.delta_scale);
+		return 3;
+	}
+	int Input_BindLua::GetTouchPan(lua_State* L)
+	{
+		Luna<Vector_BindLua>::push(L, wi::input::GetTouchPan());
+		return 1;
+	}
+	int Input_BindLua::IsTouchPanning(lua_State* L)
+	{
+		wi::lua::SSetBool(L, wi::input::IsTouchPanning());
+		return 1;
+	}
+	int Input_BindLua::IsTouchPanStarting(lua_State* L)
+	{
+		wi::lua::SSetBool(L, wi::input::IsTouchPanStarting());
+		return 1;
+	}
 
 	void Input_BindLua::Bind()
 	{
@@ -188,70 +334,153 @@ namespace wi::lua
 		{
 			initialized = true;
 			Luna<Input_BindLua>::Register(wi::lua::GetLuaState());
-			wi::lua::RunText("input = Input()");
 
-			wi::lua::RunText("MOUSE_BUTTON_LEFT			= 1");
-			wi::lua::RunText("MOUSE_BUTTON_RIGHT			= 2");
-			wi::lua::RunText("MOUSE_BUTTON_MIDDLE		= 3");
+			wi::lua::RunText(R"(
+input = Input()
 
-			wi::lua::RunText("KEYBOARD_BUTTON_UP			= 4");
-			wi::lua::RunText("KEYBOARD_BUTTON_DOWN		= 5");
-			wi::lua::RunText("KEYBOARD_BUTTON_LEFT		= 6");
-			wi::lua::RunText("KEYBOARD_BUTTON_RIGHT		= 7");
-			wi::lua::RunText("KEYBOARD_BUTTON_SPACE		= 8");
-			wi::lua::RunText("KEYBOARD_BUTTON_RSHIFT		= 9");
-			wi::lua::RunText("KEYBOARD_BUTTON_LSHIFT		= 10");
-			wi::lua::RunText("KEYBOARD_BUTTON_F1			= 11");
-			wi::lua::RunText("KEYBOARD_BUTTON_F2			= 12");
-			wi::lua::RunText("KEYBOARD_BUTTON_F3			= 13");
-			wi::lua::RunText("KEYBOARD_BUTTON_F4			= 14");
-			wi::lua::RunText("KEYBOARD_BUTTON_F5			= 15");
-			wi::lua::RunText("KEYBOARD_BUTTON_F6			= 16");
-			wi::lua::RunText("KEYBOARD_BUTTON_F7			= 17");
-			wi::lua::RunText("KEYBOARD_BUTTON_F8			= 18");
-			wi::lua::RunText("KEYBOARD_BUTTON_F9			= 19");
-			wi::lua::RunText("KEYBOARD_BUTTON_F10		= 20");
-			wi::lua::RunText("KEYBOARD_BUTTON_F11		= 21");
-			wi::lua::RunText("KEYBOARD_BUTTON_F12		= 22");
-			wi::lua::RunText("KEYBOARD_BUTTON_ENTER		= 23");
-			wi::lua::RunText("KEYBOARD_BUTTON_ESCAPE		= 24");
-			wi::lua::RunText("KEYBOARD_BUTTON_HOME		= 25");
-			wi::lua::RunText("KEYBOARD_BUTTON_RCONTROL	= 26");
-			wi::lua::RunText("KEYBOARD_BUTTON_LCONTROL	= 27");
-			wi::lua::RunText("KEYBOARD_BUTTON_DELETE		= 28");
-			wi::lua::RunText("KEYBOARD_BUTTON_BACK		= 29");
-			wi::lua::RunText("KEYBOARD_BUTTON_PAGEDOWN	= 30");
-			wi::lua::RunText("KEYBOARD_BUTTON_PAGEUP		= 31");
+BUTTON_NONE = 0
 
-			wi::lua::RunText("GAMEPAD_BUTTON_UP			= 257");
-			wi::lua::RunText("GAMEPAD_BUTTON_LEFT		= 258");
-			wi::lua::RunText("GAMEPAD_BUTTON_DOWN		= 259");
-			wi::lua::RunText("GAMEPAD_BUTTON_RIGHT		= 260");
-			wi::lua::RunText("GAMEPAD_BUTTON_1			= 261");
-			wi::lua::RunText("GAMEPAD_BUTTON_2			= 262");
-			wi::lua::RunText("GAMEPAD_BUTTON_3			= 263");
-			wi::lua::RunText("GAMEPAD_BUTTON_4			= 264");
-			wi::lua::RunText("GAMEPAD_BUTTON_5			= 265");
-			wi::lua::RunText("GAMEPAD_BUTTON_6			= 266");
-			wi::lua::RunText("GAMEPAD_BUTTON_7			= 267");
-			wi::lua::RunText("GAMEPAD_BUTTON_8			= 268");
-			wi::lua::RunText("GAMEPAD_BUTTON_9			= 269");
-			wi::lua::RunText("GAMEPAD_BUTTON_10			= 270");
-			wi::lua::RunText("GAMEPAD_BUTTON_11			= 271");
-			wi::lua::RunText("GAMEPAD_BUTTON_12			= 272");
-			wi::lua::RunText("GAMEPAD_BUTTON_13			= 273");
-			wi::lua::RunText("GAMEPAD_BUTTON_14			= 274");
+GAMEPAD_BUTTON_UP			= 257
+GAMEPAD_BUTTON_LEFT			= 258
+GAMEPAD_BUTTON_DOWN			= 259
+GAMEPAD_BUTTON_RIGHT		= 260
+GAMEPAD_BUTTON_1			= 261
+GAMEPAD_BUTTON_2			= 262
+GAMEPAD_BUTTON_3			= 263
+GAMEPAD_BUTTON_4			= 264
+GAMEPAD_BUTTON_5			= 265
+GAMEPAD_BUTTON_6			= 266
+GAMEPAD_BUTTON_7			= 267
+GAMEPAD_BUTTON_8			= 268
+GAMEPAD_BUTTON_9			= 269
+GAMEPAD_BUTTON_10			= 270
+GAMEPAD_BUTTON_11			= 271
+GAMEPAD_BUTTON_12			= 272
+GAMEPAD_BUTTON_13			= 273
+GAMEPAD_BUTTON_14			= 274
 
-			//Analog
-			wi::lua::RunText("GAMEPAD_ANALOG_THUMBSTICK_L	= 0");
-			wi::lua::RunText("GAMEPAD_ANALOG_THUMBSTICK_R	= 1");
-			wi::lua::RunText("GAMEPAD_ANALOG_TRIGGER_L		= 2");
-			wi::lua::RunText("GAMEPAD_ANALOG_TRIGGER_R		= 3");
+GAMEPAD_ANALOG_THUMBSTICK_L_AS_BUTTON_UP		= 275
+GAMEPAD_ANALOG_THUMBSTICK_L_AS_BUTTON_LEFT		= 276
+GAMEPAD_ANALOG_THUMBSTICK_L_AS_BUTTON_DOWN		= 277
+GAMEPAD_ANALOG_THUMBSTICK_L_AS_BUTTON_RIGHT		= 278
+GAMEPAD_ANALOG_THUMBSTICK_R_AS_BUTTON_UP		= 279
+GAMEPAD_ANALOG_THUMBSTICK_R_AS_BUTTON_LEFT		= 280
+GAMEPAD_ANALOG_THUMBSTICK_R_AS_BUTTON_DOWN		= 281
+GAMEPAD_ANALOG_THUMBSTICK_R_AS_BUTTON_RIGHT		= 282
+GAMEPAD_ANALOG_TRIGGER_L_AS_BUTTON				= 283
+GAMEPAD_ANALOG_TRIGGER_R_AS_BUTTON				= 284
 
-			//Touch
-			wi::lua::RunText("TOUCHSTATE_PRESSED		= 0");
-			wi::lua::RunText("TOUCHSTATE_RELEASED	= 1");
-			wi::lua::RunText("TOUCHSTATE_MOVED		= 2");
+GAMEPAD_BUTTON_XBOX_X = GAMEPAD_BUTTON_1
+GAMEPAD_BUTTON_XBOX_A = GAMEPAD_BUTTON_2
+GAMEPAD_BUTTON_XBOX_B = GAMEPAD_BUTTON_3
+GAMEPAD_BUTTON_XBOX_Y = GAMEPAD_BUTTON_4
+GAMEPAD_BUTTON_XBOX_L1 = GAMEPAD_BUTTON_5
+GAMEPAD_BUTTON_XBOX_LT = GAMEPAD_ANALOG_TRIGGER_L_AS_BUTTON
+GAMEPAD_BUTTON_XBOX_R1 = GAMEPAD_BUTTON_6
+GAMEPAD_BUTTON_XBOX_RT = GAMEPAD_ANALOG_TRIGGER_R_AS_BUTTON
+GAMEPAD_BUTTON_XBOX_L3 = GAMEPAD_BUTTON_7
+GAMEPAD_BUTTON_XBOX_R3 = GAMEPAD_BUTTON_8
+GAMEPAD_BUTTON_XBOX_BACK = GAMEPAD_BUTTON_9
+GAMEPAD_BUTTON_XBOX_START = GAMEPAD_BUTTON_10
+
+GAMEPAD_BUTTON_PLAYSTATION_SQUARE = GAMEPAD_BUTTON_1
+GAMEPAD_BUTTON_PLAYSTATION_CROSS = GAMEPAD_BUTTON_2
+GAMEPAD_BUTTON_PLAYSTATION_CIRCLE = GAMEPAD_BUTTON_3
+GAMEPAD_BUTTON_PLAYSTATION_TRIANGLE = GAMEPAD_BUTTON_4
+GAMEPAD_BUTTON_PLAYSTATION_L1 = GAMEPAD_BUTTON_5
+GAMEPAD_BUTTON_PLAYSTATION_L2 = GAMEPAD_ANALOG_TRIGGER_L_AS_BUTTON
+GAMEPAD_BUTTON_PLAYSTATION_R1 = GAMEPAD_BUTTON_6
+GAMEPAD_BUTTON_PLAYSTATION_R2 = GAMEPAD_ANALOG_TRIGGER_R_AS_BUTTON
+GAMEPAD_BUTTON_PLAYSTATION_L3 = GAMEPAD_BUTTON_7
+GAMEPAD_BUTTON_PLAYSTATION_R3 = GAMEPAD_BUTTON_8
+GAMEPAD_BUTTON_PLAYSTATION_SHARE = GAMEPAD_BUTTON_9
+GAMEPAD_BUTTON_PLAYSTATION_OPTION = GAMEPAD_BUTTON_10
+GAMEPAD_BUTTON_PLAYSTATION_SELECT = GAMEPAD_BUTTON_PLAYSTATION_SHARE
+GAMEPAD_BUTTON_PLAYSTATION_START = GAMEPAD_BUTTON_PLAYSTATION_OPTION
+			
+GAMEPAD_ANALOG_THUMBSTICK_L	= 0
+GAMEPAD_ANALOG_THUMBSTICK_R	= 1
+GAMEPAD_ANALOG_TRIGGER_L	= 2
+GAMEPAD_ANALOG_TRIGGER_R	= 3
+			
+TOUCHSTATE_PRESSED			= 0
+TOUCHSTATE_RELEASED			= 1
+TOUCHSTATE_MOVED			= 2
+
+MOUSE_BUTTON_LEFT			= 513
+MOUSE_BUTTON_RIGHT			= 514
+MOUSE_BUTTON_MIDDLE			= 515
+
+MOUSE_SCROLL_AS_BUTTON_UP	= 516
+MOUSE_SCROLL_AS_BUTTON_DOWN	= 517
+
+KEYBOARD_BUTTON_UP			= 518
+KEYBOARD_BUTTON_DOWN		= 519
+KEYBOARD_BUTTON_LEFT		= 520
+KEYBOARD_BUTTON_RIGHT		= 521
+KEYBOARD_BUTTON_SPACE		= 522
+KEYBOARD_BUTTON_RSHIFT		= 523
+KEYBOARD_BUTTON_LSHIFT		= 524
+KEYBOARD_BUTTON_F1			= 525
+KEYBOARD_BUTTON_F2			= 526
+KEYBOARD_BUTTON_F3			= 527
+KEYBOARD_BUTTON_F4			= 528
+KEYBOARD_BUTTON_F5			= 529
+KEYBOARD_BUTTON_F6			= 530
+KEYBOARD_BUTTON_F7			= 531
+KEYBOARD_BUTTON_F8			= 532
+KEYBOARD_BUTTON_F9			= 533
+KEYBOARD_BUTTON_F10			= 534
+KEYBOARD_BUTTON_F11			= 535
+KEYBOARD_BUTTON_F12			= 536
+KEYBOARD_BUTTON_ENTER		= 537
+KEYBOARD_BUTTON_ESCAPE		= 538
+KEYBOARD_BUTTON_HOME		= 539
+KEYBOARD_BUTTON_RCONTROL	= 540
+KEYBOARD_BUTTON_LCONTROL	= 541
+KEYBOARD_BUTTON_DELETE		= 542
+KEYBOARD_BUTTON_BACK		= 543
+KEYBOARD_BUTTON_PAGEDOWN	= 544
+KEYBOARD_BUTTON_PAGEUP		= 545
+KEYBOARD_BUTTON_NUMPAD0		= 546
+KEYBOARD_BUTTON_NUMPAD1		= 547
+KEYBOARD_BUTTON_NUMPAD2		= 548
+KEYBOARD_BUTTON_NUMPAD3		= 549
+KEYBOARD_BUTTON_NUMPAD4		= 550
+KEYBOARD_BUTTON_NUMPAD5		= 551
+KEYBOARD_BUTTON_NUMPAD6		= 552
+KEYBOARD_BUTTON_NUMPAD7		= 553
+KEYBOARD_BUTTON_NUMPAD8		= 554
+KEYBOARD_BUTTON_NUMPAD9		= 555
+KEYBOARD_BUTTON_MULTIPLY	= 556
+KEYBOARD_BUTTON_ADD			= 557
+KEYBOARD_BUTTON_SEPARATOR	= 558
+KEYBOARD_BUTTON_SUBTRACT	= 559
+KEYBOARD_BUTTON_DECIMAL		= 560
+KEYBOARD_BUTTON_DIVIDE		= 561
+KEYBOARD_BUTTON_TAB			= 562
+KEYBOARD_BUTTON_TILDE		= 563
+KEYBOARD_BUTTON_INSERT		= 564
+KEYBOARD_BUTTON_ALT			= 565
+KEYBOARD_BUTTON_ALTGR		= 566
+
+
+CONTROLLER_PREFERENCE_GENERIC = 0
+CONTROLLER_PREFERENCE_PLAYSTATION = 1
+CONTROLLER_PREFERENCE_XBOX = 2
+
+CURSOR_DEFAULT = 0
+CURSOR_TEXTINPUT = 1
+CURSOR_RESIZEALL = 2
+CURSOR_RESIZE_NS = 3
+CURSOR_RESIZE_EW = 4
+CURSOR_RESIZE_NESW = 5
+CURSOR_RESIZE_NWSE = 6
+CURSOR_HAND = 7
+CURSOR_NOTALLOWED = 8
+CURSOR_CROSS = 9
+)");
+
 		}
 
 		Touch_BindLua::Bind();
@@ -263,8 +492,6 @@ namespace wi::lua
 
 
 
-
-	const char Touch_BindLua::className[] = "Touch";
 
 	Luna<Touch_BindLua>::FunctionType Touch_BindLua::methods[] = {
 		lunamethod(Touch_BindLua, GetState),
@@ -282,7 +509,7 @@ namespace wi::lua
 	}
 	int Touch_BindLua::GetPos(lua_State* L)
 	{
-		Luna<Vector_BindLua>::push(L, new Vector_BindLua(XMLoadFloat2(&touch.pos)));
+		Luna<Vector_BindLua>::push(L, XMLoadFloat2(&touch.pos));
 		return 1;
 	}
 
@@ -301,8 +528,6 @@ namespace wi::lua
 
 
 
-
-	const char ControllerFeedback_BindLua::className[] = "ControllerFeedback";
 
 	Luna<ControllerFeedback_BindLua>::FunctionType ControllerFeedback_BindLua::methods[] = {
 		lunamethod(ControllerFeedback_BindLua, SetVibrationRight),

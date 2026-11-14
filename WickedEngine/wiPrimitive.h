@@ -5,6 +5,7 @@
 #include "wiECS.h"
 
 #include <limits>
+#include <cassert>
 
 namespace wi::primitive
 {
@@ -14,7 +15,7 @@ namespace wi::primitive
 	struct Capsule;
 	struct Plane;
 
-	struct AABB
+	struct alignas(16) AABB
 	{
 		enum INTERSECTION_TYPE
 		{
@@ -37,17 +38,28 @@ namespace wi::primitive
 		AABB transform(const XMFLOAT4X4& mat) const;
 		XMFLOAT3 getCenter() const;
 		XMFLOAT3 getHalfWidth() const;
+		XMFLOAT3 getExtents() const;
 		XMMATRIX getAsBoxMatrix() const;
+		XMMATRIX getUnormRemapMatrix() const;
+		void unormRemap(XMMATRIX& mat) const;
 		float getArea() const;
 		float getRadius() const;
 		INTERSECTION_TYPE intersects2D(const AABB& b) const;
 		INTERSECTION_TYPE intersects(const AABB& b) const;
 		bool intersects(const XMFLOAT3& p) const;
+		bool intersects(const XMVECTOR& P) const;
 		bool intersects(const Ray& ray) const;
 		bool intersects(const Sphere& sphere) const;
 		bool intersects(const BoundingFrustum& frustum) const;
+		bool intersects(const BoundingBox& other) const;
+		bool intersects(const BoundingOrientedBox& other) const;
 		AABB operator* (float a);
 		static AABB Merge(const AABB& a, const AABB& b);
+		void AddPoint(const XMFLOAT3& pos);
+		void AddPoint(const XMVECTOR& P);
+
+		// projects the AABB to the screen, returns a 2D rectangle in UV-space as Vector(topleftX, topleftY, bottomrightX, bottomrightY), each value is in range [0, 1]
+		XMFLOAT4 ProjectToScreen(const XMMATRIX& ViewProjection) const;
 
 		constexpr XMFLOAT3 getMin() const { return _min; }
 		constexpr XMFLOAT3 getMax() const { return _max; }
@@ -81,7 +93,12 @@ namespace wi::primitive
 		XMFLOAT3 center;
 		float radius;
 		Sphere() :center(XMFLOAT3(0, 0, 0)), radius(0) {}
-		Sphere(const XMFLOAT3& c, float r) :center(c), radius(r) {}
+		Sphere(const XMFLOAT3& c, float r) :center(c), radius(r)
+		{
+			assert(radius >= 0);
+		}
+		bool intersects(const XMVECTOR& P) const;
+		bool intersects(const XMFLOAT3& P) const;
 		bool intersects(const AABB& b) const;
 		bool intersects(const Sphere& b) const;
 		bool intersects(const Sphere& b, float& dist) const;
@@ -95,6 +112,9 @@ namespace wi::primitive
 		bool intersects(const Ray& b) const;
 		bool intersects(const Ray& b, float& dist) const;
 		bool intersects(const Ray& b, float& dist, XMFLOAT3& direction) const;
+
+		// Construct a matrix that will orient to position according to surface normal:
+		XMFLOAT4X4 GetPlacementOrientation(const XMFLOAT3& position, const XMFLOAT3& normal) const;
 	};
 	struct Capsule
 	{
@@ -102,12 +122,32 @@ namespace wi::primitive
 		XMFLOAT3 tip = XMFLOAT3(0, 0, 0);
 		float radius = 0;
 		Capsule() = default;
-		Capsule(const XMFLOAT3& base, const XMFLOAT3& tip, float radius) :base(base), tip(tip), radius(radius) {}
+		Capsule(const XMFLOAT3& base, const XMFLOAT3& tip, float radius) :base(base), tip(tip), radius(radius)
+		{
+			assert(radius >= 0);
+		}
+		Capsule(XMVECTOR base, XMVECTOR tip, float radius) :radius(radius)
+		{
+			assert(radius >= 0);
+			XMStoreFloat3(&this->base, base);
+			XMStoreFloat3(&this->tip, tip);
+		}
 		Capsule(const Sphere& sphere, float height) :
 			base(XMFLOAT3(sphere.center.x, sphere.center.y - sphere.radius, sphere.center.z)),
 			tip(XMFLOAT3(base.x, base.y + height, base.z)),
 			radius(sphere.radius)
-		{}
+		{
+			assert(radius >= 0);
+		}
+		inline Sphere getSphere() const
+		{
+			XMVECTOR B = XMLoadFloat3(&base);
+			XMVECTOR T = XMLoadFloat3(&tip);
+			Sphere ret;
+			XMStoreFloat3(&ret.center, XMVectorLerp(B, T, 0.5f));
+			XMStoreFloat(&ret.radius, XMVector3Length(B - T) * 0.5f);
+			return ret;
+		}
 		inline AABB getAABB() const
 		{
 			XMFLOAT3 halfWidth = XMFLOAT3(radius, radius, radius);
@@ -115,7 +155,15 @@ namespace wi::primitive
 			base_aabb.createFromHalfWidth(base, halfWidth);
 			AABB tip_aabb;
 			tip_aabb.createFromHalfWidth(tip, halfWidth);
-			return AABB::Merge(base_aabb, tip_aabb);
+			AABB result = AABB::Merge(base_aabb, tip_aabb);
+			assert(result.IsValid());
+			return result;
+		}
+		inline float getLength() const
+		{
+			XMVECTOR B = XMLoadFloat3(&base);
+			XMVECTOR T = XMLoadFloat3(&tip);
+			return XMVectorGetX(XMVector3Length(B - T));
 		}
 		bool intersects(const Capsule& b, XMFLOAT3& position, XMFLOAT3& incident_normal, float& penetration_depth) const;
 		bool intersects(const Sphere& b) const;
@@ -127,6 +175,10 @@ namespace wi::primitive
 		bool intersects(const Ray& b) const;
 		bool intersects(const Ray& b, float& dist) const;
 		bool intersects(const Ray& b, float& dist, XMFLOAT3& direction) const;
+		bool intersects(const XMFLOAT3& point) const;
+
+		// Construct a matrix that will orient to position according to surface normal:
+		XMFLOAT4X4 GetPlacementOrientation(const XMFLOAT3& position, const XMFLOAT3& normal) const;
 	};
 	struct Plane
 	{
@@ -159,7 +211,9 @@ namespace wi::primitive
 		{
 			XMStoreFloat3(&origin, newOrigin);
 			XMStoreFloat3(&direction, newDirection);
-			XMStoreFloat3(&direction_inverse, XMVectorReciprocal(newDirection));
+			direction_inverse.x = direction.x == 0 ? FLT_MAX : 1.0f / direction.x;
+			direction_inverse.y = direction.y == 0 ? FLT_MAX : 1.0f / direction.y;
+			direction_inverse.z = direction.z == 0 ? FLT_MAX : 1.0f / direction.z;
 			TMin = newTMin;
 			TMax = newTMax;
 		}
@@ -173,6 +227,11 @@ namespace wi::primitive
 		bool intersects(const Plane& b) const;
 		bool intersects(const Plane& b, float& dist) const;
 		bool intersects(const Plane& b, float& dist, XMFLOAT3& direction) const;
+
+		void CreateFromPoints(const XMFLOAT3& a, const XMFLOAT3& b);
+
+		// Construct a matrix that will orient to position according to surface normal:
+		XMFLOAT4X4 GetPlacementOrientation(const XMFLOAT3& position, const XMFLOAT3& normal) const;
 	};
 
 	struct Frustum
@@ -211,6 +270,7 @@ namespace wi::primitive
 		Hitbox2D(const XMFLOAT2& newPos, const XMFLOAT2 newSiz) :pos(newPos), siz(newSiz) {}
 		~Hitbox2D() {};
 
+		bool intersects(const XMFLOAT2& b) const;
 		bool intersects(const Hitbox2D& b) const;
 	};
 

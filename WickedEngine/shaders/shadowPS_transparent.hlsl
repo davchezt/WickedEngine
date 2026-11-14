@@ -5,38 +5,60 @@
 [earlydepthstencil]
 float4 main(PixelInput input) : SV_TARGET
 {
-	float4 color;
+	ShaderMaterial material = GetMaterial();
+
+	float4 uvsets = input.GetUVSets();
+	half4 color;
 	[branch]
-	if (GetMaterial().textures[BASECOLORMAP].IsValid())
+	if (material.textures[BASECOLORMAP].IsValid())
 	{
-		color = GetMaterial().textures[BASECOLORMAP].Sample(sampler_objectshader, input.uvsets);
+		color = material.textures[BASECOLORMAP].Sample(sampler_objectshader, uvsets);
 	}
 	else
 	{
 		color = 1;
 	}
+	
+	[branch]
+	if (material.textures[TRANSPARENCYMAP].IsValid())
+	{
+		color.a *= material.textures[TRANSPARENCYMAP].Sample(sampler_objectshader, uvsets).r;
+	}
+	
 	color *= input.color;
+	
+	ShaderMeshInstance meshinstance = load_instance(input.GetInstanceIndex());
 
-	clip(color.a - GetMaterial().alphaTest);
+	clip(color.a - material.GetAlphaTest() - meshinstance.GetAlphaTest());
 
-	float opacity = color.a;
+	half opacity = color.a;
+	
+	half transmission = lerp(material.GetTransmission(), 1, material.GetCloak());
+	color.rgb = lerp(color.rgb, 1, material.GetCloak());
 
 	[branch]
-	if (GetMaterial().transmission > 0)
+	if (transmission > 0)
 	{
-		float transmission = GetMaterial().transmission;
 		[branch]
-		if (GetMaterial().textures[TRANSMISSIONMAP].IsValid())
+		if (material.textures[TRANSMISSIONMAP].IsValid())
 		{
-			float transmissionMap = GetMaterial().textures[TRANSMISSIONMAP].Sample(sampler_objectshader, input.uvsets).r;
+			half transmissionMap = material.textures[TRANSMISSIONMAP].Sample(sampler_objectshader, uvsets).r;
 			transmission *= transmissionMap;
 		}
 		opacity *= 1 - transmission;
 	}
+	
+	opacity = lerp(opacity, 0.5, material.GetCloak());
 
 	color.rgb *= 1 - opacity; // if fully opaque, then black (not let through any light)
 
 	color.a = input.pos.z; // secondary depth
+
+	if (material.GetShaderType() == SHADERTYPE_WATER)
+	{
+		color.rgb = 1; // disable water shadow because it has already fog
+		color.rgb += caustics(uvsets.xy * 10);
+	}
 
 	return color;
 }

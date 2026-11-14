@@ -9,31 +9,79 @@
 #include "wiColor.h"
 #include "wiTimer.h"
 
+#include "Utility/win32ico.h"
+
 #include <algorithm>
 #include <map>
 #include <atomic>
 #include <thread>
+#include <deque>
 
 #ifdef SDL2
 #include <SDL2/SDL.h>
+#elif defined(SDL3)
+#include <SDL3/SDL.h>
 #endif // SDL2
 
-#ifdef PLATFORM_UWP
-#include <winrt/Windows.Foundation.h>
-#include <winrt/Windows.UI.Input.h>
-#include <winrt/Windows.Devices.Input.h>
-#endif // PLATFORM_UWP
+#ifdef PLATFORM_PS5
+#include "wiInput_PS5.h"
+#endif // PLATFORM_PS5
+
+#if defined(PLATFORM_MACOS)
+#include "wiInput_Apple.h"
+#include <ApplicationServices/ApplicationServices.h>
+#include <Carbon/Carbon.h>
+__asm__(".linker_option \"-framework\", \"CoreGraphics\"");
+__asm__(".linker_option \"-framework\", \"ApplicationServices\"");
+namespace wi::input::apple
+{
+bool isLeftMouseButtonPressed()
+{
+	return CGEventSourceButtonState(kCGEventSourceStateCombinedSessionState, kCGMouseButtonLeft) != 0;
+}
+bool isRightMouseButtonPressed()
+{
+	return CGEventSourceButtonState(kCGEventSourceStateCombinedSessionState, kCGMouseButtonRight) != 0;
+}
+bool isMiddleMouseButtonPressed()
+{
+	return CGEventSourceButtonState(kCGEventSourceStateCombinedSessionState, kCGMouseButtonCenter) != 0;
+}
+bool IsKeyDown(CGKeyCode keyCode)
+{
+	return CGEventSourceKeyState(kCGEventSourceStateCombinedSessionState, keyCode) != 0;
+}
+}
+using namespace wi::input::apple;
+#elif defined(PLATFORM_IOS)
+#include "wiInput_Apple.h"
+namespace wi::input::apple
+{
+bool isLeftMouseButtonPressed()
+{
+	return false;
+}
+bool isRightMouseButtonPressed()
+{
+	return false;
+}
+bool isMiddleMouseButtonPressed()
+{
+	return false;
+}
+bool IsKeyDown(int keyCode)
+{
+	return false;
+}
+}
+using namespace wi::input::apple;
+#endif // PLATFORM_MACOS
 
 namespace wi::input
 {
 #ifdef _WIN32
-#ifndef PLATFORM_UWP
 #define KEY_DOWN(vk_code) (GetAsyncKeyState(vk_code) < 0)
 #define KEY_TOGGLE(vk_code) ((GetAsyncKeyState(vk_code) & 1) != 0)
-#else
-#define KEY_DOWN(vk_code) ((int)winrt::Windows::UI::Core::CoreWindow::GetForCurrentThread().GetAsyncKeyState((winrt::Windows::System::VirtualKey)vk_code) < 0)
-#define KEY_TOGGLE(vk_code) (((int)winrt::Windows::UI::Core::CoreWindow::GetForCurrentThread().GetAsyncKeyState((winrt::Windows::System::VirtualKey)vk_code) & 1) != 0)
-#endif //PLATFORM_UWP
 #else
 #define KEY_DOWN(vk_code) 0
 #define KEY_TOGGLE(vk_code) 0
@@ -45,7 +93,69 @@ namespace wi::input
 	KeyboardState keyboard;
 	MouseState mouse;
 	Pen pen;
+	Pinch pinch;
+	XMFLOAT2 pan = XMFLOAT2(0, 0);
+	bool is_panning = false;
+	bool is_pan_starting = false;
 	bool pen_override = false;
+	bool double_click = false;
+	wi::Timer doubleclick_timer;
+	XMFLOAT2 doubleclick_prevpos = XMFLOAT2(0, 0);
+	CURSOR cursor_current = CURSOR_COUNT; // something that's not default, because at least once code should change it to default
+	CURSOR cursor_next = CURSOR_DEFAULT;
+	std::deque<float> mouse_scroll_events;
+	std::deque<XMFLOAT2> mouse_move_events;
+
+#ifdef _WIN32
+	static const HCURSOR cursor_table_original[] = {
+		::LoadCursor(nullptr, IDC_ARROW),
+		::LoadCursor(nullptr, IDC_IBEAM),
+		::LoadCursor(nullptr, IDC_SIZEALL),
+		::LoadCursor(nullptr, IDC_SIZENS),
+		::LoadCursor(nullptr, IDC_SIZEWE),
+		::LoadCursor(nullptr, IDC_SIZENESW),
+		::LoadCursor(nullptr, IDC_SIZENWSE),
+		::LoadCursor(nullptr, IDC_HAND),
+		::LoadCursor(nullptr, IDC_NO),
+		::LoadCursor(nullptr, IDC_CROSS),
+	};
+	static HCURSOR cursor_table[arraysize(cursor_table_original)] = {};
+#endif // _WIN32
+
+#ifdef SDL2
+	static SDL_Cursor* cursor_table_original[] = {
+		SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_ARROW),
+		SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_IBEAM),
+		SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZEALL),
+		SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZENS),
+		SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZEWE),
+		SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZENESW),
+		SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_SIZENWSE),
+		SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_HAND),
+		SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_NO),
+		SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_CROSSHAIR),
+	};
+	static SDL_Cursor* cursor_table[arraysize(cursor_table_original)] = {};
+#elif defined(SDL3)
+	static SDL_Cursor* cursor_table_original[] = {
+		SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_DEFAULT),
+		SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_TEXT),
+		SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_MOVE),
+		SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_NS_RESIZE),
+		SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_EW_RESIZE),
+		SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_NESW_RESIZE),
+		SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_NWSE_RESIZE),
+		SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_POINTER),
+		SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_NOT_ALLOWED),
+		SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_CROSSHAIR),
+	};
+	static SDL_Cursor* cursor_table[arraysize(cursor_table_original)] = {};
+#endif // SDL2
+
+#ifdef __APPLE__
+	static void* cursor_table_original[CURSOR_COUNT] = {};
+	static void* cursor_table[arraysize(cursor_table_original)] = {};
+#endif // __APPLE__
 
 	const KeyboardState& GetKeyboardState() { return keyboard; }
 	const MouseState& GetMouseState() { return mouse; }
@@ -64,7 +174,7 @@ namespace wi::input
 			}
 		};
 	};
-	std::map<Input, uint32_t, Input::LessComparer> inputs;
+	std::map<Input, int, Input::LessComparer> inputs; // Input -> down frames (-1 = released)
 	wi::vector<Touch> touches;
 
 	struct Controller
@@ -75,6 +185,8 @@ namespace wi::input
 			XINPUT,
 			RAWINPUT,
 			SDLINPUT,
+			PS5,
+			APPLE,
 		};
 		DeviceType deviceType;
 		int deviceIndex;
@@ -90,11 +202,25 @@ namespace wi::input
 		wi::input::rawinput::Initialize();
 		wi::input::sdlinput::Initialize();
 
-		wi::backlog::post("wi::input Initialized (" + std::to_string((int)std::round(timer.elapsed())) + " ms)");
+#ifdef PLATFORM_PS5
+		wi::input::ps5::Initialize();
+#endif // PLATFORM_PS5
+		
+#ifdef __APPLE__
+		wi::input::apple::Initialize();
+		wi::apple::CursorInit(cursor_table_original);
+#endif // __APPLE__
+
+		for (int i = 0; i < arraysize(cursor_table); ++i)
+		{
+			cursor_table[i] = cursor_table_original[i];
+		}
+
+		wilog("wi::input Initialized (%d ms)", (int)std::round(timer.elapsed()));
 		initialized.store(true);
 	}
 
-	void Update(wi::platform::window_type _window, wi::Canvas _canvas)
+	void Update(wi::platform::window_type _window, const wi::Canvas& _canvas)
 	{
 		window = _window;
 		canvas = _canvas;
@@ -109,117 +235,55 @@ namespace wi::input
 		wi::input::rawinput::Update();
 		wi::input::sdlinput::Update();
 
-#ifdef _WIN32
+#ifdef PLATFORM_PS5
+		wi::input::ps5::Update();
+#endif // PLATFORM_PS5
+
+#if defined(_WIN32) && !defined(PLATFORM_XBOX)
 		wi::input::rawinput::GetMouseState(&mouse); // currently only the relative data can be used from this
 		wi::input::rawinput::GetKeyboardState(&keyboard); 
 
 		// apparently checking the mouse here instead of Down() avoids missing the button presses (review!)
-        mouse.left_button_press |= KEY_DOWN(VK_LBUTTON);
-        mouse.middle_button_press |= KEY_DOWN(VK_MBUTTON);
-        mouse.right_button_press |= KEY_DOWN(VK_RBUTTON);
+		mouse.left_button_press |= KEY_DOWN(VK_LBUTTON);
+		mouse.middle_button_press |= KEY_DOWN(VK_MBUTTON);
+		mouse.right_button_press |= KEY_DOWN(VK_RBUTTON);
 
-#ifndef PLATFORM_UWP
 		// Since raw input doesn't contain absolute mouse position, we get it with regular winapi:
 		POINT p;
 		GetCursorPos(&p);
 		ScreenToClient(window, &p);
 		mouse.position.x = (float)p.x;
 		mouse.position.y = (float)p.y;
-		mouse.position.x /= canvas.GetDPIScaling();
-		mouse.position.y /= canvas.GetDPIScaling();
-#endif // PLATFORM_UWP
-
-#elif SDL2
+#elif defined(PLATFORM_MACOS)
+		mouse = {};
+		mouse.position = wi::apple::GetMousePositionInWindow(window);
+		mouse.left_button_press = isLeftMouseButtonPressed();
+		mouse.right_button_press = isRightMouseButtonPressed();
+		mouse.middle_button_press = isMiddleMouseButtonPressed();
+#elif defined(PLATFORM_IOS)
+		// keep prev mousepos for touch consistency
+		mouse.left_button_press = false;
+		mouse.right_button_press = false;
+		mouse.middle_button_press = false;
+		mouse.delta_position = XMFLOAT2(0, 0);
+		mouse.delta_wheel = 0;
+#elif defined(SDL2) || defined(SDL3)
 		wi::input::sdlinput::GetMouseState(&mouse);
-		mouse.position.x /= canvas.GetDPIScaling();
-		mouse.position.y /= canvas.GetDPIScaling();
 		wi::input::sdlinput::GetKeyboardState(&keyboard);
-		//TODO controllers
-		//TODO touch
 #endif
-
-#ifdef PLATFORM_UWP
-		static bool isRegisteredUWP = false;
-		if (!isRegisteredUWP)
+		
+		for (auto& x : mouse_move_events)
 		{
-			isRegisteredUWP = true;
-			using namespace winrt::Windows::UI::Core;
-			using namespace winrt::Windows::Devices::Input;
-
-			auto window = CoreWindow::GetForCurrentThread();
-			window.PointerPressed([](CoreWindow, PointerEventArgs args) {
-				auto p = args.CurrentPoint();
-
-				if (p.Properties().IsPrimary())
-				{
-					mouse.position = XMFLOAT2(p.Position().X, p.Position().Y);
-					// UWP mouse position already has DPI applied, so only apply custom scale factor in here:
-					mouse.position.x /= canvas.scaling;
-					mouse.position.y /= canvas.scaling;
-					mouse.left_button_press = p.Properties().IsLeftButtonPressed();
-					mouse.middle_button_press = p.Properties().IsMiddleButtonPressed();
-					mouse.right_button_press = p.Properties().IsRightButtonPressed();
-					mouse.pressure = p.Properties().Pressure();
-				}
-
-				Touch touch;
-				touch.state = Touch::TOUCHSTATE_PRESSED;
-				touch.pos = XMFLOAT2(p.Position().X, p.Position().Y);
-				touches.push_back(touch);
-			});
-			window.PointerReleased([](CoreWindow, PointerEventArgs args) {
-				auto p = args.CurrentPoint();
-
-				if (p.Properties().IsPrimary())
-				{
-					mouse.left_button_press = p.Properties().IsLeftButtonPressed();
-					mouse.middle_button_press = p.Properties().IsMiddleButtonPressed();
-					mouse.right_button_press = p.Properties().IsRightButtonPressed();
-					mouse.pressure = p.Properties().Pressure();
-				}
-
-				Touch touch;
-				touch.state = Touch::TOUCHSTATE_RELEASED;
-				touch.pos = XMFLOAT2(p.Position().X, p.Position().Y);
-				touches.push_back(touch);
-			});
-			window.PointerMoved([](CoreWindow, PointerEventArgs args) {
-				auto p = args.CurrentPoint();
-
-				if (p.Properties().IsPrimary())
-				{
-					mouse.position = XMFLOAT2(p.Position().X, p.Position().Y);
-					// UWP mouse position already has DPI applied, so only apply custom scale factor in here:
-					mouse.position.x /= canvas.scaling;
-					mouse.position.y /= canvas.scaling;
-					mouse.pressure = p.Properties().Pressure();
-				}
-
-				Touch touch;
-				touch.state = Touch::TOUCHSTATE_MOVED;
-				touch.pos = XMFLOAT2(p.Position().X, p.Position().Y);
-				touches.push_back(touch);
-			});
-			window.PointerWheelChanged([](CoreWindow, PointerEventArgs args) {
-				auto p = args.CurrentPoint();
-
-				if (p.Properties().IsPrimary())
-				{
-					mouse.delta_wheel += (float)p.Properties().MouseWheelDelta() / WHEEL_DELTA;
-				}
-
-				Touch touch;
-				touch.state = Touch::TOUCHSTATE_RELEASED;
-				touch.pos = XMFLOAT2(p.Position().X, p.Position().Y);
-				touches.push_back(touch);
-			});
-			MouseDevice::GetForCurrentView().MouseMoved([](MouseDevice, MouseEventArgs args) {
-				mouse.delta_position.x += float(args.MouseDelta().X);
-				mouse.delta_position.y += float(args.MouseDelta().Y);
-			});
+			mouse.delta_position.x += x.x;
+			mouse.delta_position.y += x.y;
 		}
-
-#endif
+		mouse_move_events.clear();
+		
+		for (auto& x : mouse_scroll_events)
+		{
+			mouse.delta_wheel += x;
+		}
+		mouse_scroll_events.clear();
 
 		if (pen_override)
 		{
@@ -227,6 +291,68 @@ namespace wi::input
 			mouse.left_button_press = pen.pressure > 0;
 			mouse.pressure = pen.pressure;
 			pen_override = false;
+		}
+
+#ifndef PLATFORM_IOS // on IOS I keep the previous coodinates instead from touches
+		// The application always works with logical mouse coordinates:
+		mouse.position.x = canvas.PhysicalToLogical(mouse.position.x);
+		mouse.position.y = canvas.PhysicalToLogical(mouse.position.y);
+#endif // PLATFORM_IOS
+		
+		// Primary touch can act as mouse pointer override:
+		static bool pan_continue = false; // helps avoid non-continuous delta jump on pan begin
+		if (!touches.empty())
+		{
+			const Touch& primary_touch = touches.front();
+			if (primary_touch.state == Touch::TOUCHSTATE_PRESSED)
+			{
+				mouse.left_button_press = true;
+				pan_continue = false;
+			}
+			else if (primary_touch.state == Touch::TOUCHSTATE_MOVED)
+			{
+				if (pan_continue)
+				{
+					mouse.delta_position.x = mouse.position.x - primary_touch.pos.x;
+					mouse.delta_position.y = mouse.position.y - primary_touch.pos.y;
+				}
+				pan_continue = true;
+			}
+			else
+			{
+				pan_continue = false;
+			}
+			mouse.position = primary_touch.pos;
+		}
+		else
+		{
+			pan_continue = false;
+		}
+		
+		// Find pinch and pan gesture:
+		float prev_pinch_scale = pinch.scale;
+		pinch = {};
+		pan = XMFLOAT2(0, 0);
+		const bool was_panning = is_panning;
+		is_panning = false;
+		is_pan_starting = false;
+		for (auto& touch : touches)
+		{
+			if (touch.state == Touch::TOUCHSTATE_PINCHED)
+			{
+				pinch.position = touch.pos;
+				pinch.scale = touch.scale;
+				pinch.delta_scale = prev_pinch_scale - pinch.scale;
+			}
+			else if (touch.state == Touch::TOUCHSTATE_MOVED)
+			{
+				pan = mouse.delta_position;
+				if (!was_panning)
+				{
+					is_pan_starting = true;
+				}
+				is_panning = true;
+			}
 		}
 
 		// Check if low-level XINPUT controller is not registered for playerindex slot and register:
@@ -322,6 +448,72 @@ namespace wi::input
 			}
 		}
 
+#ifdef __APPLE__
+		// Check if low-level Apple controller is not registered for playerindex slot and register:
+		for (int i = 0; i < wi::input::apple::GetMaxControllerCount(); ++i)
+		{
+			if (wi::input::apple::GetControllerState(nullptr, i))
+			{
+				int slot = -1;
+				for (int j = 0; j < (int)controllers.size(); ++j)
+				{
+					if (slot < 0 && controllers[j].deviceType == Controller::DISCONNECTED)
+					{
+						// take the first disconnected slot
+						slot = j;
+					}
+					if (controllers[j].deviceType == Controller::APPLE && controllers[j].deviceIndex == i)
+					{
+						// it is already registered to this slot
+						slot = j;
+						break;
+					}
+				}
+				if (slot == -1)
+				{
+					// no disconnected slot was found, and it was not registered
+					slot = (int)controllers.size();
+					controllers.emplace_back();
+				}
+				controllers[slot].deviceType = Controller::APPLE;
+				controllers[slot].deviceIndex = i;
+			}
+		}
+#endif // __APPLE__
+
+#ifdef PLATFORM_PS5
+		// Check if low-level PS5 controller is not registered for playerindex slot and register:
+		for (int i = 0; i < wi::input::ps5::GetMaxControllerCount(); ++i)
+		{
+			if (wi::input::ps5::GetControllerState(nullptr, i))
+			{
+				int slot = -1;
+				for (int j = 0; j < (int)controllers.size(); ++j)
+				{
+					if (slot < 0 && controllers[j].deviceType == Controller::DISCONNECTED)
+					{
+						// take the first disconnected slot
+						slot = j;
+					}
+					if (controllers[j].deviceType == Controller::PS5 && controllers[j].deviceIndex == i)
+					{
+						// it is already registered to this slot
+						slot = j;
+						break;
+					}
+				}
+				if (slot == -1)
+				{
+					// no disconnected slot was found, and it was not registered
+					slot = (int)controllers.size();
+					controllers.emplace_back();
+				}
+				controllers[slot].deviceType = Controller::PS5;
+				controllers[slot].deviceIndex = i;
+			}
+		}
+#endif // PLATFORM_PS5
+
 		// Read low-level controllers:
 		for (auto& controller : controllers)
 		{
@@ -336,6 +528,16 @@ namespace wi::input
 					break;
 				case Controller::SDLINPUT:
 					connected = wi::input::sdlinput::GetControllerState(&controller.state, controller.deviceIndex);
+					break;
+				case Controller::PS5:
+#ifdef PLATFORM_PS5
+					connected = wi::input::ps5::GetControllerState(&controller.state, controller.deviceIndex);
+#endif // PLATFORM_PS5
+					break;
+				case Controller::APPLE:
+#ifdef __APPLE__
+					connected = wi::input::apple::GetControllerState(&controller.state, controller.deviceIndex);
+#endif // __APPLE__
 					break;
 				case Controller::DISCONNECTED:
 					connected = false;
@@ -359,9 +561,13 @@ namespace wi::input
 			{
 				iter->second++;
 			}
-			else
+			else if (iter->second == -1)
 			{
 				todelete = true;
+			}
+			else
+			{
+				iter->second = -1;
 			}
 
 			if (todelete)
@@ -373,6 +579,39 @@ namespace wi::input
 				++iter;
 			}
 		}
+
+		double_click = false;
+		if (Press(MOUSE_BUTTON_LEFT))
+		{
+			XMFLOAT2 pos = mouse.position;
+			double elapsed = doubleclick_timer.record_elapsed_seconds();
+			if (elapsed < 0.5 && wi::math::Distance(doubleclick_prevpos, pos) < 5)
+			{
+				double_click = true;
+			}
+			doubleclick_prevpos = pos;
+		}
+
+		// Cursor update:
+		if (cursor_next != cursor_current || cursor_next != CURSOR_DEFAULT)
+		{
+			if (cursor_next >= arraysize(cursor_table))
+			{
+				cursor_next = CURSOR_DEFAULT;
+			}
+			auto cursorhandle = cursor_table[cursor_next] ? cursor_table[cursor_next] : cursor_table[CURSOR_DEFAULT];
+			
+#ifdef PLATFORM_WINDOWS_DESKTOP
+			::SetCursor(cursorhandle);
+#elif defined(__APPLE__)
+			wi::apple::CursorSet(cursorhandle);
+#elif defined(SDL2) || defined(SDL3)
+			SDL_SetCursor(cursorhandle);
+#endif // SDL2
+
+			cursor_current = cursor_next;
+		}
+		cursor_next = CURSOR_DEFAULT;
 
 		wi::profiler::EndRange(range);
 	}
@@ -391,7 +630,7 @@ namespace wi::input
 			return false;
 		}
 
-		if(button > GAMEPAD_RANGE_START)
+		if(IsGamepadButton(button))
 		{
 			if (playerindex < (int)controllers.size())
 			{
@@ -413,6 +652,18 @@ namespace wi::input
 				case GAMEPAD_BUTTON_8: return state.buttons & (1 << (GAMEPAD_BUTTON_8 - GAMEPAD_RANGE_START - 1));
 				case GAMEPAD_BUTTON_9: return state.buttons & (1 << (GAMEPAD_BUTTON_9 - GAMEPAD_RANGE_START - 1));
 				case GAMEPAD_BUTTON_10: return state.buttons & (1 << (GAMEPAD_BUTTON_10 - GAMEPAD_RANGE_START - 1));
+
+				case GAMEPAD_ANALOG_THUMBSTICK_L_AS_BUTTON_UP: return GetAnalog(GAMEPAD_ANALOG_THUMBSTICK_L).y > 0.5f;
+				case GAMEPAD_ANALOG_THUMBSTICK_L_AS_BUTTON_LEFT: return GetAnalog(GAMEPAD_ANALOG_THUMBSTICK_L).x < -0.5f;
+				case GAMEPAD_ANALOG_THUMBSTICK_L_AS_BUTTON_DOWN: return GetAnalog(GAMEPAD_ANALOG_THUMBSTICK_L).y < -0.5f;
+				case GAMEPAD_ANALOG_THUMBSTICK_L_AS_BUTTON_RIGHT: return GetAnalog(GAMEPAD_ANALOG_THUMBSTICK_L).x > 0.5f;
+				case GAMEPAD_ANALOG_THUMBSTICK_R_AS_BUTTON_UP: return GetAnalog(GAMEPAD_ANALOG_THUMBSTICK_R).y > 0.5f;
+				case GAMEPAD_ANALOG_THUMBSTICK_R_AS_BUTTON_LEFT: return GetAnalog(GAMEPAD_ANALOG_THUMBSTICK_R).x < -0.5f;
+				case GAMEPAD_ANALOG_THUMBSTICK_R_AS_BUTTON_DOWN: return GetAnalog(GAMEPAD_ANALOG_THUMBSTICK_R).y < -0.5f;
+				case GAMEPAD_ANALOG_THUMBSTICK_R_AS_BUTTON_RIGHT: return GetAnalog(GAMEPAD_ANALOG_THUMBSTICK_R).x > 0.5f;
+				case GAMEPAD_ANALOG_TRIGGER_L_AS_BUTTON: return GetAnalog(GAMEPAD_ANALOG_TRIGGER_L).x > 0.5f;
+				case GAMEPAD_ANALOG_TRIGGER_R_AS_BUTTON: return GetAnalog(GAMEPAD_ANALOG_TRIGGER_R).x > 0.5f;
+
 				default: break;
 				}
 
@@ -420,7 +671,17 @@ namespace wi::input
 		}
 		else if (playerindex == 0) // keyboard or mouse
 		{
-			uint8_t keycode = (uint8_t)button;
+			if (button == MOUSE_SCROLL_AS_BUTTON_UP)
+			{
+				return mouse.delta_wheel > 0.1f;
+			}
+			if (button == MOUSE_SCROLL_AS_BUTTON_DOWN)
+			{
+				return mouse.delta_wheel < -0.1f;
+			}
+
+			uint16_t keycode = (uint16_t)button;
+			constexpr uint16_t unknown = 65535;
 
 			switch (button)
 			{
@@ -509,6 +770,9 @@ namespace wi::input
 			case wi::input::KEYBOARD_BUTTON_RCONTROL:
 				keycode = VK_RCONTROL;
 				break;
+			case wi::input::KEYBOARD_BUTTON_INSERT:
+				keycode = VK_INSERT;
+				break;
 			case wi::input::KEYBOARD_BUTTON_DELETE:
 				keycode = VK_DELETE;
 				break;
@@ -521,16 +785,347 @@ namespace wi::input
 			case wi::input::KEYBOARD_BUTTON_PAGEUP:
 				keycode = VK_PRIOR;
 				break;
+			case KEYBOARD_BUTTON_NUMPAD0:
+				keycode = VK_NUMPAD0;
+				break;
+			case KEYBOARD_BUTTON_NUMPAD1:
+				keycode = VK_NUMPAD1;
+				break;
+			case KEYBOARD_BUTTON_NUMPAD2:
+				keycode = VK_NUMPAD2;
+				break;
+			case KEYBOARD_BUTTON_NUMPAD3:
+				keycode = VK_NUMPAD3;
+				break;
+			case KEYBOARD_BUTTON_NUMPAD4:
+				keycode = VK_NUMPAD4;
+				break;
+			case KEYBOARD_BUTTON_NUMPAD5:
+				keycode = VK_NUMPAD5;
+				break;
+			case KEYBOARD_BUTTON_NUMPAD6:
+				keycode = VK_NUMPAD6;
+				break;
+			case KEYBOARD_BUTTON_NUMPAD7:
+				keycode = VK_NUMPAD7;
+				break;
+			case KEYBOARD_BUTTON_NUMPAD8:
+				keycode = VK_NUMPAD8;
+				break;
+			case KEYBOARD_BUTTON_NUMPAD9:
+				keycode = VK_NUMPAD9;
+				break;
+			case KEYBOARD_BUTTON_MULTIPLY:
+				keycode = VK_MULTIPLY;
+				break;
+			case KEYBOARD_BUTTON_ADD:
+				keycode = VK_ADD;
+				break;
+			case KEYBOARD_BUTTON_SEPARATOR:
+				keycode = VK_SEPARATOR;
+				break;
+			case KEYBOARD_BUTTON_SUBTRACT:
+				keycode = VK_SUBTRACT;
+				break;
+			case KEYBOARD_BUTTON_DECIMAL:
+				keycode = VK_DECIMAL;
+				break;
+			case KEYBOARD_BUTTON_DIVIDE:
+				keycode = VK_DIVIDE;
+				break;
+			case KEYBOARD_BUTTON_TAB:
+				keycode = VK_TAB;
+				break;
+			case KEYBOARD_BUTTON_TILDE:
+				keycode = VK_OEM_FJ_JISHO; // http://kbdedit.com/manual/low_level_vk_list.html
+				break;
+			case KEYBOARD_BUTTON_ALT:
+				keycode = VK_LMENU;
+				break;
+			case KEYBOARD_BUTTON_ALTGR:
+				keycode = VK_RMENU;
+				break;
+			case KEYBOARD_BUTTON_END:
+				keycode = VK_END;
+				break;
 #endif // _WIN32
+					
+#ifdef PLATFORM_MACOS
+			case wi::input::KEYBOARD_BUTTON_UP:
+				keycode = kVK_UpArrow;
+				break;
+			case wi::input::KEYBOARD_BUTTON_DOWN:
+				keycode = kVK_DownArrow;
+				break;
+			case wi::input::KEYBOARD_BUTTON_LEFT:
+				keycode = kVK_LeftArrow;
+				break;
+			case wi::input::KEYBOARD_BUTTON_RIGHT:
+				keycode = kVK_RightArrow;
+				break;
+			case wi::input::KEYBOARD_BUTTON_SPACE:
+				keycode = kVK_Space;
+				break;
+			case wi::input::KEYBOARD_BUTTON_RSHIFT:
+				keycode = kVK_RightShift;
+				break;
+			case wi::input::KEYBOARD_BUTTON_LSHIFT:
+				keycode = kVK_Shift;
+				break;
+			case wi::input::KEYBOARD_BUTTON_F1:
+				keycode = kVK_F1;
+				break;
+			case wi::input::KEYBOARD_BUTTON_F2:
+				keycode = kVK_F2;
+				break;
+			case wi::input::KEYBOARD_BUTTON_F3:
+				keycode = kVK_F3;
+				break;
+			case wi::input::KEYBOARD_BUTTON_F4:
+				keycode = kVK_F4;
+				break;
+			case wi::input::KEYBOARD_BUTTON_F5:
+				keycode = kVK_F5;
+				break;
+			case wi::input::KEYBOARD_BUTTON_F6:
+				keycode = kVK_F6;
+				break;
+			case wi::input::KEYBOARD_BUTTON_F7:
+				keycode = kVK_F7;
+				break;
+			case wi::input::KEYBOARD_BUTTON_F8:
+				keycode = kVK_F8;
+				break;
+			case wi::input::KEYBOARD_BUTTON_F9:
+				keycode = kVK_F9;
+				break;
+			case wi::input::KEYBOARD_BUTTON_F10:
+				keycode = kVK_F10;
+				break;
+			case wi::input::KEYBOARD_BUTTON_F11:
+				keycode = kVK_F11;
+				break;
+			case wi::input::KEYBOARD_BUTTON_F12:
+				keycode = kVK_F12;
+				break;
+			case wi::input::KEYBOARD_BUTTON_ENTER:
+				keycode = kVK_Return;
+				break;
+			case wi::input::KEYBOARD_BUTTON_ESCAPE:
+				keycode = kVK_Escape;
+				break;
+			case wi::input::KEYBOARD_BUTTON_HOME:
+				keycode = kVK_Home;
+				break;
+			case wi::input::KEYBOARD_BUTTON_LCONTROL:
+				keycode = kVK_Control;
+				break;
+			case wi::input::KEYBOARD_BUTTON_RCONTROL:
+				keycode = kVK_RightControl;
+				break;
+			case wi::input::KEYBOARD_BUTTON_LCOMMAND:
+				keycode = kVK_Command;
+				break;
+			case wi::input::KEYBOARD_BUTTON_RCOMMAND:
+				keycode = kVK_RightCommand;
+				break;
+			case wi::input::KEYBOARD_BUTTON_INSERT:
+				keycode = unknown;
+				break;
+			case wi::input::KEYBOARD_BUTTON_DELETE:
+				keycode = kVK_ForwardDelete;
+				break;
+			case wi::input::KEYBOARD_BUTTON_BACKSPACE:
+				keycode = kVK_Delete;
+				break;
+			case wi::input::KEYBOARD_BUTTON_PAGEDOWN:
+				keycode = kVK_PageDown;
+				break;
+			case wi::input::KEYBOARD_BUTTON_PAGEUP:
+				keycode = kVK_PageUp;
+				break;
+			case KEYBOARD_BUTTON_NUMPAD0:
+				keycode = kVK_ANSI_Keypad0;
+				break;
+			case KEYBOARD_BUTTON_NUMPAD1:
+				keycode = kVK_ANSI_Keypad1;
+				break;
+			case KEYBOARD_BUTTON_NUMPAD2:
+				keycode = kVK_ANSI_Keypad2;
+				break;
+			case KEYBOARD_BUTTON_NUMPAD3:
+				keycode = kVK_ANSI_Keypad3;
+				break;
+			case KEYBOARD_BUTTON_NUMPAD4:
+				keycode = kVK_ANSI_Keypad4;
+				break;
+			case KEYBOARD_BUTTON_NUMPAD5:
+				keycode = kVK_ANSI_Keypad5;
+				break;
+			case KEYBOARD_BUTTON_NUMPAD6:
+				keycode = kVK_ANSI_Keypad6;
+				break;
+			case KEYBOARD_BUTTON_NUMPAD7:
+				keycode = kVK_ANSI_Keypad7;
+				break;
+			case KEYBOARD_BUTTON_NUMPAD8:
+				keycode = kVK_ANSI_Keypad8;
+				break;
+			case KEYBOARD_BUTTON_NUMPAD9:
+				keycode = kVK_ANSI_Keypad9;
+				break;
+			case KEYBOARD_BUTTON_MULTIPLY:
+				keycode = kVK_ANSI_KeypadMultiply;
+				break;
+			case KEYBOARD_BUTTON_ADD:
+				keycode = kVK_ANSI_KeypadPlus;
+				break;
+			case KEYBOARD_BUTTON_SEPARATOR:
+				keycode = unknown;
+				break;
+			case KEYBOARD_BUTTON_SUBTRACT:
+				keycode = kVK_ANSI_KeypadMinus;
+				break;
+			case KEYBOARD_BUTTON_DECIMAL:
+				keycode = kVK_ANSI_KeypadDecimal;
+				break;
+			case KEYBOARD_BUTTON_DIVIDE:
+				keycode = kVK_ANSI_KeypadDivide;
+				break;
+			case KEYBOARD_BUTTON_TAB:
+				keycode = kVK_Tab;
+				break;
+			case KEYBOARD_BUTTON_TILDE:
+				keycode = unknown;
+				break;
+			case KEYBOARD_BUTTON_ALT:
+				keycode = kVK_Option;
+				break;
+			case KEYBOARD_BUTTON_ALTGR:
+				keycode = kVK_RightOption;
+				break;
+			case KEYBOARD_BUTTON_END:
+				keycode = kVK_End;
+				break;
+			case (BUTTON)'A':
+				keycode = kVK_ANSI_A;
+				break;
+			case (BUTTON)'B':
+				 keycode = kVK_ANSI_B;
+				 break;
+			case (BUTTON)'C':
+				 keycode = kVK_ANSI_C;
+				 break;
+			case (BUTTON)'D':
+				 keycode = kVK_ANSI_D;
+				 break;
+			case (BUTTON)'E':
+				 keycode = kVK_ANSI_E;
+				 break;
+			case (BUTTON)'F':
+				 keycode = kVK_ANSI_F;
+				 break;
+			case (BUTTON)'G':
+				 keycode = kVK_ANSI_G;
+				 break;
+			case (BUTTON)'H':
+				 keycode = kVK_ANSI_H;
+				 break;
+			case (BUTTON)'I':
+				 keycode = kVK_ANSI_I;
+				 break;
+			case (BUTTON)'J':
+				 keycode = kVK_ANSI_J;
+				 break;
+			case (BUTTON)'K':
+				 keycode = kVK_ANSI_K;
+				 break;
+			case (BUTTON)'L':
+				 keycode = kVK_ANSI_L;
+				 break;
+			case (BUTTON)'M':
+				 keycode = kVK_ANSI_M;
+				 break;
+			case (BUTTON)'N':
+				 keycode = kVK_ANSI_N;
+				 break;
+			case (BUTTON)'O':
+				 keycode = kVK_ANSI_O;
+				 break;
+			case (BUTTON)'P':
+				 keycode = kVK_ANSI_P;
+				 break;
+			case (BUTTON)'Q':
+				 keycode = kVK_ANSI_Q;
+				 break;
+			case (BUTTON)'R':
+				 keycode = kVK_ANSI_R;
+				 break;
+			case (BUTTON)'S':
+				 keycode = kVK_ANSI_S;
+				 break;
+			case (BUTTON)'T':
+				 keycode = kVK_ANSI_T;
+				 break;
+			case (BUTTON)'U':
+				 keycode = kVK_ANSI_U;
+				 break;
+			case (BUTTON)'V':
+				 keycode = kVK_ANSI_V;
+				 break;
+			case (BUTTON)'W':
+				 keycode = kVK_ANSI_W;
+				 break;
+			case (BUTTON)'X':
+				 keycode = kVK_ANSI_X;
+				 break;
+			case (BUTTON)'Y':
+				 keycode = kVK_ANSI_Y;
+				 break;
+			case (BUTTON)'Z':
+				 keycode = kVK_ANSI_Z;
+				 break;
+				case (BUTTON)'0':
+				  keycode = kVK_ANSI_0;
+				  break;
+				case (BUTTON)'1':
+				  keycode = kVK_ANSI_1;
+				  break;
+				case (BUTTON)'2':
+				  keycode = kVK_ANSI_2;
+				  break;
+				case (BUTTON)'3':
+				  keycode = kVK_ANSI_3;
+				  break;
+				case (BUTTON)'4':
+				  keycode = kVK_ANSI_4;
+				  break;
+				case (BUTTON)'5':
+				  keycode = kVK_ANSI_5;
+				  break;
+				case (BUTTON)'6':
+				  keycode = kVK_ANSI_6;
+				  break;
+				case (BUTTON)'7':
+				  keycode = kVK_ANSI_7;
+				  break;
+				case (BUTTON)'8':
+				  keycode = kVK_ANSI_8;
+				  break;
+				case (BUTTON)'9':
+				  keycode = kVK_ANSI_9;
+				  break;
+#endif // PLATFORM_MACOS
+					
+					
 				default: break;
 			}
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(PLATFORM_XBOX)
 			return KEY_DOWN(keycode) || KEY_TOGGLE(keycode);
-#elif SDL2
+#elif defined(__APPLE__)
+			return IsKeyDown(keycode);
+#elif defined(SDL2) || defined(SDL3)
 			return keyboard.buttons[keycode] == 1;
-
-#else
-#error KEYBOARD INPUT NOT SUPPORTED
 #endif
 		}
 
@@ -556,6 +1151,24 @@ namespace wi::input
 		}
 		return false;
 	}
+	bool Release(BUTTON button, int playerindex)
+	{
+		Input input;
+		input.button = button;
+		input.playerIndex = playerindex;
+		auto iter = inputs.find(input);
+		if (iter == inputs.end())
+		{
+			if (Down(button, playerindex))
+				inputs.insert(std::make_pair(input, 0));
+			return false;
+		}
+		if (iter->second == -1)
+		{
+			return true;
+		}
+		return false;
+	}
 	bool Hold(BUTTON button, uint32_t frames, bool continuous, int playerIndex)
 	{
 		if (!Down(button, playerIndex))
@@ -570,7 +1183,7 @@ namespace wi::input
 			inputs.insert(std::make_pair(input, 0));
 			return false;
 		}
-		else if ((!continuous && iter->second == frames) || (continuous && iter->second >= frames))
+		else if ((!continuous && iter->second == (int)frames) || (continuous && iter->second >= (int)frames))
 		{
 			return true;
 		}
@@ -582,28 +1195,28 @@ namespace wi::input
 	}
 	void SetPointer(const XMFLOAT4& props)
 	{
-#ifdef _WIN32
-#ifndef PLATFORM_UWP
+		// The application's logical mouse coordinates are converted to the system's physical coordinates:
+		const uint32_t posX = canvas.LogicalToPhysical(props.x);
+		const uint32_t posY = canvas.LogicalToPhysical(props.y);
+
+#if defined(PLATFORM_WINDOWS_DESKTOP)
 		HWND hWnd = window;
-		const float dpiscaling = (float)GetDpiForWindow(hWnd) / 96.0f;
 		POINT p;
-		p.x = (LONG)(props.x * dpiscaling);
-		p.y = (LONG)(props.y * dpiscaling);
+		p.x = (LONG)(posX);
+		p.y = (LONG)(posY);
 		ClientToScreen(hWnd, &p);
 		SetCursorPos(p.x, p.y);
-#else
-		auto window = winrt::Windows::UI::Core::CoreWindow::GetForCurrentThread();
-		auto& bounds = window.Bounds();
-		window.PointerPosition(winrt::Windows::Foundation::Point(props.x + bounds.X, props.y + bounds.Y));
-#endif
-#elif SDL2
-	SDL_WarpMouseInWindow(window, props.x, props.y);
-#endif // _WIN32
+#elif defined(__APPLE__)
+		wi::apple::SetMousePositionInWindow(window, XMFLOAT2(float(posX), float(posY)));
+#elif defined(SDL2)
+		SDL_WarpMouseInWindow(window, posX, posY);
+#elif defined(SDL3)
+		SDL_WarpMouseInWindow(window, (float)posX, (float)posY);
+#endif // SDL2
 	}
 	void HidePointer(bool value)
 	{
 #ifdef _WIN32
-#ifndef PLATFORM_UWP
 		if (value)
 		{
 			while (ShowCursor(false) >= 0) {};
@@ -612,21 +1225,35 @@ namespace wi::input
 		{
 			while (ShowCursor(true) < 0) {};
 		}
-#else
-		auto window = winrt::Windows::UI::Core::CoreWindow::GetForCurrentThread();
-		static auto cursor = window.PointerCursor();
-		if (value)
-		{
-			window.PointerCursor(nullptr);
-		}
-		else
-		{
-			window.PointerCursor(cursor);
-		}
-#endif
-#elif SDL2
-		SDL_ShowCursor(value ? SDL_DISABLE : SDL_ENABLE);
+#elif defined(__APPLE__)
+		wi::apple::CursorHide(value);
+#elif defined(SDL2)
+		SDL_SetRelativeMouseMode(value ? SDL_TRUE : SDL_FALSE);
+#elif defined(SDL3)
+		SDL_SetWindowRelativeMouseMode(window, value);
 #endif // _WIN32
+	}
+
+	BUTTON WhatIsPressed(int playerindex)
+	{
+		// First go through predefined enums:
+		for (int i = GAMEPAD_RANGE_START + 1; i < BUTTON_ENUM_SIZE; ++i)
+		{
+			if (Press((BUTTON)i, playerindex))
+				return (BUTTON)i;
+		}
+		// Go through remaining digits, letters and undefined:
+		for (int i = DIGIT_RANGE_START; i < GAMEPAD_RANGE_START; ++i)
+		{
+			if (Press((BUTTON)i, playerindex))
+				return (BUTTON)i;
+		}
+		return BUTTON_NONE;
+	}
+
+	bool IsDoubleClicked()
+	{
+		return double_click;
 	}
 
 	XMFLOAT4 GetAnalog(GAMEPAD_ANALOG analog, int playerindex)
@@ -665,6 +1292,18 @@ namespace wi::input
 			{
 				wi::input::sdlinput::SetControllerFeedback(data, controller.deviceIndex);
 			}
+#ifdef __APPLE__
+			else if (controller.deviceType == Controller::APPLE)
+			{
+				wi::input::apple::SetControllerFeedback(data, controller.deviceIndex);
+			}
+#endif // __APPLE__
+#ifdef PLATFORM_PS5
+			else if (controller.deviceType == Controller::PS5)
+			{
+				wi::input::ps5::SetControllerFeedback(data, controller.deviceIndex);
+			}
+#endif // PLATFORM_PS5
 		}
 	}
 
@@ -677,6 +1316,553 @@ namespace wi::input
 	const wi::vector<Touch>& GetTouches()
 	{
 		return touches;
+	}
+
+	void SetCursor(CURSOR cursor)
+	{
+		cursor_next = cursor;
+	}
+
+	void SetCursorFromFile(CURSOR cursor, const char* filename)
+{
+#ifdef PLATFORM_WINDOWS_DESKTOP
+		wchar_t wfilename[1024] = {};
+		wi::helper::StringConvert(filename, wfilename, arraysize(wfilename));
+		cursor_table[cursor] = LoadCursorFromFile(wfilename);
+#endif // PLATFORM_WINDOWS_DESKTOP
+		
+#if defined(SDL2) || defined(SDL3) || defined(PLATFORM_MACOS)
+		// On other platforms, extract the raw color data from win32 .CUR file and create cursor from that:
+		wi::vector<uint8_t> data;
+		if (wi::helper::FileRead(filename, data))
+		{
+			// Extract only the first image data:
+			ico::ICONDIRENTRY* icondirentry = (ico::ICONDIRENTRY*)(data.data() + sizeof(ico::ICONDIR));
+			
+			int hotspotX = icondirentry->wPlanes;
+			int hotspotY = icondirentry->wBitCount;
+			
+			uint8_t* pixeldata = (data.data() + icondirentry->dwImageOffset + sizeof(ico::BITMAPINFOHEADER));
+			
+			const uint32_t width = icondirentry->bWidth;
+			const uint32_t height = icondirentry->bHeight;
+			
+			// Convert BGRA to ARGB and flip vertically
+			wi::vector<wi::Color> colors;
+			colors.reserve(width * height);
+			for (uint32_t y = height; y > 0; --y)
+			{
+				uint8_t* src = pixeldata + (y - 1) * width * 4;
+				for (uint32_t x = 0; x < width; ++x)
+				{
+					colors.push_back(wi::Color(src[3], src[2], src[1], src[0]));
+					src += 4;
+				}
+			}
+			
+#ifdef SDL2
+			SDL_Surface* surface = SDL_CreateRGBSurfaceFrom(
+															colors.data(),
+															width,
+															height,
+															4 * 8,
+															4 * width,
+															0x0000ff00,
+															0x00ff0000,
+															0xff000000,
+															0x000000ff
+															);
+
+			if (surface != nullptr)
+			{
+				cursor_table[cursor] = SDL_CreateColorCursor(surface, hotspotX, hotspotY);
+				SDL_FreeSurface(surface);
+			}
+#elif defined(SDL3)
+			SDL_Surface* surface = SDL_CreateSurfaceFrom(
+															width,
+															height,
+															SDL_PIXELFORMAT_BGRA8888,
+															colors.data(),
+															4 * width
+															);
+
+			if (surface != nullptr)
+			{
+				cursor_table[cursor] = SDL_CreateColorCursor(surface, hotspotX, hotspotY);
+				SDL_DestroySurface(surface);
+			}
+#elif defined(PLATFORM_MACOS)
+			cursor_table[cursor] = wi::apple::CreateCursorFromARGB8ImageData(colors.data(), width, height, hotspotX, hotspotY);
+#endif // SDL2
+		}
+#endif // defined(SDL2) || defined(SDL3) || defined(PLATFORM_MACOS)
+		
+		// refresh in case we set the current one:
+		cursor_next = cursor_current;
+		cursor_current = CURSOR_COUNT;
+	}
+
+	void ResetCursor(CURSOR cursor)
+	{
+		cursor_table[cursor] = cursor_table_original[cursor];
+
+		// refresh in case we set the current one:
+		cursor_next = cursor_current;
+		cursor_current = CURSOR_COUNT;
+	}
+
+	void ResetCursors()
+	{
+		for (int i = 0; i < CURSOR_COUNT; ++i)
+		{
+			ResetCursor(CURSOR(i));
+		}
+	}
+
+	void NotifyCursorChanged()
+	{
+		cursor_current = CURSOR_COUNT;
+	}
+
+	BUTTON StringToButton(const char* str)
+	{
+		if (str == nullptr)
+			return BUTTON_NONE;
+
+		if (strcmp(str, "■") == 0)
+			return GAMEPAD_BUTTON_PLAYSTATION_SQUARE;
+		if (strcmp(str, "✖") == 0)
+			return GAMEPAD_BUTTON_PLAYSTATION_CROSS;
+		if (strcmp(str, "●") == 0)
+			return GAMEPAD_BUTTON_PLAYSTATION_CIRCLE;
+		if (strcmp(str, "▲") == 0)
+			return GAMEPAD_BUTTON_PLAYSTATION_TRIANGLE;
+		if (strcmp(str, "L1") == 0)
+			return GAMEPAD_BUTTON_PLAYSTATION_L1;
+		if (strcmp(str, "L2") == 0)
+			return GAMEPAD_BUTTON_PLAYSTATION_L2;
+		if (strcmp(str, "L3") == 0)
+			return GAMEPAD_BUTTON_PLAYSTATION_L3;
+		if (strcmp(str, "R1") == 0)
+			return GAMEPAD_BUTTON_PLAYSTATION_R1;
+		if (strcmp(str, "R2") == 0)
+			return GAMEPAD_BUTTON_PLAYSTATION_R2;
+		if (strcmp(str, "R3") == 0)
+			return GAMEPAD_BUTTON_PLAYSTATION_R3;
+		if (strcmp(str, "Share") == 0)
+			return GAMEPAD_BUTTON_PLAYSTATION_SHARE;
+		if (strcmp(str, "Option") == 0)
+			return GAMEPAD_BUTTON_PLAYSTATION_OPTION;
+		if (strcmp(str, "Touchpad") == 0)
+			return GAMEPAD_BUTTON_PLAYSTATION_OPTION;
+
+		if (strcmp(str, "(X)") == 0)
+			return GAMEPAD_BUTTON_XBOX_X;
+		if (strcmp(str, "(A)") == 0)
+			return GAMEPAD_BUTTON_XBOX_A;
+		if (strcmp(str, "(B)") == 0)
+			return GAMEPAD_BUTTON_XBOX_B;
+		if (strcmp(str, "(Y)") == 0)
+			return GAMEPAD_BUTTON_XBOX_Y;
+		if (strcmp(str, "L1") == 0)
+			return GAMEPAD_BUTTON_XBOX_L1;
+		if (strcmp(str, "LT") == 0)
+			return GAMEPAD_BUTTON_XBOX_LT;
+		if (strcmp(str, "L3") == 0)
+			return GAMEPAD_BUTTON_XBOX_L3;
+		if (strcmp(str, "R1") == 0)
+			return GAMEPAD_BUTTON_XBOX_R1;
+		if (strcmp(str, "RT") == 0)
+			return GAMEPAD_BUTTON_XBOX_RT;
+		if (strcmp(str, "R3") == 0)
+			return GAMEPAD_BUTTON_XBOX_R3;
+		if (strcmp(str, "Back") == 0)
+			return GAMEPAD_BUTTON_XBOX_BACK;
+		if (strcmp(str, "Start") == 0)
+			return GAMEPAD_BUTTON_XBOX_START;
+
+		if (strcmp(str, "Dpad ↑") == 0)
+			return GAMEPAD_BUTTON_UP;
+		if (strcmp(str, "Dpad ←") == 0)
+			return GAMEPAD_BUTTON_LEFT;
+		if (strcmp(str, "Dpad ↓") == 0)
+			return GAMEPAD_BUTTON_DOWN;
+		if (strcmp(str, "Dpad →") == 0)
+			return GAMEPAD_BUTTON_RIGHT;
+
+		if (strcmp(str, "Gamepad 1") == 0)
+			return GAMEPAD_BUTTON_1;
+		if (strcmp(str, "Gamepad 2") == 0)
+			return GAMEPAD_BUTTON_2;
+		if (strcmp(str, "Gamepad 3") == 0)
+			return GAMEPAD_BUTTON_3;
+		if (strcmp(str, "Gamepad 4") == 0)
+			return GAMEPAD_BUTTON_4;
+		if (strcmp(str, "Gamepad 5") == 0)
+			return GAMEPAD_BUTTON_5;
+		if (strcmp(str, "Gamepad 6") == 0)
+			return GAMEPAD_BUTTON_6;
+		if (strcmp(str, "Gamepad 7") == 0)
+			return GAMEPAD_BUTTON_7;
+		if (strcmp(str, "Gamepad 8") == 0)
+			return GAMEPAD_BUTTON_8;
+		if (strcmp(str, "Gamepad 9") == 0)
+			return GAMEPAD_BUTTON_9;
+		if (strcmp(str, "Gamepad 10") == 0)
+			return GAMEPAD_BUTTON_10;
+		if (strcmp(str, "Gamepad 11") == 0)
+			return GAMEPAD_BUTTON_11;
+		if (strcmp(str, "Gamepad 12") == 0)
+			return GAMEPAD_BUTTON_12;
+		if (strcmp(str, "Gamepad 13") == 0)
+			return GAMEPAD_BUTTON_13;
+		if (strcmp(str, "Gamepad 14") == 0)
+			return GAMEPAD_BUTTON_14;
+
+		if (strcmp(str, "Left Stick ↑") == 0)
+			return GAMEPAD_ANALOG_THUMBSTICK_L_AS_BUTTON_UP;
+		if (strcmp(str, "Left Stick ←") == 0)
+			return GAMEPAD_ANALOG_THUMBSTICK_L_AS_BUTTON_LEFT;
+		if (strcmp(str, "Left Stick ↓") == 0)
+			return GAMEPAD_ANALOG_THUMBSTICK_L_AS_BUTTON_DOWN;
+		if (strcmp(str, "Left Stick →") == 0)
+			return GAMEPAD_ANALOG_THUMBSTICK_L_AS_BUTTON_RIGHT;
+		if (strcmp(str, "Right Stick ↑") == 0)
+			return GAMEPAD_ANALOG_THUMBSTICK_R_AS_BUTTON_UP;
+		if (strcmp(str, "Right Stick ←") == 0)
+			return GAMEPAD_ANALOG_THUMBSTICK_R_AS_BUTTON_LEFT;
+		if (strcmp(str, "Right Stick ↓") == 0)
+			return GAMEPAD_ANALOG_THUMBSTICK_R_AS_BUTTON_DOWN;
+		if (strcmp(str, "Right Stick →") == 0)
+			return GAMEPAD_ANALOG_THUMBSTICK_R_AS_BUTTON_RIGHT;
+
+		if (strcmp(str, "Left Trigger") == 0)
+			return GAMEPAD_ANALOG_TRIGGER_L_AS_BUTTON;
+		if (strcmp(str, "Right Trigger") == 0)
+			return GAMEPAD_ANALOG_TRIGGER_R_AS_BUTTON;
+
+		if (strcmp(str, "Left Mouse Button") == 0)
+			return MOUSE_BUTTON_LEFT;
+		if (strcmp(str, "Right Mouse Button") == 0)
+			return MOUSE_BUTTON_RIGHT;
+		if (strcmp(str, "Middle Mouse Button") == 0)
+			return MOUSE_BUTTON_MIDDLE;
+		if (strcmp(str, "Mouse Wheel ↑") == 0)
+			return MOUSE_SCROLL_AS_BUTTON_UP;
+		if (strcmp(str, "Mouse Wheel ↓") == 0)
+			return MOUSE_SCROLL_AS_BUTTON_DOWN;
+
+		if (strcmp(str, "↑") == 0)
+			return KEYBOARD_BUTTON_UP;
+		if (strcmp(str, "←") == 0)
+			return KEYBOARD_BUTTON_LEFT;
+		if (strcmp(str, "↓") == 0)
+			return KEYBOARD_BUTTON_DOWN;
+		if (strcmp(str, "→") == 0)
+			return KEYBOARD_BUTTON_RIGHT;
+
+		if (strcmp(str, "Space") == 0)
+			return KEYBOARD_BUTTON_SPACE;
+		if (strcmp(str, "Enter") == 0)
+			return KEYBOARD_BUTTON_ENTER;
+		if (strcmp(str, "Escape") == 0)
+			return KEYBOARD_BUTTON_ENTER;
+		if (strcmp(str, "Home") == 0)
+			return KEYBOARD_BUTTON_HOME;
+		if (strcmp(str, "Delete") == 0)
+			return KEYBOARD_BUTTON_DELETE;
+		if (strcmp(str, "Backspace") == 0)
+			return KEYBOARD_BUTTON_BACKSPACE;
+		if (strcmp(str, "Page Down") == 0)
+			return KEYBOARD_BUTTON_PAGEDOWN;
+		if (strcmp(str, "Page Up") == 0)
+			return KEYBOARD_BUTTON_PAGEUP;
+		if (strcmp(str, "*") == 0)
+			return KEYBOARD_BUTTON_MULTIPLY;
+		if (strcmp(str, "+") == 0)
+			return KEYBOARD_BUTTON_ADD;
+		if (strcmp(str, "Separator") == 0)
+			return KEYBOARD_BUTTON_SEPARATOR;
+		if (strcmp(str, "-") == 0)
+			return KEYBOARD_BUTTON_SUBTRACT;
+		if (strcmp(str, "Decimal") == 0)
+			return KEYBOARD_BUTTON_DECIMAL;
+		if (strcmp(str, "/") == 0)
+			return KEYBOARD_BUTTON_DIVIDE;
+		if (strcmp(str, "Tab") == 0)
+			return KEYBOARD_BUTTON_TAB;
+		if (strcmp(str, "Tilde") == 0)
+			return KEYBOARD_BUTTON_TILDE;
+		if (strcmp(str, "Insert") == 0)
+			return KEYBOARD_BUTTON_INSERT;
+		if (strcmp(str, "Alt") == 0)
+			return KEYBOARD_BUTTON_ALT;
+		if (strcmp(str, "Alt Gr") == 0)
+			return KEYBOARD_BUTTON_ALTGR;
+		if (strcmp(str, "End") == 0)
+			return KEYBOARD_BUTTON_END;
+
+		if (strcmp(str, "Left Shift") == 0)
+			return KEYBOARD_BUTTON_LSHIFT;
+		if (strcmp(str, "Right Shift") == 0)
+			return KEYBOARD_BUTTON_RSHIFT;
+		if (strcmp(str, "Left Control") == 0)
+			return KEYBOARD_BUTTON_LCONTROL;
+		if (strcmp(str, "Right Control") == 0)
+			return KEYBOARD_BUTTON_RCONTROL;
+
+		if (strcmp(str, "F1") == 0)
+			return KEYBOARD_BUTTON_F1;
+		if (strcmp(str, "F2") == 0)
+			return KEYBOARD_BUTTON_F2;
+		if (strcmp(str, "F3") == 0)
+			return KEYBOARD_BUTTON_F3;
+		if (strcmp(str, "F4") == 0)
+			return KEYBOARD_BUTTON_F4;
+		if (strcmp(str, "F5") == 0)
+			return KEYBOARD_BUTTON_F5;
+		if (strcmp(str, "F6") == 0)
+			return KEYBOARD_BUTTON_F6;
+		if (strcmp(str, "F7") == 0)
+			return KEYBOARD_BUTTON_F7;
+		if (strcmp(str, "F8") == 0)
+			return KEYBOARD_BUTTON_F8;
+		if (strcmp(str, "F9") == 0)
+			return KEYBOARD_BUTTON_F9;
+		if (strcmp(str, "F10") == 0)
+			return KEYBOARD_BUTTON_F10;
+		if (strcmp(str, "F11") == 0)
+			return KEYBOARD_BUTTON_F11;
+		if (strcmp(str, "F12") == 0)
+			return KEYBOARD_BUTTON_F12;
+
+		if (strcmp(str, "Numpad 0") == 0)
+			return KEYBOARD_BUTTON_NUMPAD0;
+		if (strcmp(str, "Numpad 1") == 0)
+			return KEYBOARD_BUTTON_NUMPAD1;
+		if (strcmp(str, "Numpad 2") == 0)
+			return KEYBOARD_BUTTON_NUMPAD2;
+		if (strcmp(str, "Numpad 3") == 0)
+			return KEYBOARD_BUTTON_NUMPAD3;
+		if (strcmp(str, "Numpad 4") == 0)
+			return KEYBOARD_BUTTON_NUMPAD4;
+		if (strcmp(str, "Numpad 5") == 0)
+			return KEYBOARD_BUTTON_NUMPAD5;
+		if (strcmp(str, "Numpad 6") == 0)
+			return KEYBOARD_BUTTON_NUMPAD6;
+		if (strcmp(str, "Numpad 7") == 0)
+			return KEYBOARD_BUTTON_NUMPAD7;
+		if (strcmp(str, "Numpad 8") == 0)
+			return KEYBOARD_BUTTON_NUMPAD8;
+		if (strcmp(str, "Numpad 9") == 0)
+			return KEYBOARD_BUTTON_NUMPAD9;
+
+		if (strcmp(str, "Left Command") == 0)
+			return KEYBOARD_BUTTON_LCOMMAND;
+		if (strcmp(str, "Right Command") == 0)
+			return KEYBOARD_BUTTON_RCOMMAND;
+
+		if (str[0] >= DIGIT_RANGE_START /*&& str[0] < GAMEPAD_RANGE_START*/)
+		{
+			return (BUTTON)str[0];
+		}
+
+		return BUTTON_NONE;
+	}
+
+	StackString<32> ButtonToString(BUTTON button, CONTROLLER_PREFERENCE preference)
+	{
+#ifdef PLATFORM_PS5
+		preference = CONTROLLER_PREFERENCE_PLAYSTATION;
+#endif // PLATFORM_PS5
+#ifdef PLATFORM_XBOX
+		preference = CONTROLLER_PREFERENCE_XBOX;
+#endif // PLATFORM_XBOX
+
+		if (preference == CONTROLLER_PREFERENCE_PLAYSTATION)
+		{
+			switch (button)
+			{
+			case wi::input::GAMEPAD_BUTTON_PLAYSTATION_SQUARE: return "■";
+			case wi::input::GAMEPAD_BUTTON_PLAYSTATION_CROSS: return "✖";
+			case wi::input::GAMEPAD_BUTTON_PLAYSTATION_CIRCLE: return "●";
+			case wi::input::GAMEPAD_BUTTON_PLAYSTATION_TRIANGLE: return "▲";
+			case wi::input::GAMEPAD_BUTTON_PLAYSTATION_L1: return "L1";
+			case wi::input::GAMEPAD_BUTTON_PLAYSTATION_L2: return "L2";
+			case wi::input::GAMEPAD_BUTTON_PLAYSTATION_R1: return "R1";
+			case wi::input::GAMEPAD_BUTTON_PLAYSTATION_R2: return "R2";
+			case wi::input::GAMEPAD_BUTTON_PLAYSTATION_L3: return "L3";
+			case wi::input::GAMEPAD_BUTTON_PLAYSTATION_R3: return "R3";
+			case wi::input::GAMEPAD_BUTTON_PLAYSTATION_SHARE: return "Share";
+			case wi::input::GAMEPAD_BUTTON_PLAYSTATION_OPTION: return "Option";
+			case wi::input::GAMEPAD_BUTTON_PLAYSTATION_TOUCHPAD: return "Touchpad";
+			default:
+				break;
+			}
+		}
+
+		if (preference == CONTROLLER_PREFERENCE_XBOX)
+		{
+			switch (button)
+			{
+			case wi::input::GAMEPAD_BUTTON_XBOX_X: return "(X)";
+			case wi::input::GAMEPAD_BUTTON_XBOX_A: return "(A)";
+			case wi::input::GAMEPAD_BUTTON_XBOX_B: return "(B)";
+			case wi::input::GAMEPAD_BUTTON_XBOX_Y: return "(Y)";
+			case wi::input::GAMEPAD_BUTTON_XBOX_L1: return "L1";
+			case wi::input::GAMEPAD_BUTTON_XBOX_LT: return "LT";
+			case wi::input::GAMEPAD_BUTTON_XBOX_R1: return "R1";
+			case wi::input::GAMEPAD_BUTTON_XBOX_RT: return "RT";
+			case wi::input::GAMEPAD_BUTTON_XBOX_L3: return "L3";
+			case wi::input::GAMEPAD_BUTTON_XBOX_R3: return "R3";
+			case wi::input::GAMEPAD_BUTTON_XBOX_BACK: return "Back";
+			case wi::input::GAMEPAD_BUTTON_XBOX_START: return "Start";
+			default:
+				break;
+			}
+		}
+
+		switch (button)
+		{
+		case wi::input::GAMEPAD_BUTTON_UP: return "Dpad ↑";
+		case wi::input::GAMEPAD_BUTTON_LEFT: return "Dpad ←";
+		case wi::input::GAMEPAD_BUTTON_DOWN: return "Dpad ↓";
+		case wi::input::GAMEPAD_BUTTON_RIGHT: return "Dpad →";
+		case wi::input::GAMEPAD_BUTTON_1: return "Gamepad 1";
+		case wi::input::GAMEPAD_BUTTON_2: return "Gamepad 2";
+		case wi::input::GAMEPAD_BUTTON_3: return "Gamepad 3";
+		case wi::input::GAMEPAD_BUTTON_4: return "Gamepad 4";
+		case wi::input::GAMEPAD_BUTTON_5: return "Gamepad 5";
+		case wi::input::GAMEPAD_BUTTON_6: return "Gamepad 6";
+		case wi::input::GAMEPAD_BUTTON_7: return "Gamepad 7";
+		case wi::input::GAMEPAD_BUTTON_8: return "Gamepad 8";
+		case wi::input::GAMEPAD_BUTTON_9: return "Gamepad 9";
+		case wi::input::GAMEPAD_BUTTON_10: return "Gamepad 10";
+		case wi::input::GAMEPAD_BUTTON_11: return "Gamepad 11";
+		case wi::input::GAMEPAD_BUTTON_12: return "Gamepad 12";
+		case wi::input::GAMEPAD_BUTTON_13: return "Gamepad 13";
+		case wi::input::GAMEPAD_BUTTON_14: return "Gamepad 14";
+		case wi::input::GAMEPAD_ANALOG_THUMBSTICK_L_AS_BUTTON_UP: return "Left Stick ↑";
+		case wi::input::GAMEPAD_ANALOG_THUMBSTICK_L_AS_BUTTON_LEFT: return "Left Stick ←";
+		case wi::input::GAMEPAD_ANALOG_THUMBSTICK_L_AS_BUTTON_DOWN: return "Left Stick ↓";
+		case wi::input::GAMEPAD_ANALOG_THUMBSTICK_L_AS_BUTTON_RIGHT: return "Left Stick →";
+		case wi::input::GAMEPAD_ANALOG_THUMBSTICK_R_AS_BUTTON_UP: return "Right Stick ↑";
+		case wi::input::GAMEPAD_ANALOG_THUMBSTICK_R_AS_BUTTON_LEFT: return "Right Stick ←";
+		case wi::input::GAMEPAD_ANALOG_THUMBSTICK_R_AS_BUTTON_DOWN: return "Right Stick ↓";
+		case wi::input::GAMEPAD_ANALOG_THUMBSTICK_R_AS_BUTTON_RIGHT: return "Right Stick →";
+		case wi::input::GAMEPAD_ANALOG_TRIGGER_L_AS_BUTTON: return "Left Trigger";
+		case wi::input::GAMEPAD_ANALOG_TRIGGER_R_AS_BUTTON: return "Right Trigger";
+		case wi::input::MOUSE_BUTTON_LEFT: return "Left Mouse Button";
+		case wi::input::MOUSE_BUTTON_RIGHT: return "Right Mouse Button";
+		case wi::input::MOUSE_BUTTON_MIDDLE: return "Middle Mouse Button";
+		case wi::input::MOUSE_SCROLL_AS_BUTTON_UP: return "Mouse Wheel ↑";
+		case wi::input::MOUSE_SCROLL_AS_BUTTON_DOWN: return "Mouse Wheel ↓";
+		case wi::input::KEYBOARD_BUTTON_UP: return "↑";
+		case wi::input::KEYBOARD_BUTTON_DOWN: return "↓";
+		case wi::input::KEYBOARD_BUTTON_LEFT: return "←";
+		case wi::input::KEYBOARD_BUTTON_RIGHT: return "→";
+		case wi::input::KEYBOARD_BUTTON_SPACE: return "Space";
+		case wi::input::KEYBOARD_BUTTON_RSHIFT: return "Right Shift";
+		case wi::input::KEYBOARD_BUTTON_LSHIFT: return "Left Shift";
+		case wi::input::KEYBOARD_BUTTON_F1: return "F1";
+		case wi::input::KEYBOARD_BUTTON_F2: return "F2";
+		case wi::input::KEYBOARD_BUTTON_F3: return "F3";
+		case wi::input::KEYBOARD_BUTTON_F4: return "F4";
+		case wi::input::KEYBOARD_BUTTON_F5: return "F5";
+		case wi::input::KEYBOARD_BUTTON_F6: return "F6";
+		case wi::input::KEYBOARD_BUTTON_F7: return "F7";
+		case wi::input::KEYBOARD_BUTTON_F8: return "F8";
+		case wi::input::KEYBOARD_BUTTON_F9: return "F9";
+		case wi::input::KEYBOARD_BUTTON_F10: return "F10";
+		case wi::input::KEYBOARD_BUTTON_F11: return "F11";
+		case wi::input::KEYBOARD_BUTTON_F12: return "F12";
+		case wi::input::KEYBOARD_BUTTON_ENTER: return "Enter";
+		case wi::input::KEYBOARD_BUTTON_ESCAPE: return "Escape";
+		case wi::input::KEYBOARD_BUTTON_HOME: return "Home";
+		case wi::input::KEYBOARD_BUTTON_RCONTROL: return "Right Control";
+		case wi::input::KEYBOARD_BUTTON_LCONTROL: return "Left Control";
+		case wi::input::KEYBOARD_BUTTON_DELETE: return "Delete";
+		case wi::input::KEYBOARD_BUTTON_BACKSPACE: return "Backspace";
+		case wi::input::KEYBOARD_BUTTON_PAGEDOWN: return "Page Down";
+		case wi::input::KEYBOARD_BUTTON_PAGEUP: return "Page Up";
+		case wi::input::KEYBOARD_BUTTON_NUMPAD0: return "Numpad 0";
+		case wi::input::KEYBOARD_BUTTON_NUMPAD1: return "Numpad 1";
+		case wi::input::KEYBOARD_BUTTON_NUMPAD2: return "Numpad 2";
+		case wi::input::KEYBOARD_BUTTON_NUMPAD3: return "Numpad 3";
+		case wi::input::KEYBOARD_BUTTON_NUMPAD4: return "Numpad 4";
+		case wi::input::KEYBOARD_BUTTON_NUMPAD5: return "Numpad 5";
+		case wi::input::KEYBOARD_BUTTON_NUMPAD6: return "Numpad 6";
+		case wi::input::KEYBOARD_BUTTON_NUMPAD7: return "Numpad 7";
+		case wi::input::KEYBOARD_BUTTON_NUMPAD8: return "Numpad 8";
+		case wi::input::KEYBOARD_BUTTON_NUMPAD9: return "Numpad 9";
+		case wi::input::KEYBOARD_BUTTON_MULTIPLY: return "*";
+		case wi::input::KEYBOARD_BUTTON_ADD: return "+";
+		case wi::input::KEYBOARD_BUTTON_SEPARATOR: return "Separator";
+		case wi::input::KEYBOARD_BUTTON_SUBTRACT: return "-";
+		case wi::input::KEYBOARD_BUTTON_DECIMAL: return "Decimal";
+		case wi::input::KEYBOARD_BUTTON_DIVIDE: return "/";
+		case wi::input::KEYBOARD_BUTTON_TAB: return "Tab";
+		case wi::input::KEYBOARD_BUTTON_TILDE: return "Tilde";
+		case wi::input::KEYBOARD_BUTTON_INSERT: return "Insert";
+		case wi::input::KEYBOARD_BUTTON_ALT: return "Alt";
+		case wi::input::KEYBOARD_BUTTON_ALTGR: return "Alt Gr";
+		case wi::input::KEYBOARD_BUTTON_LCOMMAND: return "Left Command";
+		case wi::input::KEYBOARD_BUTTON_RCOMMAND: return "Right Command";
+		case wi::input::KEYBOARD_BUTTON_END: return "End";
+		default:
+			break;
+		}
+
+		if (button >= DIGIT_RANGE_START && button < GAMEPAD_RANGE_START)
+		{
+			StackString<32> str;
+			str.chars[0] = (char)button;
+			return str;
+		}
+
+		return "";
+	}
+
+
+	void AddMouseScrollEvent(float value)
+	{
+		mouse_scroll_events.push_back(value);
+	}
+
+	void AddMouseMoveDeltaEvent(XMFLOAT2 value)
+	{
+		mouse_move_events.push_back(value);
+	}
+
+	void AddTouchEvent(const Touch& touch)
+	{
+		// Note: touches are received in logical coords based on system DPI but without user canvas scaling so I apply that here:
+		Touch scaledTouch = touch;
+		const float scaling_rcp = canvas.scaling > 0 ? (1.0f / canvas.scaling) : 1.0f;
+		scaledTouch.pos.x *= scaling_rcp;
+		scaledTouch.pos.y *= scaling_rcp;
+		touches.push_back(scaledTouch);
+	}
+
+	const Pinch& GetTouchPinch()
+	{
+		return pinch;
+	}
+
+	const XMFLOAT2& GetTouchPan()
+	{
+		return pan;
+	}
+
+	bool IsTouchPanning()
+	{
+		return is_panning;
+	}
+
+	bool IsTouchPanStarting()
+	{
+		return is_pan_starting;
 	}
 
 }

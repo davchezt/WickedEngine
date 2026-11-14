@@ -1,6 +1,5 @@
 #include "stdafx.h"
 #include "CameraWindow.h"
-#include "Editor.h"
 
 using namespace wi::ecs;
 using namespace wi::scene;
@@ -27,18 +26,28 @@ void CameraWindow::ResetCam()
 	camera.UpdateCamera();
 
 	editorscene.camera_target.ClearTransform();
-	editorscene.camera_transform.Translate(XMFLOAT3(0, 2, 0));
 	editorscene.camera_target.UpdateTransform();
+
+	orthoCheckBox.SetCheck(camera.IsOrtho());
+
+	if (editor->is_2D_mode)
+	{
+		camera.SetOrtho(true);
+	}
+
+	editor->Set2DMode(editor->is_2D_mode);
 }
 
 void CameraWindow::Create(EditorComponent* _editor)
 {
 	editor = _editor;
-	wi::gui::Window::Create("Camera", wi::gui::Window::WindowControls::COLLAPSE);
+	wi::gui::Window::Create("Camera", wi::gui::Window::WindowControls::CLOSE | wi::gui::Window::WindowControls::RESIZE_RIGHT);
+	SetText("Camera " ICON_CAMERAOPTIONS);
+
 	editor->GetCurrentEditorScene().camera_transform.MatrixTransform(editor->GetCurrentEditorScene().camera.GetInvView());
 	editor->GetCurrentEditorScene().camera_transform.UpdateTransform();
 
-	SetSize(XMFLOAT2(320, 390));
+	SetSize(XMFLOAT2(300, 390));
 
 	float x = 140;
 	float y = 0;
@@ -47,6 +56,15 @@ void CameraWindow::Create(EditorComponent* _editor)
 	float wid = 120;
 
 	ResetCam();
+
+	auto updateCamera = [this](auto func) {
+		return [this, func](wi::gui::EventArgs args) {
+			CameraComponent& camera = editor->GetCurrentEditorScene().camera;
+			func(camera, args);
+			camera.UpdateCamera();
+			camera.SetDirty();
+		};
+	};
 
 	farPlaneSlider.Create(100, 10000, 5000, 100000, "Far Plane: ");
 	farPlaneSlider.SetTooltip("Controls the camera's far clip plane, geometry farther than this will be clipped.");
@@ -57,15 +75,11 @@ void CameraWindow::Create(EditorComponent* _editor)
 		editor->GetCurrentEditorScene().camera.zFarP = editor->main->config.GetSection("camera").GetFloat("far");
 	}
 	farPlaneSlider.SetValue(editor->GetCurrentEditorScene().camera.zFarP);
-	farPlaneSlider.OnSlide([&](wi::gui::EventArgs args) {
-		Scene& scene = editor->GetCurrentScene();
-		CameraComponent& camera = editor->GetCurrentEditorScene().camera;
+	farPlaneSlider.OnSlide(updateCamera([this](CameraComponent& camera, auto args) {
 		camera.zFarP = args.fValue;
-		camera.UpdateCamera();
-		camera.SetDirty();
 		editor->main->config.GetSection("camera").Set("far", args.fValue);
 		editor->main->config.Commit();
-	});
+	}));
 	AddWidget(&farPlaneSlider);
 
 	nearPlaneSlider.Create(0.01f, 10, 0.1f, 10000, "Near Plane: ");
@@ -77,15 +91,11 @@ void CameraWindow::Create(EditorComponent* _editor)
 		editor->GetCurrentEditorScene().camera.zNearP = editor->main->config.GetSection("camera").GetFloat("near");
 	}
 	nearPlaneSlider.SetValue(editor->GetCurrentEditorScene().camera.zNearP);
-	nearPlaneSlider.OnSlide([&](wi::gui::EventArgs args) {
-		Scene& scene = editor->GetCurrentScene();
-		CameraComponent& camera = editor->GetCurrentEditorScene().camera;
+	nearPlaneSlider.OnSlide(updateCamera([this](CameraComponent& camera, auto args) {
 		camera.zNearP = args.fValue;
-		camera.UpdateCamera();
-		camera.SetDirty();
 		editor->main->config.GetSection("camera").Set("near", args.fValue);
 		editor->main->config.Commit();
-	});
+	}));
 	AddWidget(&nearPlaneSlider);
 
 	fovSlider.Create(1, 179, 60, 10000, "FOV: ");
@@ -97,67 +107,47 @@ void CameraWindow::Create(EditorComponent* _editor)
 		editor->GetCurrentEditorScene().camera.fov = editor->main->config.GetSection("camera").GetFloat("fov") / 180.f * XM_PI;
 	}
 	fovSlider.SetValue(editor->GetCurrentEditorScene().camera.fov / XM_PI * 180.f);
-	fovSlider.OnSlide([&](wi::gui::EventArgs args) {
-		Scene& scene = editor->GetCurrentScene();
-		CameraComponent& camera = editor->GetCurrentEditorScene().camera;
+	fovSlider.OnSlide(updateCamera([this](CameraComponent& camera, auto args) {
 		camera.fov = args.fValue / 180.f * XM_PI;
-		camera.UpdateCamera();
-		camera.SetDirty();
 		editor->main->config.GetSection("camera").Set("fov", args.fValue);
 		editor->main->config.Commit();
-	});
+	}));
 	AddWidget(&fovSlider);
 
 	focalLengthSlider.Create(0.001f, 100, 1, 10000, "Focal Length: ");
-	focalLengthSlider.SetTooltip("Controls the depth of field effect's focus distance");
+	focalLengthSlider.SetTooltip("Controls the depth of field effect's focus distance.\nYou can also refocus by holding the C key and picking in the scene with the left mouse button.");
 	focalLengthSlider.SetSize(XMFLOAT2(wid, hei));
 	focalLengthSlider.SetPos(XMFLOAT2(x, y += step));
-	focalLengthSlider.OnSlide([&](wi::gui::EventArgs args) {
-		Scene& scene = editor->GetCurrentScene();
-		CameraComponent& camera = editor->GetCurrentEditorScene().camera;
+	focalLengthSlider.OnSlide(updateCamera([](CameraComponent& camera, auto args) {
 		camera.focal_length = args.fValue;
-		camera.UpdateCamera();
-		camera.SetDirty();
-		});
+	}));
 	AddWidget(&focalLengthSlider);
 
 	apertureSizeSlider.Create(0, 1, 0, 10000, "Aperture Size: ");
 	apertureSizeSlider.SetTooltip("Controls the depth of field effect's strength");
 	apertureSizeSlider.SetSize(XMFLOAT2(wid, hei));
 	apertureSizeSlider.SetPos(XMFLOAT2(x, y += step));
-	apertureSizeSlider.OnSlide([&](wi::gui::EventArgs args) {
-		Scene& scene = editor->GetCurrentScene();
-		CameraComponent& camera = editor->GetCurrentEditorScene().camera;
+	apertureSizeSlider.OnSlide(updateCamera([](CameraComponent& camera, auto args) {
 		camera.aperture_size = args.fValue;
-		camera.UpdateCamera();
-		camera.SetDirty();
-		});
+	}));
 	AddWidget(&apertureSizeSlider);
 
 	apertureShapeXSlider.Create(0, 2, 1, 10000, "Aperture Shape X: ");
 	apertureShapeXSlider.SetTooltip("Controls the depth of field effect's bokeh shape");
 	apertureShapeXSlider.SetSize(XMFLOAT2(wid, hei));
 	apertureShapeXSlider.SetPos(XMFLOAT2(x, y += step));
-	apertureShapeXSlider.OnSlide([&](wi::gui::EventArgs args) {
-		Scene& scene = editor->GetCurrentScene();
-		CameraComponent& camera = editor->GetCurrentEditorScene().camera;
+	apertureShapeXSlider.OnSlide(updateCamera([](CameraComponent& camera, auto args) {
 		camera.aperture_shape.x = args.fValue;
-		camera.UpdateCamera();
-		camera.SetDirty();
-		});
+	}));
 	AddWidget(&apertureShapeXSlider);
 
 	apertureShapeYSlider.Create(0, 2, 1, 10000, "Aperture Shape Y: ");
 	apertureShapeYSlider.SetTooltip("Controls the depth of field effect's bokeh shape");
 	apertureShapeYSlider.SetSize(XMFLOAT2(wid, hei));
 	apertureShapeYSlider.SetPos(XMFLOAT2(x, y += step));
-	apertureShapeYSlider.OnSlide([&](wi::gui::EventArgs args) {
-		Scene& scene = editor->GetCurrentScene();
-		CameraComponent& camera = editor->GetCurrentEditorScene().camera;
+	apertureShapeYSlider.OnSlide(updateCamera([](CameraComponent& camera, auto args) {
 		camera.aperture_shape.y = args.fValue;
-		camera.UpdateCamera();
-		camera.SetDirty();
-		});
+	}));
 	AddWidget(&apertureShapeYSlider);
 
 	movespeedSlider.Create(1, 100, 10, 10000, "Movement Speed: ");
@@ -202,7 +192,7 @@ void CameraWindow::Create(EditorComponent* _editor)
 	resetButton.Create("Reset Camera");
 	resetButton.SetSize(XMFLOAT2(wid, hei));
 	resetButton.SetPos(XMFLOAT2(x, y += step));
-	resetButton.OnClick([&](wi::gui::EventArgs args) {
+	resetButton.OnClick([this](wi::gui::EventArgs args) {
 		ResetCam();
 
 		CameraComponent& camera = editor->GetCurrentEditorScene().camera;
@@ -221,11 +211,57 @@ void CameraWindow::Create(EditorComponent* _editor)
 	{
 		fpsCheckBox.SetCheck(editor->main->config.GetSection("camera").GetBool("fps"));
 	}
-	fpsCheckBox.OnClick([&](wi::gui::EventArgs args) {
+	fpsCheckBox.OnClick([this](wi::gui::EventArgs args) {
 		editor->main->config.GetSection("camera").Set("fps", args.bValue);
 		editor->main->config.Commit();
+
+		if (!args.bValue)
+		{
+			// Transitioning from FPS to Orbital:
+			//	camera_transform holds full world transform from FPS mode,
+			//	decompose it into camera_target (pivot point with rotation)
+			//	and camera_transform (local Z offset as the orbit arm)
+			auto& editorscene = editor->GetCurrentEditorScene();
+			const CameraComponent& camera = editorscene.camera;
+
+			float arm_length = 10.0f;
+			XMVECTOR eye = camera.GetEye();
+			XMVECTOR at = camera.GetAt();
+			XMVECTOR target_pos = XMVectorAdd(eye, at * arm_length);
+
+			// Build a look-at rotation for the target (facing from target back to eye)
+			XMVECTOR target_forward = XMVector3Normalize(XMVectorSubtract(eye, target_pos));
+			XMVECTOR up = XMVectorSet(0, 1, 0, 0);
+			XMVECTOR right = XMVector3Normalize(XMVector3Cross(up, target_forward));
+			up = XMVector3Cross(target_forward, right);
+			XMMATRIX rot_matrix = XMMATRIX(right, up, target_forward, XMVectorSet(0, 0, 0, 1));
+			XMVECTOR target_quat = XMQuaternionRotationMatrix(rot_matrix);
+
+			editorscene.camera_target = {};
+			XMStoreFloat3(&editorscene.camera_target.translation_local, target_pos);
+			XMStoreFloat4(&editorscene.camera_target.rotation_local, target_quat);
+			editorscene.camera_target.UpdateTransform();
+
+			editorscene.camera_transform = {};
+			editorscene.camera_transform.translation_local = XMFLOAT3(0, 0, -arm_length);
+			editorscene.camera_transform.UpdateTransform_Parented(editorscene.camera_target);
+
+			editorscene.cam_move = {};
+		}
 		});
 	AddWidget(&fpsCheckBox);
+
+	orthoCheckBox.Create("Orthographic: ");
+	orthoCheckBox.SetSize(XMFLOAT2(hei, hei));
+	orthoCheckBox.SetPos(XMFLOAT2(x, y += step));
+	orthoCheckBox.SetCheck(editor->GetCurrentEditorScene().camera.IsOrtho());
+	orthoCheckBox.OnClick([this](wi::gui::EventArgs args) {
+		Scene& scene = editor->GetCurrentScene();
+		CameraComponent& camera = editor->GetCurrentEditorScene().camera;
+		camera.SetOrtho(args.bValue);
+		camera.ortho_vertical_size = camera.ComputeOrthoVerticalSizeFromPerspective(wi::math::Length(camera.Eye)); // camera distance from origin
+	});
+	AddWidget(&orthoCheckBox);
 
 
 
@@ -258,7 +294,7 @@ void CameraWindow::Create(EditorComponent* _editor)
 		editor->RecordSelection(archive);
 		editor->RecordEntity(archive, entity);
 
-		editor->optionsWnd.RefreshEntityTree();
+		editor->componentsWnd.RefreshEntityTree();
 		SetEntity(entity);
 	});
 	AddWidget(&proxyButton);
@@ -278,9 +314,7 @@ void CameraWindow::Create(EditorComponent* _editor)
 
 	SetEntity(INVALID_ENTITY);
 
-	SetPos(XMFLOAT2(100, 100));
-
-	SetMinimized(true);
+	SetVisible(false);
 }
 
 void CameraWindow::SetEntity(Entity entity)
@@ -302,7 +336,7 @@ void CameraWindow::SetEntity(Entity entity)
 	}
 }
 
-void CameraWindow::Update()
+void CameraWindow::UpdateData()
 {
 	CameraComponent& camera = editor->GetCurrentEditorScene().camera;
 
@@ -327,57 +361,25 @@ void CameraWindow::Update()
 void CameraWindow::ResizeLayout()
 {
 	wi::gui::Window::ResizeLayout();
-	const float padding = 4;
-	const float width = GetWidgetAreaSize().x;
-	float y = padding;
-	float jump = 20;
 
-	auto add = [&](wi::gui::Widget& widget) {
-		if (!widget.IsVisible())
-			return;
-		const float margin_left = 155;
-		const float margin_right = 45;
-		widget.SetPos(XMFLOAT2(margin_left, y));
-		widget.SetSize(XMFLOAT2(width - margin_left - margin_right, widget.GetScale().y));
-		y += widget.GetSize().y;
-		y += padding;
-	};
-	auto add_right = [&](wi::gui::Widget& widget) {
-		if (!widget.IsVisible())
-			return;
-		const float margin_right = 45;
-		widget.SetPos(XMFLOAT2(width - margin_right - widget.GetSize().x, y));
-		y += widget.GetSize().y;
-		y += padding;
-	};
-	auto add_fullwidth = [&](wi::gui::Widget& widget) {
-		if (!widget.IsVisible())
-			return;
-		const float margin_left = padding;
-		const float margin_right = padding;
-		widget.SetPos(XMFLOAT2(margin_left, y));
-		widget.SetSize(XMFLOAT2(width - margin_left - margin_right, widget.GetScale().y));
-		y += widget.GetSize().y;
-		y += padding;
-	};
+	layout.add_fullwidth(resetButton);
+	layout.add(farPlaneSlider);
+	layout.add(nearPlaneSlider);
+	layout.add(fovSlider);
+	layout.add(focalLengthSlider);
+	layout.add(apertureSizeSlider);
+	layout.add(apertureShapeXSlider);
+	layout.add(apertureShapeYSlider);
+	layout.add(movespeedSlider);
+	layout.add(rotationspeedSlider);
+	layout.add(accelerationSlider);
+	layout.add_right(fpsCheckBox);
+	layout.add_right(orthoCheckBox);
 
-	add_fullwidth(resetButton);
-	add(farPlaneSlider);
-	add(nearPlaneSlider);
-	add(fovSlider);
-	add(focalLengthSlider);
-	add(apertureSizeSlider);
-	add(apertureShapeXSlider);
-	add(apertureShapeYSlider);
-	add(movespeedSlider);
-	add(rotationspeedSlider);
-	add(accelerationSlider);
-	add_right(fpsCheckBox);
+	layout.jump();
 
-	y += 20;
-
-	add_fullwidth(proxyButton);
-	add_right(followCheckBox);
-	add(followSlider);
+	layout.add_fullwidth(proxyButton);
+	layout.add_right(followCheckBox);
+	layout.add(followSlider);
 
 }

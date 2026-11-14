@@ -1,6 +1,4 @@
 #pragma once
-#include "WickedEngine.h"
-
 class EditorComponent;
 
 class CameraWindow : public wi::gui::Window
@@ -13,7 +11,7 @@ public:
 	EditorComponent* editor = nullptr;
 	wi::ecs::Entity entity = wi::ecs::INVALID_ENTITY;
 	void SetEntity(wi::ecs::Entity entity);
-	void Update();
+	void UpdateData();
 
 
 	wi::gui::Slider farPlaneSlider;
@@ -28,6 +26,7 @@ public:
 	wi::gui::Slider accelerationSlider;
 	wi::gui::Button resetButton;
 	wi::gui::CheckBox fpsCheckBox;
+	wi::gui::CheckBox orthoCheckBox;
 
 	wi::gui::Button proxyButton;
 	wi::gui::CheckBox followCheckBox;

@@ -1,20 +1,35 @@
 #define DISABLE_SOFT_SHADOWMAP
-#define TRANSPARENT_SHADOWMAP_SECONDARY_DEPTH_CHECK // fix the lack of depth testing
 #include "volumetricLightHF.hlsli"
+#include "fogHF.hlsli"
+#include "oceanSurfaceHF.hlsli"
 
 float4 main(VertexToPixel input) : SV_TARGET
 {
-	ShaderEntity light = load_entity(GetFrame().lightarray_offset + (uint)g_xColor.x);
+	ShaderEntity light = load_entity(pointlights().first_item() + (uint)g_xColor.x);
 
-	float2 ScreenCoord = input.pos2D.xy / input.pos2D.w * float2(0.5f, -0.5f) + 0.5f;
-	float depth = max(input.pos.z, texture_depth.SampleLevel(sampler_point_clamp, ScreenCoord, 2));
+	float2 ScreenCoord = input.pos2D.xy / input.pos2D.w * float2(0.5, -0.5) + 0.5;
+	float4 depths = texture_depth.GatherRed(sampler_point_clamp, ScreenCoord);
+	float depth = max(input.pos.z, max(depths.x, max(depths.y, max(depths.z, depths.w))));
 	float3 P = reconstruct_position(ScreenCoord, depth);
-	float3 V = GetCamera().position - P;
+	float3 V = GetCamera().frustum_corners.screen_to_nearplane(ScreenCoord) - P; // ortho support
 	float cameraDistance = length(V);
 	V /= cameraDistance;
 
+	// Fix for ocean: because ocean is not in linear depth, we trace it instead
+	const ShaderOcean ocean = GetWeather().ocean;
+	if (ocean.IsValid())
+	{
+		float3 rayDirection = -V;
+		float dist = intersectPlaneClampInfiniteDist(GetCamera().position, rayDirection, float3(0, 1, 0), ocean.water_height);
+		if (dist > 0 && dist < cameraDistance)
+		{
+			P = GetCamera().position + rayDirection * dist;
+			cameraDistance = dist;
+		}
+	}
+
 	float marchedDistance = 0;
-	float3 accumulation = 0;
+	half3 accumulation = 0;
 
 	float3 rayEnd = GetCamera().position;
 	if (length(rayEnd - light.position) > light.GetRange())
@@ -25,10 +40,13 @@ float4 main(VertexToPixel input) : SV_TARGET
 	}
 
 	const uint sampleCount = 16;
-	const float stepSize = length(P - rayEnd) / sampleCount;
+	const half sampleCount_rcp = rcp((half)sampleCount);
+	const float stepSize = distance(rayEnd, P) / sampleCount;
 
 	// dither ray start to help with undersampling:
 	P = P + V * stepSize * dither(input.pos.xy);
+	
+	const uint maskTex = light.GetTextureIndex();
 
 	// Perform ray marching to integrate light volume along view ray:
 	[loop]
@@ -36,22 +54,29 @@ float4 main(VertexToPixel input) : SV_TARGET
 	{
 		float3 L = light.position - P;
 		const float3 Lunnormalized = L;
-		const float dist2 = dot(L, L);
-		const float dist = sqrt(dist2);
+		const half dist2 = dot(L, L);
+		const half dist = sqrt(dist2);
 		L /= dist;
 
-		const float range = light.GetRange();
-		const float range2 = range * range;
-		float3 attenuation = attenuation_pointlight(dist, dist2, range, range2);
+		const half range = light.GetRange();
+		const half range2 = range * range;
+		half3 attenuation = attenuation_pointlight(dist2, range, light.GetRange2Rcp());
 
 		[branch]
 		if (light.IsCastingShadow())
 		{
-			attenuation *= shadow_cube(light, Lunnormalized);
+			attenuation *= shadow_cube(light, Lunnormalized, input.pos.xy);
+		}
+		
+		[branch]
+		if (maskTex > 0)
+		{
+			half4 mask = bindless_cubemaps_half4[descriptor_index(maskTex)].Sample(sampler_linear_clamp, -Lunnormalized);
+			attenuation *= mask.rgb * mask.a;
 		}
 
 		// Evaluate sample height for height fog calculation, given 0 for V:
-		attenuation *= GetFogAmount(cameraDistance - marchedDistance, P, float3(0.0, 0.0, 0.0));
+		attenuation *= (half)g_xColor.y + GetFogAmount(cameraDistance - marchedDistance, P, 0);
 		attenuation *= ComputeScattering(saturate(dot(L, -V)));
 		
 		accumulation += attenuation;
@@ -60,7 +85,7 @@ float4 main(VertexToPixel input) : SV_TARGET
 		P = P + V * stepSize;
 	}
 
-	accumulation /= sampleCount;
+	accumulation *= sampleCount_rcp;
 
-	return max(0, float4(accumulation * light.GetColor().rgb, 1));
+	return saturateMediump(max(0, half4(accumulation * light.GetColor().rgb, 1)));
 }

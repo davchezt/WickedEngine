@@ -1,15 +1,13 @@
 #include "stdafx.h"
 #include "NameWindow.h"
-#include "Editor.h"
 
 using namespace wi::ecs;
 using namespace wi::scene;
 
-
 void NameWindow::Create(EditorComponent* _editor)
 {
 	editor = _editor;
-	wi::gui::Window::Create(ICON_NAME " Name", wi::gui::Window::WindowControls::COLLAPSE | wi::gui::Window::WindowControls::CLOSE);
+	wi::gui::Window::Create(ICON_NAME " Name", wi::gui::Window::WindowControls::COLLAPSE | wi::gui::Window::WindowControls::CLOSE | wi::gui::Window::WindowControls::FIT_ALL_WIDGETS_VERTICAL);
 	SetSize(XMFLOAT2(360, 60));
 
 	closeButton.SetTooltip("Delete NameComponent");
@@ -23,7 +21,7 @@ void NameWindow::Create(EditorComponent* _editor)
 
 		editor->RecordEntity(archive, entity);
 
-		editor->optionsWnd.RefreshEntityTree();
+		editor->componentsWnd.RefreshEntityTree();
 		});
 
 	float x = 60;
@@ -37,14 +35,17 @@ void NameWindow::Create(EditorComponent* _editor)
 	nameInput.SetPos(XMFLOAT2(x, y));
 	nameInput.SetSize(XMFLOAT2(siz, hei));
 	nameInput.OnInputAccepted([=](wi::gui::EventArgs args) {
-		NameComponent* name = editor->GetCurrentScene().names.GetComponent(entity);
-		if (name == nullptr)
+		wi::scene::Scene& scene = editor->GetCurrentScene();
+		for (auto& x : editor->translator.selected)
 		{
-			name = &editor->GetCurrentScene().names.Create(entity);
+			NameComponent* name = scene.names.GetComponent(x.entity);
+			if (name == nullptr)
+			{
+				name = &editor->GetCurrentScene().names.Create(x.entity);
+			}
+			name->name = args.sValue;
 		}
-		name->name = args.sValue;
-
-		editor->optionsWnd.RefreshEntityTree();
+		editor->componentsWnd.RefreshEntityTree();
 	});
 	AddWidget(&nameInput);
 

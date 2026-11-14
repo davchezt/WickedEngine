@@ -1,16 +1,20 @@
 <img src="../logo_small.png" width="128px"/>
 
 # WickedEngine Documentation
-This is a reference for the C++ features of Wicked Engine
+This is the documentation for the C++ features of Wicked Engine
+- [Editor Manual](WickedEditor-Manual.pdf)<br/>
+- [Lua Documentation](ScriptingAPI-Documentation.md)<br/>
 
 ## Contents
+0. [Building and linking](#building-and-linking)
+0. [Basic runtime flow](#basic-runtime-flow)
 1. [High Level Interface](#high-level-interface)
 	1. [Application](#application)
 	2. [RenderPath](#renderpath)
 	3. [RenderPath2D](#renderpath2d)
 	4. [RenderPath3D](#renderpath3d)
 	9. [RenderPath3D_Pathtracing](#renderpath3d_pathtracing)
-		1.[Denoiser](#denoiser)
+		1. [Denoiser](#denoiser)
 	10. [LoadingScreen](#loadingscreen)
 2. [System](#system)
 	1. [Entity-Component System](#entity-component-system)
@@ -69,29 +73,31 @@ This is a reference for the C++ features of Wicked Engine
 			15. [RayTracingAccelerationStructure](#raytracingaccelerationstructure)
 			16. [RayTracingPipelineState](#raytracingpipelinestate)
 			17. [Variable Rate Shading](#variable-rate-shading)
-		2. [GraphicsDevice_DX11](#wigraphicsdevice_dx11)
-		3. [GraphicsDevice_DX12](#wigraphicsdevice_dx12)
-		4. [GraphicsDevice_Vulkan](#wigraphicsdevice_vulkan)
+			17. [Video decoding](#video-decoding)
+		2. [GraphicsDevice_DX11](#graphicsdevice_dx11)
+		3. [GraphicsDevice_DX12](#graphicsdevice_dx12)
+		4. [GraphicsDevice_Vulkan](#graphicsdevice_vulkan)
 	2. [Renderer](#renderer)
 		1. [DrawScene](#drawscene)
-		2. [DrawScene_Transparent](#drawscene_transparent)
 		3. [Tessellation](#tessellation)
 		4. [Occlusion Culling](#occlusion-culling)
 		5. [Shadow Maps](#shadow-maps)
 		6. [UpdatePerFrameData](#updateperframedata)
 		7. [UpdateRenderData](#updaterenderdata)
 		8. [Ray tracing (hardware accelerated)](#ray-tracing-hardware-accelerated)
-		8. [Ray tracing (Legacy)](#ray-tracing-legacy)
-		9. [Scene BVH](#scene-bvh)
-		10. [Decals](#decals)
-		11. [Environment probes](#environment-probes)
-		12. [Post processing](#post-processing)
-		13. [Instancing](#instancing)
-		14. [Stencil](#stencil)
-		15. [Loading Shaders](#loading-shaders)
-		16. [Debug Draw](#debug-draw)
-		17. [Animation Skinning](#animation-skinning)
-		18. [Custom Shaders](#custom-shaders)
+		8. [Ray tracing (compute)](#ray-tracing-compute)
+		9. [Path tracing](#path-tracing)
+		10. [Lightmap baking](#lightmap-baking)
+		11. [Scene BVH](#scene-bvh)
+		12. [Decals](#decals)
+		13. [Environment probes](#environment-probes)
+		14. [Post processing](#post-processing)
+		15. [Instancing](#instancing)
+		16. [Stencil](#stencil)
+		17. [Loading Shaders](#loading-shaders)
+		18. [Debug Draw](#debug-draw)
+		19. [Animation Skinning](#animation-skinning)
+		20. [Custom Shaders](#custom-shaders)
 	3. [Enums](#enums)
 	4. [Image Renderer](#image-renderer)
 	5. [Font Renderer](#font-renderer)
@@ -115,24 +121,26 @@ This is a reference for the C++ features of Wicked Engine
 	10. [ColorPicker](#colorpicker)
 	11. [TreeList](#treelist)
 5. [Helpers](#helpers)
-	2. [Archive](#archive)
-	3. [Color](#color)
-	5. [FadeManager](#fademanager)
-	6. [Helper](#helper)
-	7. [Primitive](#primitive)
+	1. [Archive](#archive)
+	2. [Color](#color)
+	3. [FadeManager](#fademanager)
+	4. [Helper](#helper)
+	5. [Primitive](#primitive)
 		1. [AABB](#aabb)
 		2. [Sphere](#sphere)
 		2. [Capsule](#capsule)
 		3. [Ray](#ray)
 		4. [Frustum](#frustum)
 		5. [Hitbox2D](#hitbox2d)
-	8. [wiMath](#wimath)
-	9. [wiRandom](#wirandom)
-	10. [wiRectPacker](#wirectpacker)
-	11. [wiResourceManager](#wiresourcemanager)
-	12. [wiSpinLock](#wispinlock)
-	13. [wiArguments](#wiarguments)
-	14. [wiTimer](#witimer)
+	6. [wiMath](#wimath)
+	7. [wiRandom](#wirandom)
+	8. [wiRectPacker](#wirectpacker)
+	9. [wiResourceManager](#wiresourcemanager)
+	10. [wiSpinLock](#wispinlock)
+	11. [wiArguments](#wiarguments)
+	12. [wiTimer](#witimer)
+	13. [wiVoxelGrid](#wivoxelgrid)
+	14. [wiPathQuery](#wipathquery)
 6. [Input](#input)
 7. [Audio](#audio)
 	1. [Sound](#sound)
@@ -144,8 +152,8 @@ This is a reference for the C++ features of Wicked Engine
 	1. [Rigid Body Physics](#rigid-body-physics)
 	2. [Soft Body Physics](#soft-body-physics)
 9. [Network](#network)
-	2. [Socket](#socket)
-	3. [Connection](#connection)
+	1. [Socket](#socket)
+	2. [Connection](#connection)
 10. [Scripting](#scripting)
 	1. [Lua](#lua)
 	2. [Lua_Globals](#lua_globals)
@@ -157,15 +165,132 @@ This is a reference for the C++ features of Wicked Engine
 	1. [Interop](#interop)
 	2. [Shader Compiler](#shader-compiler)
 
+## Building and linking
+Wicked Engine is a static library that can be included and linked into a standard C++ application. This comes with some differences when you try to build it for different platforms, because those have different compilers and settings. The basics of the static library will apply for all:
+
+1. You must build WickedEngine itself
+	- Windows: Use the WickedEngine.sln with Visual Studio and build the WickedEngine_Windows project
+	- Linux: Use the following commands on linux to build the solution:
+
+Ensure dependencies are installed on Linux:
+```bash
+sudo apt update
+sudo apt install libsdl2-dev
+sudo apt install build-essential
+```
+To build the engine on Linux, use `cmake` and then `make`:
+```bash
+mkdir build
+cd build
+cmake ..
+make
+```
+
+2. Set the `$(SolutionDir)WickedEngine` folder as "additional include directories" in your application's build system (for example, for me it resolves to: `C:\PROJECTS\WickedEngine\WickedEngine`)
+3. Set the `$(SolutionDir)BUILD/$(Platform)/$(Configuration)` as "additional library directories" in your application's build system (for example, for me it resolves to: `C:\PROJECTS\WickedEngine\BUILD\x64\Debug` in a Debug x64 configuration)
+4. Use `#include "WickedEngine.h` in your C++ application code
+5. Verify that you application compiles correctly and links to Wicked Engine.
+6. If succeeded, continue this guide with the [Application initialization](#application)
+
+If you have troubles, check out the Samples/Template projects which are setting up simple applications that use Wicked Engine and how they are configured.
+
+Xbox, PlayStation: The WickedEngine.sln must be used with Visual Studio similarly to Windows, but with console extension files and additional instructions which are private now, but could be offered in the future.
+
+## Basic Runtime flow
+The general flow of Wicked Engine's operation is the following:
+
+- main.cpp: your entry point with all the platform-specific functionality
+	- `wi::Application::SetWindow()` is called once with operating system-specific window handle
+	- `wi::Application.Run()` is called in an infinite loop, each call is one "frame"
+		- `wi::Application::Initialize()` is called once if hasn't been called it before
+			- `wi::initializer::InitializeComponentsAsync()` will be called to initialize all engine systems in the background
+		- `wi::Application::Update()` is called every frame
+			- `wi::input::Update()` is called to read input
+			- lua script coroutines waiting for `update()` are resumed
+			- `wi::RenderPath::Update()` is called every frame if any RenderPath is activated on the Application
+				- wi::scene::Scene::Update() is called every frame if RenderPath is a RenderPath3D
+		- `wi::Application::Render()` is called every frame
+			- lua script coroutines waiting for `render()` are resumed
+			- wi::RenderPath::Render() is called every frame if any RenderPath is activated on the Application
+				- complex off-screen rendering logic is performed with multiple CPU threads (using mostly functions from the `wi::renderer` namespace)
+		- `wi::Application::Compose()` is called every frame
+			- `wi::RenderPath::Compose()` is called every frame if any RenderPath is activated on the Application
+				- simple rendering logic is performed on the main thread directly onto the display (swap chain)
+			- Application renders some info text on the very top like version, FPS, etc. if enabled (infoDisplay)
+		- Submit all GPU work on the main thread (`GraphicsDevice::SubmitCommandLists()`)
 
 ## High Level Interface
-The high level interface consists of classes that allow for extending the engine with custom functionality. This is usually done by overriding the classes.
+The high level interface consists of classes that make up the general flow of Wicked Engine and allow for extending the engine with custom functionality. This is usually done by overriding the classes. The high level interface is not necessary to be used when coding in c++, but they provide a complete simple runtime logic that is maintained by Wicked Engine.
 
 ### Application
 [[Header]](../../WickedEngine/wiApplication.h) [[Cpp]](../../WickedEngine/wiApplication.cpp)
-This is the main runtime component that has the Run() function. It should be included in the application entry point while calling Run() in an infinite loop. <br/>
-The user should call the SetWindow() function to associate it with a window of the operating system. This window will be used to render to.<br/>
-The `Application` has many uses that the user is not necessarily interested in. The most important part is that it manages the RenderPaths. There can be one active RenderPath at a time, which will be updated and rendered to the screen every frame. However, because a RenderPath is a highly customizable class, there is no limitation what can be done within the RenderPath, for example supporting multiple concurrent RenderPaths if required. RenderPaths can be switched wit ha Fade out screen easily. Loading Screen can be activated as an active Renderpath and it will load and switch to an other RenderPath if desired. A RenderPath can be simply activated with the `Application::ActivatePath()` function.<br/>
+This is the main runtime component that has the `Run()` function which is called every frame. It should be included in the application entry point while calling Run() in an infinite loop. The Application is designed to handle a simple game-like functionality, with switching to different game screens with fading and rendering to a single display.
+
+To use the application, the user should at least set the operating system window to render to with the `SetWindow()`, providing the operating system-specific window handle to it. This will be the main window that the application will draw its contents to.
+
+It's also recommended to call `Initialize()` of the application if you do anything with the engine features outside of RenderPath, for example in your main function. This will kick off engine initialization immediately, instead of the first call to `Run()`. Using engine features before `application.Initialize()` was called, can be undefined behaviour. If you only use engine features within application's Update() and other overridable functions, those are ensured to be running when it is valid to do.
+
+An example of minimal application initialization:
+
+```cpp
+Application app;
+app.SetWindow(hWnd); // operating-system dependent window handle is given
+while(true)
+{
+	app.Run(); // app.Initialize() will be called in here, don't use engine features before this.
+}
+```
+
+The example above is sufficient to rely on doing things inside the startup.lua file, which - if exists - will be executed at the appropriate time.
+
+An example of minimal application initialization with extended c++ class:
+
+```cpp
+class Game : public Application
+{
+	virtual ~Game() = default; // in c++ it's recommended to always make class destructors that are used in inheritance virtual
+
+	void Update(float deltatime) override // override Application's Update function
+	{
+		Application::Update(deltatime);
+		// your per-application update logic can go here
+	}
+}
+Game game;
+game.SetWindow(hWnd);
+while(true)
+{
+	game.Run();
+}
+```
+
+An example of application initialization and some engine usage immediately:
+
+```cpp
+Application app;
+app.SetWindow(hWnd);
+app.Initialize(); // before using engine feature LoadModel, application.Initialize() will ensure all engine system initializations are kicked off. Most things are safe to use while initalization is running in the background...
+LoadModel("something.wiscene");
+while(true)
+{
+	app.Run();
+}
+```
+
+An example of initializing application and blocking until whole engine was initialized:
+
+```cpp
+Application app;
+app.SetWindow(hWnd);
+app.Initialize(); // this returns immediately, but engine sub-system begin to be initialized in the background...
+wi::initializer::WaitForInitializationsToFinish(); // block until all engine sub-systems are ready. If this is called before Run(), then initialization screen won't be shown.
+while(true)
+{
+	app.Run();
+}
+```
+
+The `Application` has many uses that the user is not necessarily interested in. The most important part is that it manages the `RenderPath`s. There can be one active `RenderPath` at a time, which will be updated and rendered to the screen every frame. However, because a RenderPath is a highly customizable class, there is no limitation what can be done within the RenderPath, for example supporting multiple concurrent RenderPaths if required. RenderPaths can be switched with a fade out screen easily. Loading Screen can be activated as an active Renderpath and it will load and switch to an other RenderPath if desired. A RenderPath can be simply activated with the `Application::ActivatePath()` function, which will also perform the fadeout when the `fadeSeconds` and `fadeColor` arguments are used.<br/>
 The `Application` does the following every frame while it is running:<br/>
 1. FixedUpdate() <br/>
 Calls FixedUpdate for the active RenderPath and wakes up scripts that are waiting for fixedupdate(). The frequency off calls will be determined by `Application::setTargetFrameRate(float framespersecond)`. By default (parameter = 60), FixedUpdate will be called 60 times per second.
@@ -176,9 +301,12 @@ Calls Render for the active RenderPath and wakes up scripts that are waiting for
 4. Compose()
 Calls Compose for the active RenderPath
 
+Note: the splash_screen texture of the application can be created before application is initialized, in this case this texture will be shown as a full screen image (with cropping, if necessary) while the engine initialization hasn't finished. The splash_screen texture will be also created automatically if a splash_screen.png file is found in the working directory. If a splash screen is not used, then the intialization logging screen will be shown at startup.
+Warning: if you load a splash screen yourself with the resource manager, note that mipmaps will not be generated while the engine is not yet initialized. You can use the Application::splash_screen_subresource to specify which mipmap to use for the image by using the GraphicsDevice::CreateSubresource() method. This will be handled automatically if you use the default splash_screen.png file.
+
 ### RenderPath
 [[Header]](../../WickedEngine/wiRenderPath.h)
-This is an empty base class that can be activated with a `Application`. It calls its Start(), Update(), FixedUpdate(), Render(), Compose(), Stop() functions as needed. Override this to perform custom gameplay or rendering logic. The RenderPath inherits from [wiCanvas](#wicanvas), and the canvas properties will be set by the [Application](#application) when the RenderPath was activated, and while the RenderPath is active. <br/>
+This is an empty base class that can be activated with a `Application`. It calls its Start(), Update(), FixedUpdate(), Render(), Compose(), Stop(), etc. functions as needed. Override this to perform custom gameplay or rendering logic. The RenderPath inherits from [wiCanvas](#wicanvas), and the canvas properties will be set by the [Application](#application) when the RenderPath was activated, and while the RenderPath is active. <br/>
 The order in which the functions are executed every frame: <br/>
 1. PreUpdate() <br/>
 This will be called once per frame before any script that calls Update().
@@ -195,7 +323,7 @@ It is called once per frame. It is running on a single command list that it rece
 
 Apart from the functions that will be run every frame, the RenderPath has the following functions:
 1. Load() <br/> 
-Intended for loading resources before the first time the RenderPath will be used. It will be callsed by [LoadingScreen](#loadingscreen) to load resources in the background.
+Intended for loading resources before the first time the RenderPath will be used. It will be called by [LoadingScreen](#loadingscreen) to load resources in the background.
 2. Start() <br/>
 Start will always be called when a RenderPath is activated by the `Application`
 3. Stop() <br/>
@@ -226,11 +354,20 @@ The HDR and LDR post process chain are using the "ping-ponging" technique, which
 Implements a compute shader based path tracing solution. In a static scene, the rendering will converge to ground truth. When something changes in the scene (something moves, ot material changes, etc...), the convergence will be restarted from the beginning. The raytracing is implemented in [wi::renderer](#wi::renderer) and multiple [shaders](#shaders). The ray tracing is available on any GPU that supports compute shaders.
 
 #### Denoiser
-To enable denoising for path traced images, you can use the [Open Image Denoise library](https://github.com/OpenImageDenoise/oidn). To enable this functionality, the engine will try to include the "OpenImageDenoise/oidn.hpp" file. If this file could be included, it will attampt to link with OpenImageDenoise.lib and tbb.lib. It is also required to provide the OpenImageDenoise.dll and tbb.dll near the exe to correctly launch the application after this. If you satisfy these steps, the denoiser will work automatically after the path tracer reached the target sample count. The final path traced image will be denoised and presented to the screen.
+To enable denoising for path traced images, you can use the [Open Image Denoise library](https://github.com/OpenImageDenoise/oidn). To enable this functionality, the engine will try to include the "WickedEngine/OpenImageDenoise/oidn.hpp" file. If this file could be included, it will attempt to link with OpenImageDenoise.lib and tbb.lib and any other lib that is supplied in the OpenImageDenoise release version The libs should be located in the `$(SolutionDir)BUILD\$(Platform)\$(Configuration)` path, which is for example: `C:/PROJECTS/WickedEngine/BUILD/x64/Release`. It is also required to provide the OpenImageDenoise.dll and tbb.dll and any other dll near the exe to correctly launch the application after this, which is for example: `C:\PROJECTS\WickedEngine\BUILD\x64\Release\Editor_Windows`. If you satisfy these steps, the denoiser will work automatically after you rebuild the engine and the path tracer reached the target sample count, or lightmap baking is stopped.
 
 ### LoadingScreen
 [[Header]](../../WickedEngine/wiLoadingScreen.h) [[Cpp]](../../WickedEngine/wiLoadingScreen.cpp)
-Render path that can be easily used for loading screen. It is able to load content or RenderPath in the background and switch to an other RenderPath onceit finished.
+The LoadingScreen is an example RenderPath that can be used as a drop-in loading screen for your application. It is designed to be a simple 2D screen that is shown during resource loading. You can add generic tasks with `addLoadingFunction()`, or to load an other `RenderPath` using `addLoadingComponent()`. You can specify what will be called after loading is finished by adding a task to with `onFinished()`. You can query the progress of loading with the `getProgress()` function which returns the percentage of loading as an integer in the range 0-100. You can use it to display a loading progress bar for example. The loading will start when `Start()` is called for the loading screen, but you nedd not call this yourself usually. When you activate your loading screen with the `Application` class, it will switch to the loading screen when appropriate and start it automatically. With this you can achieve nice fade-in-out of loading screen easily, as the `Application`'s `ActivatePath()` simply has a parameter for fading duration.
+
+Because the `LoadingScreen` is a `RenderPath2D`, it is safe to load a `Scene` directly into the main scene (with `LoadModel()`), because `RenderPath2D` doesn't utilize scene at all for rendering. If you use a custom loading screen that is also performing 3D rendering with a scene, you would instead load into a separate scene with `LoadModel()`, and merge into your main scene in the `LoadingScreen::onFinished()` callback.
+
+A simple helper feature of this LoadingScreen class is the `BackgroundMode` setting. You can set a background texture easily for the LoadingScreen which will simply be shown as a full screen image during loading. For this, you should at least specify the `LoadingScreen::bacgroundTexture` resource, which you can simply load from an asset file with `wi::resourcemanager::Load()`. You can set the `BackgroundMode` of this image via `LoadingScreen::background_mode` with the following modes:
+- Fill: fill the whole screen, will cut off parts of the image if aspects don't match (default)
+- Fit: fit the image completely inside the screen, will result in black bars on screen if aspects don't match
+- Stretch: fill the whole screen, and stretch the image if needed
+
+If you want to render other things on the LoadingScreen, then you can also override RenderPath2D methods such as Render() or Compose() and implement custom rendering for yourself.
 
 ## System
 You can find out more about the Entity-Component system and other engine-level systems under ENGINE/System filter in the solution.
@@ -238,10 +375,86 @@ You can find out more about the Entity-Component system and other engine-level s
 [[Header]](../../WickedEngine/wiECS.h)
 
 #### ComponentManager
-This is the core entity-component relationship handler class. The purpose of this is to efficiently store, remove, add and sort components. Components can be any movable C++ structure. The best components are simple POD (plain old data) structures.
+The Component Manager is responsible of binding data (component) to an Entity (identifier). The component can be a c++ struct that contains data for an entity. It supports serialization of this data, and if this is used, then the component structs must have a Serialize() function. Otherwise the component can be any c++ struct that can be moved.
 
 #### Entity
-Entity is a number, it can reference components through ComponentManager containers. An entity is always valid if it exists. It's not required that an entity has any components. An entity has a component, if there is a ComponentManager that has a component which is associated with the same entity.
+Entity is an identifier (number) that can reference components through ComponentManager containers. An entity is always valid if it exists. It's not required that an entity has any components. An entity has a component, if there is a ComponentManager that has a component which is associated with the same entity.
+
+#### Using the entity-component system
+To use the entity-component system, you must use the ComponentManager<T> to store components of the T type, where T is an type of c++ struct. To bind a component to an entity, this procedure should be followed:
+
+```cpp
+struct MyComponent
+{
+	float3 position;
+	float speed;
+};
+ComponentManager<MyComponent> components; // create a component manager
+Entity entity = CreateEntity(); // create a new entity ID
+MyComponent& component = components.Create(entity); // create a component and bind it to the entity
+```
+
+When you create a new component, it will be added to the end of the array, in a contiguous memory allocation. The ComponentManager can be indexed and iterated efficiently:
+
+```cpp
+for(size_t i = 0; i < components.GetCount(); ++i)
+{
+	MyComponent& component = components[i];
+	Entity entity = components.GetEntity(i);
+}
+```
+
+You can see that we can both iterate through components and entities this way by the same index. It is useful when you just want to go through everything one-by one. But it is not useful when you want to query a component for an entity but you don't know its index. Indices can change when components are removed, so you cannot usually rely on remembering indices for entities yourself. However, the component manager does manage this information internally. To query a component for a given entity, use the GetComponent() function:
+
+```cpp
+MyComponent* component = components.GetComponent(entity);
+if(component != nullptr) // check for null, which can be returned if component doesn't exist for the entity
+{
+	// use component
+}
+```
+
+You can also get the index of an entity in a component manager:
+
+```cpp
+size_t index = components.GetIndex(entity);
+if(index != INVALID_INDEX) // check if it's valid. If invalid, then the index returned will be the max value of 64 bit uint
+{
+	MyComponent& component = components[index];
+}
+```
+
+It is NOT valid to use the array operator with entity ID:
+
+```cpp
+// NOT VALID! result will be undefined (could be a valid component, or overindexing crash)
+MyComponent& component = components[entity];
+```
+
+A useful pattern is to offload the iteration of a large component manager to the job system, to parallelize the work:
+
+```cpp
+wi::jobsystem::context ctx;
+wi::jobsystem::Dispatch(ctx, (uint32_t)components.GetCount(), 64, [&](wi::jobsystem::JobArgs args){
+	MyComponent& component = components[args.jobIndex];
+	Entity entity = components.GetEntity(args.jobIndex);
+	// Do things...
+});
+// optionally, do unrelated things here...
+wi::jobsystem::Wait(ctx); // wait for Dispatch to finish
+```
+In this example, each entity/component will be iterated by one job, and 64 batch of jobs will be executed on one thread as a group. This can greatly improve performance when iterating a large component manager.
+
+One thing that you must look out for is pointer invalidation of the Component Manager. It is always safe to use Entity IDs whenever, but it is faster to use a pointer or an index. Those can, hovewer change as components are added or removed. You must look out for index and pointer invalidation when components are removed, because the ordering of the components can change there (the component manager is always kept dense, without holes). When adding/creating components, pointers can occasionally get invalidated the same way as for example std::vector, because reallocation of memory can happen to keep everyting contiguous. This can lead to unexpected consequences:
+
+```cpp
+MyComponent& component1 = components[0];
+MyComponent& component2 = components.Create(CreateEntity()); // here the component1 reference/pointer can get invalidated
+component1.speed = 10; // POINTER INVALIDATION HAZARD!
+```
+In the example above, a new component is created while the reference to the first element is still going to be used, this can lead to crash if the memory got reallocated while creating the component2. The correct solution would be to first create all components, then use them after all creations finished. Or re-query component pointers with GetComponent(entity) after a creation happens.
+
+The Scene structure of the engine is essentially a collection of ComponentManagers, which let you access everything in the scene in the same manner.
 
 ### Scene System
 [[Header]](../../WickedEngine/wiScene.h) [[Cpp]](../../WickedEngine/wiScene.cpp)
@@ -249,7 +462,11 @@ The logical scene representation using the Entity-Component System
 - GetScene <br/>
 Returns a global scene instance. This is a convenience feature for simple applications that need a single scene. The RenderPath3D will use the global scene by default, but it can be set to a custom scene if needed.
 - LoadModel() <br/>
-There are two flavours to this. One of them immediately loads into the global scene. The other loads into a custom scene, which is usefult to manage the contents separately. This function will return an Entity that represents the root transform of the scene - if the attached parameter was true, otherwise it will return INVALID_ENTITY and no root transform will be created.
+There are two flavours to this. One of them immediately loads into the global scene. The other loads into a custom scene, which is useful to manage the contents separately. This function will return an Entity that represents the root transform of the scene - if the attached parameter was true, otherwise it will return INVALID_ENTITY and no root transform will be created.
+- LoadModel2() <br/>
+This is an alternative usage of LoadModel, which lets you give the root entity ID as a parameter. Apart from that, it works the same way as LoadModel(), just that attachments will be made to your specified root entity.
+- Intersects(Ray/Capsule/Sphere, filterMask, layerMask, lod) <br/>
+Intersection function with scene entities and primitives. You can specify various settings to filter intersections. The filterMask lets you specify an engine-defined type enum bitmask combination, so you can choose to intersect with objects, and/or colliders, and various specifications. The layerMask lets you filter the intersections with layer bits, where binary OR of the parameter and entity layers will decide active entities. The lod parameter lets you force a lod level for meshes. 
 - Pick <br/>
 Allows to pick the closest object with a RAY (closest ray intersection hit to the ray origin). The user can provide a custom scene or layermask to filter the objects to be checked.
 - SceneIntersectSphere <br/>
@@ -257,7 +474,7 @@ Performs sphere intersection with all objects and returns the first occured inte
 - SceneIntersectCapsule <br/>
 Performs capsule intersection with all objects and returns the first occured intersection immediately. The result contains the incident normal and penetration depth and the contact object entity ID.
 
-Below you will find the structures that make up the scene. These are intended to be simple strucutres that will be held in [ComponentManagers](#componentmanager). Keep these structures minimal in size to use cache efficiently when iterating a large amount of components.
+Below you will find the structures that make up the scene. These are intended to be simple structures that will be held in [ComponentManagers](#componentmanager). Keep these structures minimal in size to use cache efficiently when iterating a large amount of components.
 
 <b>Note on bools: </b> using bool in C++ structures is inefficient, because they take up more space in memory than required. Instead, bitmasks will be used in every component that can store up to 32 bool values in each bit. This also makes it easier to add bool flags and not having to worry about serializing them, because the bitfields themselves are already serialized (but the order of flags must never change without handling possible side effects with serialization versioning!). C++ enums are used in the code to manage these bool flags, and the bitmask storing these is always called `uint32_t _flags;` For example:
 
@@ -278,7 +495,7 @@ bool IsDoubleSided() const { return _flags & DOUBLE_SIDED; }
 void SetDoubleSided(bool value) { if (value) { _flags |= DOUBLE_SIDED; } else { _flags &= ~DOUBLE_SIDED; } }
 ```
 
-It is good practice to not implement constructors and destructors for components. Wherever possible, initialization of values in declaration should be preferred. If desctructors are defined, move contructors, etc. will also need to be defined for compatibility with the [ComponentManager](#componentmanager), so default constructors and destructors should be preferred. Member objects should be able to desctruct themselves implicitly. If pointers need to be stored within the component that manage object lifetime, std::unique_ptr or std::shared_ptr can be used, which will be destructed implicitly.
+It is good practice to not implement constructors and destructors for components. Wherever possible, initialization of values in declaration should be preferred. If desctructors are defined, move contructors, etc. will also need to be defined for compatibility with the [ComponentManager](#componentmanager), so default constructors and destructors should be preferred. Member objects should be able to desctruct themselves implicitly. If pointers need to be stored within the component that manage object lifetime, std::unique_ptr or wi::allocator::shared_ptr can be used, which will be destructed implicitly.
 
 #### NameComponent
 [[Header]](../../WickedEngine/wiScene.h) [[Cpp]](../../WickedEngine/wiScene.cpp)
@@ -291,93 +508,93 @@ A bitmask of 0 will make the entity inactive in most systems.
 The lower 8 bits will be used by ray tracing as an instance inclusion mask for instances (ObjectComponent, EmittedParticle, HairParticle..)
 
 #### TransformComponent
-[[Header]](../../WickedEngine/wiScene.h) [[Cpp]](../../WickedEngine/wiScene.cpp)
+[[Header]](../../WickedEngine/wiScene_Components.h) [[Cpp]](../../WickedEngine/wiScene_Components.cpp)
 Orientation in 3D space, which supports various common operations on itself.
 
 #### PreviousFrameTransformComponent
-[[Header]](../../WickedEngine/wiScene.h) [[Cpp]](../../WickedEngine/wiScene.cpp)
+[[Header]](../../WickedEngine/wiScene_Components.h) [[Cpp]](../../WickedEngine/wiScene_Components.cpp)
 Absolute orientation in the previous frame (a matrix).
 
 #### HierarchyComponent
-[[Header]](../../WickedEngine/wiScene.h) [[Cpp]](../../WickedEngine/wiScene.cpp)
+[[Header]](../../WickedEngine/wiScene_Components.h) [[Cpp]](../../WickedEngine/wiScene_Components.cpp)
 An entity can be part of a transform hierarchy by having this component. Some other properties can also be inherieted, such as layer bitmask. If an entity has a parent, then it has a HierarchyComponent, otherwise it's not part of a hierarchy.
 
 #### MaterialComponent
-[[Header]](../../WickedEngine/wiScene.h) [[Cpp]](../../WickedEngine/wiScene.cpp)
+[[Header]](../../WickedEngine/wiScene_Components.h) [[Cpp]](../../WickedEngine/wiScene_Components.cpp)
 Several properties that define a material, like color, textures, etc...
 
 #### MeshComponent
-[[Header]](../../WickedEngine/wiScene.h) [[Cpp]](../../WickedEngine/wiScene.cpp)
+[[Header]](../../WickedEngine/wiScene_Components.h) [[Cpp]](../../WickedEngine/wiScene_Components.cpp)
 A mesh is an array of triangles. A mesh can have multiple parts, called MeshSubsets. Each MeshSubset has a material and it is using a range of triangles of the mesh. This can also have GPU resident data for rendering.
 
 #### ImpostorComponent
-[[Header]](../../WickedEngine/wiScene.h) [[Cpp]](../../WickedEngine/wiScene.cpp)
+[[Header]](../../WickedEngine/wiScene_Components.h) [[Cpp]](../../WickedEngine/wiScene_Components.cpp)
 Supports efficient rendering of the same mesh multiple times (but as an approximation, such as a billboard cutout). A mesh can be rendered as impostors for example when it is not important, but has a large number of copies.
 
 #### ObjectComponent
-[[Header]](../../WickedEngine/wiScene.h) [[Cpp]](../../WickedEngine/wiScene.cpp)
+[[Header]](../../WickedEngine/wiScene_Components.h) [[Cpp]](../../WickedEngine/wiScene_Components.cpp)
 An ObjectComponent is an instance of a mesh that has physical location in a 3D world. Multiple ObjectComponents can have the same mesh, and in this case the mesh will be rendered multiple times efficiently. It is expected that an entity that has ObjectComponent, also has TransformComponent and [AABB](#aabb) (axis aligned bounding box) component.
 
 #### RigidBodyPhysicsComponent
-[[Header]](../../WickedEngine/wiScene.h) [[Cpp]](../../WickedEngine/wiScene.cpp)
+[[Header]](../../WickedEngine/wiScene_Components.h) [[Cpp]](../../WickedEngine/wiScene_Components.cpp)
 Stores properties required for rigid body physics simulation and a handle that will be used by the physicsengine internally.
 
 #### SoftBodyPhysicsComponent
-[[Header]](../../WickedEngine/wiScene.h) [[Cpp]](../../WickedEngine/wiScene.cpp)
+[[Header]](../../WickedEngine/wiScene_Components.h) [[Cpp]](../../WickedEngine/wiScene_Components.cpp)
 Stores properties required for soft body physics simulation and a handle that will be used by the physicsengine internally.
 
 #### ArmatureComponent
-[[Header]](../../WickedEngine/wiScene.h) [[Cpp]](../../WickedEngine/wiScene.cpp)
+[[Header]](../../WickedEngine/wiScene_Components.h) [[Cpp]](../../WickedEngine/wiScene_Components.cpp)
 A skeleton used for skinning deformation of meshes.
 
 #### LightComponent
-[[Header]](../../WickedEngine/wiScene.h) [[Cpp]](../../WickedEngine/wiScene.cpp)
+[[Header]](../../WickedEngine/wiScene_Components.h) [[Cpp]](../../WickedEngine/wiScene_Components.cpp)
 A light in the scene that can shine in the darkness. It is expected that an entity that has LightComponent, also has TransformComponent and [AABB](#aabb) (axis aligned bounding box) component.
 
 #### CameraComponent
-[[Header]](../../WickedEngine/wiScene.h) [[Cpp]](../../WickedEngine/wiScene.cpp)
+[[Header]](../../WickedEngine/wiScene_Components.h) [[Cpp]](../../WickedEngine/wiScene_Components.cpp)
 
 #### EnvironmentProbeComponent
-[[Header]](../../WickedEngine/wiScene.h) [[Cpp]](../../WickedEngine/wiScene.cpp)
+[[Header]](../../WickedEngine/wiScene_Components.h) [[Cpp]](../../WickedEngine/wiScene_Components.cpp)
 It is expected that an entity that has EnvironmentProbeComponent, also has TransformComponent and [AABB](#aabb) (axis aligned bounding box) component.
 
 #### ForceFieldComponent
-[[Header]](../../WickedEngine/wiScene.h) [[Cpp]](../../WickedEngine/wiScene.cpp)
+[[Header]](../../WickedEngine/wiScene_Components.h) [[Cpp]](../../WickedEngine/wiScene_Components.cpp)
 
 #### DecalComponent
-[[Header]](../../WickedEngine/wiScene.h) [[Cpp]](../../WickedEngine/wiScene.cpp)
+[[Header]](../../WickedEngine/wiScene_Components.h) [[Cpp]](../../WickedEngine/wiScene_Components.cpp)
 It is expected that an entity that has DecalComponent, also has TransformComponent and [AABB](#aabb) (axis aligned bounding box) component.
 
 #### AnimationDataComponent
-[[Header]](../../WickedEngine/wiScene.h) [[Cpp]](../../WickedEngine/wiScene.cpp)
+[[Header]](../../WickedEngine/wiScene_Components.h) [[Cpp]](../../WickedEngine/wiScene_Components.cpp)
 
 #### AnimationComponent
-[[Header]](../../WickedEngine/wiScene.h) [[Cpp]](../../WickedEngine/wiScene.cpp)
+[[Header]](../../WickedEngine/wiScene_Components.h) [[Cpp]](../../WickedEngine/wiScene_Components.cpp)
 
 #### WeatherComponent
-[[Header]](../../WickedEngine/wiScene.h) [[Cpp]](../../WickedEngine/wiScene.cpp)
+[[Header]](../../WickedEngine/wiScene_Components.h) [[Cpp]](../../WickedEngine/wiScene_Components.cpp)
 
 #### SoundComponent
-[[Header]](../../WickedEngine/wiScene.h) [[Cpp]](../../WickedEngine/wiScene.cpp)
+[[Header]](../../WickedEngine/wiScene_Components.h) [[Cpp]](../../WickedEngine/wiScene_Components.cpp)
 Holds a Sound and a SoundInstance, and it can be placed into the scene via a TransformComponent. It can have a 3D audio effect it has a TransformComponent.
 
 #### InverseKinematicsComponent
-[[Header]](../../WickedEngine/wiScene.h) [[Cpp]](../../WickedEngine/wiScene.cpp)
-If an entity has an `InverseKinematicComponent` (IK), and part of a transform hierarchy (has both [TransformComponent](#transformcomponent) and a [HierarchyComponent](#hierarchycomponent)), then it can be targetted to an other [ThransformComponent](#transformcomponent). The parent transforms will be computed in order to let the IK reach the target if possible. The parent transforms will be only rotated. For example, if a hand tries to reach for an object, the hand and shoulder will move accordingly to let the hand reach.
+[[Header]](../../WickedEngine/wiScene_Components.h) [[Cpp]](../../WickedEngine/wiScene_Components.cpp)
+If an entity has an `InverseKinematicComponent` (IK), and part of a transform hierarchy (has both [TransformComponent](#transformcomponent) and a [HierarchyComponent](#hierarchycomponent)), then it can be targetted to an other [TransformComponent](#transformcomponent). The parent transforms will be computed in order to let the IK reach the target if possible. The parent transforms will be only rotated. For example, if a hand tries to reach for an object, the hand and shoulder will move accordingly to let the hand reach.
 The `chain_length` can be specified to let the IK system know how many parents should be computed. It can be greater than the real chain length, in that case there will be no more simulation steps than the length of hierarchy chain.
 The `iteration_count` can be specified to increase accuracy of the computation.
 If animations are also playing on the affected entities, the IK system will override the animations.
 
 #### SpringComponent
-[[Header]](../../WickedEngine/wiScene.h) [[Cpp]](../../WickedEngine/wiScene.cpp)
+[[Header]](../../WickedEngine/wiScene_Components.h) [[Cpp]](../../WickedEngine/wiScene_Components.cpp)
 An entity can have a `SpringComponent` to achieve a "jiggle" or "soft" animation effect programatically. The effect will work automatically if the transform is changed by animation system for example, or in any other way. The parameter `stiffness` specifies how fast the transform tries to go back to its initial position. The parameter `damping` specifies how fast the transform comes to rest position. The `wind_affection` parameter specifies how much the global wind applies to the spring.
 
 #### ColiderComponent
-[[Header]](../../WickedEngine/wiScene.h) [[Cpp]](../../WickedEngine/wiScene.cpp)
+[[Header]](../../WickedEngine/wiScene_Components.h) [[Cpp]](../../WickedEngine/wiScene_Components.cpp)
 The collider component will specify a collider shape to be used in simple fake physics simulations. It will affect Springs and GPU particle effect.
 
 #### ScriptComponent
-[[Header]](../../WickedEngine/wiScene.h) [[Cpp]](../../WickedEngine/wiScene.cpp)
+[[Header]](../../WickedEngine/wiScene_Components.h) [[Cpp]](../../WickedEngine/wiScene_Components.cpp)
 ScriptComponent can reference a lua script and run it every frame, while also providing some additional data to script like a local GetEntity() function. The script can be written to reference additional component data by using its unique GetEntity() function. A ScriptComponent can also call other scripts, which can be used to implement multiple scripts on one entity.
 
 #### Scene
@@ -404,11 +621,7 @@ Initializes all engine systems either in a blocking or an asynchronous way.
 
 ### Platform
 [[Header]](../../WickedEngine/wiPlatform.h)
-You can get native platform specific handles here, such as window handle.
-- GetWindow <br/>
-Returns the platform specific window handle
-- IsWindowActive <br/>
-Returns true if the current window is the topmost one, false if it is not in focus
+You can get native platform specific functionality.
 
 ### Event Handler
 [[Header]](../../WickedEngine/wiEventHandler.h)
@@ -416,7 +629,7 @@ The event system can be used to execute system-wide tasks. Any system can "subsc
 - Subscribe <br/>
 The first parameter is the event ID. Core system events are negative numbers. The user can choose any positive number to create custom events. 
 The second parameter is a function to be executed, with a userdata argument. The userdata argument can hold any custom data that the user desires.
-The return value is a `wi::eventhandler::Handle` type. When this is object is destroyed, the event is subscription for the function will be removed.
+The return value is a `wi::eventhandler::Handle` type. When this is object is destroyed, the event subscription for the function will be removed.
 Multiple functions can be subscribed to a single event ID.
 - FireEvent <br/>
 The first argument is the event id, that says which events to invoke. 
@@ -443,7 +656,7 @@ This is the interface for the graphics API abstraction. It is higher level than 
 When creating a graphics device, it can be created in special debug mode to assist development. For this, the user can specify `debugdevice` as command line argument to the application, or set the `debuglayer` argument of the graphics device constructor to `true` when creating the device. The errors will be posted to the Console Output window in the development environment.
 
 ##### Creating resources
-Functions like `CreateTexture()`, `CreateBuffer()`, etc. can be used to create corresponding GPU resources. Using these functions is thread safe. The resources will not necessarily be created immediately, but by the time the GPU will want to use them. These functions imediately return `false` if there were any errors, such as wrong parameters being passed to the description parameters, and they will return `true` if everything is correct. If there was an error, please use the [debug device](#debug-device) functionality to get additional information. When passing a resource to these functions that is already created, it will be destroyed, then created again with the newly provided parameters.
+Functions like `CreateTexture()`, `CreateBuffer()`, etc. can be used to create corresponding GPU resources. Using these functions is thread safe. The resources will not necessarily be created immediately, but by the time the GPU will want to use them. These functions immediately return `false` if there were any errors, such as wrong parameters being passed to the description parameters, and they will return `true` if everything is correct. If there was an error, please use the [debug device](#debug-device) functionality to get additional information. When passing a resource to these functions that is already created, it will be destroyed, then created again with the newly provided parameters.
 
 ##### Destroying resources
 Resources will be destroyed automatically by the graphics device when they are no longer used.
@@ -593,7 +806,7 @@ The subresource indices are valid as long as the resource is valid that they wer
 
 The pipeline states are subject to shader compilations. Shader compilation will happen when a pipeline state is bound inside a render pass for the first time. This is required because the render target formats are necessary information for compilation, but they are not part of the pipeline state description. This choice was made for increased flexibility of defining pipeline states. However, unlike APIs where state subsets (like RasterizerDesc, or BlendStateDesc) can be bound individually, the grouping of states is more optimal regarding CPU time, because state hashes are computed only once for the whole pipeline state at creation time, as opposed to binding time for each individual state. This approach is also less prone to user error when the developer might forget setting any subset of state and the leftover state from previous render passes are incorrect. 
 
-Shaders still need to be created with `GraphicsDevice::CreateShader()` in a similar to CreateTexture(), etc. This could result in shader compilation/hashing in some graphics APIs like DirectX 11. The CreateShader() function expects a `wiGraphics::ShaderStage` enum value which will define the type of shader:
+Shaders still need to be created with `GraphicsDevice::CreateShader()` in a similar way to CreateTexture(), etc. The CreateShader() function expects a `wiGraphics::ShaderStage` enum value which will define the type of shader:
 
 - `MS`: Mesh Shader
 - `AS`: Amplification Shader, or Task Shader
@@ -607,25 +820,31 @@ Shaders still need to be created with `GraphicsDevice::CreateShader()` in a simi
 
 Depending on the graphics device implementation, the shader code must be different format. For example, DirectX expects DXIL shaders, Vulkan expects SPIR-V shaders. The engine can compile HLSL shader source code to DXIL or SPIRV format with the [Shader Compiler](#shader-compiler).
 
-##### Render Passes
-Render passes are defining regions in GPU execution where a number of render targets or depth buffers will be used to render into them. Render targets and depth buffers are defined as `RenderPassAttachment`s. The `RenderPassAttachment`s have a pointer to the texture, state the resource type (`RENDERTARGET`, `DEPTH_STENCIL` or `RESOLVE`), state the [subresource](#subresources) index, the load and store operations, and the layout transitions for the textures.
+Note: As an optional parameter, `CreatePipelineState()` function also accepts a `RenderPassInfo` pointer. If this is provided, then all the information will be available for pipeline creation to happen immediately. This means the pipeline will be immediately in final usable state after the function returns, but it can take longer time for this to complete. If the parameter is not provided, the pipeline could be created at a later time, when the render pass information is available on first use. This can have the effect of the longer pipeline compilation happening at an unexpected time. But in this case, the pipeline will also be compatible with more render pass types if it's used at different places.
 
-- `RENDERTARGET`: The attachment will be used as a (color) render target. The order of these attachments define the shader color output order.
-- `DEPTH_STENCIL`: The attachment will be used as a depth (and/or stencil) buffer.
-- `RESOLVE`: The attachment will be used as MSAA resolve destination. The resolve source is chosen among the `RENDERTARGET` attachments in the same render pass, in the order they were declared in. The declaration order of the `RENDERTARGET` and `RESOLVE` attachment must match to correctly deduce source and destination targets for resolve operations.
+##### Render Passes
+Render passes are defining regions in GPU execution where a number of render targets or depth buffers will be used to render into them. Render targets and depth buffers are defined as `RenderPassImage`s. The `RenderPassImage`s have a pointer to the texture, state the resource type (`RENDERTARGET`, `DEPTH_STENCIL` or `RESOLVE`), state the [subresource](#subresources) index, the load and store operations, and the layout transitions for the textures.
+
+- `RENDERTARGET`: The image will be used as a (color) render target. The order of these images define the shader color output order.
+- `DEPTH_STENCIL`: The image will be used as a depth (and/or stencil) buffer.
+- `RESOLVE`: The image will be used as MSAA resolve destination. The resolve source is chosen among the `RENDERTARGET` images in the same render pass, in the order they were declared in. The declaration order of the `RENDERTARGET` and `RESOLVE` images must match to correctly deduce source and destination targets for resolve operations.
+- `RESOLVE_DEPTH` same as `RESOLVE` but for depth stencil. You can also specify Min or Max resolve operation with the `RenderPassImage::DepthResolveMode` enum. This feature must be supported by GPU and indicated by `GraphicsDeviceCapability::DEPTH_RESOLVE_MIN_MAX` and `GraphicsDeviceCapability::STENCIL_RESOLVE_MIN_MAX` (if image also has stencil)
 
 - Load Operation: <br/>
 Defines how the texture contents are initialized at the start of the render pass. `LoadOp::LOAD` says that the previous texture content will be retained. `LoadOp::CLEAR` says that the previous contents of the texture will be lost and instead the texture clear color will be used to fill the texture. `LoadOp::DONTCARE` says that the texture contents are undefined, so this should only be used when the developer can ensure that the whole texture will be rendered to and not leaving any region empty (in which case, undefined results will be present in the texture).
 - Store operation: <br/>
 Defines how the texture contents are handled after the render pass ends. `StoreOp::STORE` means that the contents will be preserved. `StoreOp::DONTCARE` means that the contents won't be necessarily preserved, they are only temporarily valid within the duration of the render pass, which can save some memory bandwidth on some platforms (specifically tile based rendering architectures, like mobile GPUs).
 - Layout transition: <br/>
-Define the `intial_layout`, `subpass_layout` (only for `RENDERTARGET` or `DEPTH_STENCIL`) and `final_layout` members to have an implicit transition performed as part of the render pass, that works like an [IMAGE_BARRIER](#gpu-barriers), but can be more optimal. The `initial_layout` states the starting state of the resource. The resource will be transitioned from `initial_layout` to `subpass_layout` within the render pass. The `subpass_layout` states how the resource is accessed within the render pass. For `RENDERTARGET`, this must be `RENDERTARGET`, for `DEPTH_STENCIL` type, it must be either `DEPTHSTENCIL` or `DEPTHSTENCIL_READONLY`. For `RESOLVE` type, the subpass_layout have no meaning, it is implicitly defined. At the end of the render pass, the resources will be transitioned from `subpass_layout` to `final_layout`.
+Define the `layout_before`, `layout` (only for `DEPTH_STENCIL`) and `layout_after` members to have an implicit transition performed as part of the render pass, that works like an [IMAGE_BARRIER](#gpu-barriers), but can be more optimal. The `layout_before` states the starting state of the resource. The resource will be transitioned from `layout_before` to `layout` within the render pass. The `layout` states how the resource is accessed within the render pass. For `DEPTH_STENCIL` type, it must be either `DEPTHSTENCIL` or `DEPTHSTENCIL_READONLY`. For `RESOLVE` type, the subpass_layout have no meaning, it is implicitly defined. At the end of the render pass, the resources will be transitioned from `layout` to `layout_after`.
 
 Notes:
 - When `RenderPassBegin()` is called, `RenderPassEnd()` must be called after on the same command list before the command list gets [submitted](#work-submission).
-- It is not allowed to call `CopyResource()`, `CopyTexture2D()`, etc. inside a render pass.
-- It is not allowed to call `Dispatch()` and `DispatchIndirect()` inside a render pass.
+- It is not allowed to call `RenderPassBegin()` inside a render pass.
+- It is not allowed to call `CopyResource()`, `CopyTexture()`, `CopyBuffer()` inside a render pass.
+- It is not allowed to call `Dispatch()`, `DispatchIndirect()`, `DispatchMesh()`, `DispatchMeshIndirect()`, `DispatchRays()` inside a render pass.
 - It is not allowed to call `UpdateBuffer()` inside the render pass.
+- It is not allowed to call `Barrier()` inside the render pass.
+- It is not allowed to call `ClearUAV()` inside the render pass.
 
 ##### GPU Barriers
 `GPUBarrier`s can be used to state dependencies between GPU workloads. There are different kinds of barriers:
@@ -637,7 +856,7 @@ Image barriers are stating resource state transition for [textures](#textures). 
 - BUFFER_BARRIER <br/>
 Similar to `IMAGE_BARRIER`, but for [GPU Buffer](#gpu-buffers) state transitions.
 
-It is very important to place barriers to the right places if using low level graphics devices APIs like [DirectX 12](#graphicsdevice_dx12) or [Vulkan](#graphicsdevice_vulkan). Missing a barrier could lead to corruption of rendered results, crashes and generally undefined behaviour. However, barriers don't have an effect for [DirectX 11](#graphicsdevice_dx11), they are handled automatically. The [debug layer](#debug-device) will help to detect errors and missing barriers.
+It is very important to place barriers in the right places; missing a barrier could lead to corruption of rendered results, crashes and generally undefined behaviour. The [debug layer](#debug-device) will help to detect errors and missing barriers.
 
 ##### Textures
 `Texture` type resources are used to store images which will be sampled or written by the GPU efficiently. There are a lot of texture types, such as `Texture1D`, `Texture2D`, `TextureCube`, `Texture3D`, etc. used in [shaders](#shaders), that correspond to the simple `Texture` type on the CPU. The texture type will be determined when creating the resource with `GraphicsDevice::CreateTexture(const TextureDesc*, const SubresourceData*, Texture*)` function. The first argument is the `TextureDesc` that determines the dimensions, size, format and other properties of the texture resource. The `SubresourceData` is used to initialize the texture contents, it can be left as `nullptr`, when the texture contents don't need to be initialized, such as for textures that will be rendered into. The `Texture` is the texture that will be initialized.
@@ -690,6 +909,17 @@ The final shading rate will be determined from the above methods using the maxim
 To read more about variable rate shading, refer to the [DirectX specifications.](https://microsoft.github.io/DirectX-Specs/d3d/VariableRateShading)
 
 
+##### Video Decoding
+Video decoding can be used to decode compressed video bitstream in real time on the GPU. Currently only the H264 format is supported. To decode a video, the following steps need to be taken:
+- Provide H264 slice data in a `GPUBuffer`. The slice data offset needs to be aligned within the buffer with `GraphcisDevice::GetVideoDecodeBitstreamAlignment()`. The bitstream buffer needs to be an `UPLOAD` buffer currently.
+- Create `VideoDecoder` object, while providing appropriate paraemters parsed from H264 such as resolution, picture parameters, sequence parameters. The decode format must be `Format::NV12` which is a multi planar YUV420 format.
+- Create a "Decode Picture Buffer" (DPB), which is a texture array storing reference and decoded images in the native video format (currently only `Format::NV12` is supported). Indicate in the `misc_flags` that it will be used as `ResourceMiscFlags::VIDEO_DECODE`.
+- Run the `GraphicsDevice::VideoDecode` operation providing correct arguments to decode a single video frame. You are responsible to provide correct H264 arguments and DPB picture indices.
+- You will need to manually read from the DPB texture (eg. in a shader) and resolve the YUV format to RGB if you want.
+
+All this is demonstrated in the [wi::video](../../WickedEngine/wiVideo.cpp) implementation.
+
+
 #### GraphicsDevice_DX11
 The DirectX11 interface has been removed after version 0.56
 
@@ -715,17 +945,20 @@ The renderer also hosts post process implementations. These functions are indepe
 Read about the different features of the renderer in more detail below:
 
 #### DrawScene
-Renders the scene from the camera's point of view that was specified as parameter. Only the objects withing the camera [Frustum](#frustum) will be rendered. The objects will be sorted from front-to back. This is an optimization to reduce overdraw, because for opaque objects, only the closest pixel to the camera will contribute to the rendered image. Pixels behind the frontmost pixel will be culled by the GPU using the depth buffer and not be rendered. The sorting is implemented with RenderQueue internally. The RenderQueue is responsible to sort objects by distance and mesh index, so instaced rendering (batching multiple drawable objects into one draw call) and front-to back sorting can both work together. 
+Renders the scene from the camera's point of view that was specified as parameter. Only the objects within the camera [Frustum](#frustum) will be rendered. The objects will be sorted from front-to back. This is an optimization to reduce overdraw, because for opaque objects, only the closest pixel to the camera will contribute to the rendered image. Pixels behind the frontmost pixel will be culled by the GPU using the depth buffer and not be rendered. The sorting is implemented with RenderQueue internally. The RenderQueue is responsible to sort objects by distance and mesh index, so instanced rendering (batching multiple drawable objects into one draw call) and front-to back sorting can both work together. 
 
 The `renderPass` argument will specify what kind of render pass we are using and specifies shader complexity and rendering technique.
-The `cmd` argument refers to a valid [CommandList](#work-submission)
+The `cmd` argument refers to a valid [CommandList](#work-submission).
 The `flags` argument can contain various modifiers that determine what kind of objects to render, or what kind of other properties to take into account:
 
 - `DRAWSCENE_OPAQUE`: Opaque object will be rendered
 - `DRAWSCENE_TRANSPARENT`: Transparent objects will be rendered. Objects will be sorted back-to front, for blending purposes
 - `DRAWSCENE_OCCLUSIONCULLING`: Occluded objects won't be rendered. [Occlusion culling](#occlusion-culling) can be globally switched on/off using `wi::renderer::SetOcclusionCullingEnabled()`
 - `DRAWSCENE_TESSELLATION`: Enable [tessellation](#tessellation) (if hardware supports it). [Tessellation](#tessellation) can be globally switched on/off using `wi::renderer::SetTessellationEnabled()`
-- `DRAWSCENE_HAIRPARTICLE`: Draw hair particles
+- `DRAWSCENE_HAIRPARTICLE`: Allow drawing hair particles
+- `DRAWSCENE_IMPOSTOR` : Allow drawing impostors
+- `DRAWSCENE_OCEAN` : Allow drawing the ocean
+- `DRAWSCENE_SKIP_PLANAR_REFLECTION_OBJECTS` : Don't draw the objects which are rendering planar reflections. This is to avoid rendering the reflector object itself into the planar reflections, which could produce fully occluded reflections.
 
 #### Tessellation
 Tessellation can be used when rendering objects. Tessellation requires a GPU hardware feature and can enable displacement mapping on vertices or smoothing mesh silhouettes dynamically while rendering objects. Tessellation will be used when `tessellation` parameter to the [DrawScene](#drawscene) was set to `true` and the GPU supports the tessellation feature. Tessellation level can be specified per [MeshComponent](#meshcomponent)'s `tessellationFactor` parameter. Tessellation level will be modulated by distance from camera, so that tessellation factor will fade out on more distant objects. Greater tessellation factor means more detailed geometry will be generated.
@@ -743,20 +976,33 @@ This function prepares the scene for rendering. It must be called once every fra
 Begin rendering the frame on GPU. This means that GPU compute jobs are kicked, such as particle simulations, texture packing, mipmap generation tasks that were queued up, updating per frame GPU buffer data, animation vertex skinning and other things.
 
 #### Ray tracing (hardware accelerated)
-
-Hardware accelerated ray tracing API is now available, so a variety of renderer features are available using that. If the hardware support is available, the `Scene` will allocate a top level acceleration structure, and the meshes will allocate bottom level acceleration structures for themselves. Updating these is done by simply calling `wi::renderer::UpdateRaytracingAccelerationStructures(cmd)`. The updates will happen on the GPU timeline, so provide a [CommandList](#work-submission) as argument. The top level acceleration structure will be rebuilt from scratch. The bottom level acceleration structures will be rebuilt from scratch once, and then they will be updated (refitted).
+Hardware accelerated ray tracing API is available, so a variety of renderer features are available using that. If the hardware support is available, the `Scene` will allocate a top level acceleration structure, and the meshes will allocate bottom level acceleration structures for themselves if it's requested by some effect. Requesting is possible by using `wi::scene::Scene::SetAccelerationStructureUpdateRequested(true)`. Updating acceleration structures is done by calling `wi::renderer::UpdateRaytracingAccelerationStructures(cmd)`, which can be called on the async compute or graphics queue. The updates will happen on the GPU timeline, so provide a [CommandList](#work-submission) as argument. The top level acceleration structure will be rebuilt from scratch. The bottom level acceleration structures will be rebuilt from scratch once, and then they will be updated (refitted).
 
 After the acceleration structures are updated, ray tracing shaders can use it after binding to a shader resource slot.
 
-#### Ray tracing (legacy)
-Ray tracing can be used in multiple ways to render the scene. The `RayTraceScene()` function will render the scene with the rays that are provided as the `RayBuffers` type argument. For example, to render the scene from the camera perspective, first create rays that originate from the camera and shoot towards the caera far plane for every pixel. The `GenerateScreenRayBuffers()` helper function implements this functionality, by expecting a [CameraComponent](#cameracomponent) argument and returns a `RayBuffers` structure. The result will be written to a texture that is provided as parameter. The texture must have been created with `UNORDERED_ACCESS` bind flags, because it will be written in compute shaders. The scene BVH structure must have been already built to use this, it can be accomplished by calling [wi::renderer::BuildSceneBVH()](#build-scene-bvh). The [RenderPath3D_Pathracing](#renderpath3d_pathtracing) uses this ray tracing functionality to render a path traced scene.
+#### Ray tracing (compute)
+If hardware accelerated ray tracing is not available, certain effects will fall back to software ray tracing implementation using compute resources. The following effects support software ray tracing implementation:
+- path tracing
+- lightmap baking
+- DDGI
+- Surfel GI
+The following do not support software ray tracing at the moment for practical reason (because it would be too slow to be useful in real time):
+- ray traced shadows
+- ray traced ambient occlusion
+- ray traced reflections
+- ray traced diffuse
 
-Other than path tracing, the scene BVH can be rendered by using the `RayTraceSceneBVH` function. This will render the bounding box hierarchy to the screen as a heatmap. Blue colors mean that few boxes were hit per pixel, and with more bounding box hits the colors go to green, yellow, red, and finaly white. This is useful to determine how expensive a the scene is with regards to ray tracing performance.
+#### Path tracing
+The `wi::renderer::RayTraceScene()` function will render the scene with path tracing from the camera view that was bound using `wi::renderer::BindCameraCB()` for the current `CommandList`. The result will be written to a texture that is provided as parameter. You also provide the sample index parameter, since path tracing will render only 1 sample in this call, but for sample index greater than 0, it will blend results into previous result texture. The texture must have been created with `UNORDERED_ACCESS` bind flags, because it will be written in compute shaders. The scene BVH structure must have been already built to use this, it can be accomplished by calling `wi::renderer::UpdateRaytracingAccelerationStructures()`. The [RenderPath3D_Pathracing](#renderpath3d_pathtracing) uses this ray tracing functionality to render a path traced scene.
+The `RayTraceScene()` also have optional texture parameters that can be filled to aid when using denoiser, or compositing with rasterized effects. For further details, check the [RenderPath3D_Pathracing](#renderpath3d_pathtracing) implementation.
 
-The lightmap baking is also using ray tracing on the GPU to precompute static lighting for objects in the scene. [Objects](#objectcomponent) that contain lightmap atlas texture coordinate set can start lightmap rendering by setting `ObjectComponent::SetLightmapRenderRequest(true)`. Every object that have this flag set will have their lightmaps updated by performing ray traced rendering by the [wi::renderer](#wi::renderer) internally. Lightmap texture coordinates can be generated by a separate tool, such as the Wicked Engine Editor application. Lightmaps will be rendered to a global lightmap atlas that can be used by all shaders to read static lighting data. The global lightmap atlas texture contains lightmaps from all objects inside the scene in a compact format for performance. Apart from that, each object contains its own lightmap in a full precision texture format that can be post-processed and saved to disc for later use. To denoise lightmaps, follow the same steps as the path tracer denoiser setup described in the [Denoiser](#denoiser) section.
+Other than path tracing, the scene BVH can be rendered by using the `RayTraceSceneBVH` function. This will render the bounding box hierarchy to the screen as a heatmap. Blue colors mean that few boxes were hit per pixel, and with more bounding box hits the colors go to green, yellow, red, and finally white. This is useful to determine how expensive the scene is with regards to ray tracing performance.
+
+#### Lightmap baking
+The lightmap baking is also using ray tracing on the GPU to precompute static lighting for objects in the scene. [Objects](#objectcomponent) that contain lightmap atlas texture coordinate set can start lightmap rendering by setting `ObjectComponent::SetLightmapRenderRequest(true)`. Every object that have this flag set will have their lightmaps updated by performing ray traced rendering by the [wi::renderer](#wi::renderer) internally every frame. Every frame only renders 1 sample, so results will be updated in real time, and you will see how the result accumulates over time. You can stop accumulation whenever you feel it converged enough. Lightmap texture coordinates can be generated by a separate tool, such as the Wicked Engine Editor application. The lightmaps can be optionally compressed in BC6H format to save memory and improve performance. The compression will be performed only after lightmap rendering is stopped, so the compression will not interfere with lightmap accumulation. If you are using a denoiser, it will be performed after lightmap baking is stopped. To denoise lightmaps, follow the same steps as the path tracer denoiser setup described in the [Denoiser](#denoiser) section.
 
 #### Scene BVH
-The scene BVH can be rebuilt from scratch using the `wi::renderer::BuildSceneBVH()` function. This will use the global scene to build the BVH hierarchy and global material atlases. The [ray tracing](#ray-tracing) features require the scene BVH to be built before using them. This is using the [wiGPUBVH](#wigpubvh) facility to build the BVH using compute shaders running on the GPU. 
+The scene BVH can be rebuilt from scratch using the `wi::renderer::UpdateRaytracingAccelerationStructures()` function. The [ray tracing](#ray-tracing) features require the scene BVH to be built before using them. This is using the [wiGPUBVH](#wigpubvh) facility to build the BVH using compute shaders running on the GPU when hardware ray tracing is not available. Otherwise it uses ray tracing acceleration structure API objects. 
 
 #### Decals
 The [DecalComponents](#decalcomponent) in the scene can be rendered differently based on the rendering technique that is being used. The two main rendering techinques are forward and deferred rendering. 
@@ -773,7 +1019,7 @@ The probes also must have [TransformComponent](#transformcomponent) associated t
 #### Post processing
 There are several post processing effects implemented in the `wi::renderer`. They are all implemented in a single function with their name starting with Postprocess_, like for example: `wi::renderer::Postprocess_SSAO()`. They are aimed to be stateless functions, with their function signature clearly indicating input-output parameters and resources.
 
-The chain/order of post processes is not implemented here, only the single effects themselves. The order of post proceses is more of a user responsibility, so it should be implemented in the [High Ievel Interface](#high-level-interface). For reference, a default post processchain is implemented in [RenderPath3D::RenderPostProcessChain()](#renderpath3d) function.
+The chain/order of post processes is not implemented here, only the single effects themselves. The order of post processes is more of a user responsibility, so it should be implemented in the [High Level Interface](#high-level-interface). For reference, a default post-process chain is implemented in [RenderPath3D::RenderPostProcessChain()](#renderpath3d) function.
 
 #### Instancing
 Instanced rendering will be always used automatically when rendering objects. This means, that [ObjectComponents](#objectcomponent) that share the same [mesh](#meshcomponent) will be batched together into a single draw call, even if they have different transformations, colors, or dithering parameters. This can greatly reduce CPU overhead when lots of objects are duplicated (for example trees, rocks, props).
@@ -783,7 +1029,7 @@ Instanced rendering will be always used automatically when rendering objects. Th
 <i>Tip: to find out more about how instancing is used to batch objects together, take a look at the `RenderMeshes()` function inside [wi::renderer.cpp](../WickedEngine/wi::renderer.cpp)</i>
 
 #### Stencil
-If a depth stencil buffer is bound when using [DrawScene()](#drawscene), or [DrawScene_Transparent()](#drawscene_transparent), the stencil buffer will be written. The stencil is a 8-bit mask that can be used to achieve different kinds of screen space effects for different objects. [MaterialComponents](#materialcomponent) and [ObjectComponents](#objectcomponent) have the ability to set the stencil value that will be rendered. The 8-bit stencil value is separated into two parts:
+If a depth stencil buffer is bound when using [DrawScene()](#drawscene), the stencil buffer will be written. The stencil is a 8-bit mask that can be used to achieve different kinds of screen space effects for different objects. [MaterialComponents](#materialcomponent) and [ObjectComponents](#objectcomponent) have the ability to set the stencil value that will be rendered. The 8-bit stencil value is separated into two parts:
 - The first 4 bits are reseved for engine-specific values, such as to separate skin, sky, common materials from each other. these values are contained in [wiEnums](#wienums) in the `STENCILREF` enum.
 - The last 4 bits are reserved for user stencil values. The application can decide what it wants to use these for.
 
@@ -820,7 +1066,11 @@ Configuring other debug rendering functionality:
 #### Custom Shaders
 Apart from the built in material shaders, the developer can create a library of custom shaders from the application side and assign them to materials. The `wi::renderer::RegisterCustomShader()` function is used to register a custom shader from the application. The function returns the ID of the custom shader that can be input to the `MaterialComponent::SetCustomShaderID()` function. 
 
-The custom shader is essentially the combination of a [Pipeline State Object](#pipeline-states-and-shaders) for each `RENDERPASS` and a `RENDERTYPE` flag that specifies whether it is to be drawn in a transparent or opaque, or other kind of pass within a `RENDERPASS`. The developer is responsible of creating a fully valid pipeline state to render a mesh. If a pipeline state is left as empty for a combination of `RENDERPASS` and `RENDERTYPE`, then the material will simply be skipped and not rendered.
+The `CustomShader` is essentially the combination of a [Pipeline State Object](#pipeline-states-and-shaders) for each `RENDERPASS` that specifies whether it is to be drawn in a transparent or opaque, or other kind of pass within a `RENDERPASS`. The developer is responsible of creating a fully valid pipeline state to render a mesh. If a pipeline state is left as empty for a combination of `RENDERPASS`, then the material will simply be skipped and not rendered in that pass. The other part of `CustomShader` is a name, that can be used as simple identifier for the user, and a `filterMask` that will be used to indicate what kind of material this is to multiple systems. You can set the `filterMask` to any combination of `wi::enums::FILTER` for your purposes, but you have to include `FILTER_OPAQUE` or `FILTER_TRANSPARENT` to indicate if this is going to be rendered in opaque or transparent passes (or both).
+
+The `MaterialComponent::userdata` can also be used to provide a small amount of custom material data that will be available to shaders. You can access that in shaders from `ShaderMaterial::userdata`. If the built in user data is not enough for your purposes, you can create additional `GPUBuffer` objects and send descriptor indices in user data to access extended user data indirectly.
+
+To look at an example, take a look at the built in Hologram custom shader and see how exactly to create a valid pipeline state, shader, etc.
 
 
 ### Enums
@@ -831,8 +1081,8 @@ This is a collection of enum values used by the wi::renderer to identify graphic
 enum CBTYPE
 {
 	CBTYPE_MESH, // = 0
-	CBTYPE_APPLESANDORANGES, // = 1
-	CBTYPE_TAKEITEASY, // = 2
+	CBTYPE_SOMETHING_ELSE, // = 1
+	CBTYPE_AN_OTHER_THING, // = 2
 	CBTYPE_COUNT // = 3
 };
 GPUBuffer buffers[CBTYPE_COUNT]; // this example array contains 3 elements
@@ -846,7 +1096,7 @@ This is widely used to make code straight forward and easy to add new objects, w
 [[Header]](../../WickedEngine/wiImage.h) [[Cpp]](../../WickedEngine/wiImage.cpp)
 This can render images to the screen in a simple manner. You can draw an image like this:
 ```cpp
-wi::image::SetCanvas(canvas, cmd); // setting the canvas area is required to set the drawing area and perform DPI scaling (the canvas will remain for the duration of the command list)
+wi::image::SetCanvas(canvas); // setting the canvas area is required to set the drawing area and perform DPI scaling (this is only for the current thread)
 wi::image::Draw(myTexture, wiImageParams(10, 20, 256, 128), cmd);
 ```
 The example will draw a 2D texture image to the position (10, 20), with a size of 256 x 128 pixels to the current render pass. There are a lot of other parameters to customize the rendered image, for more information see wiImageParams structure.
@@ -857,7 +1107,7 @@ Describe all parameters of how and where to draw the image on the screen.
 [[Header]](../../WickedEngine/wiFont.h) [[Cpp]](../../WickedEngine/wiFont.cpp)
 This can render fonts to the screen in a simple manner. You can render a font as simple as this:
 ```cpp
-wi::font::SetCanvas(canvas, cmd); // setting the canvas area is required to set the drawing area and perform DPI scaling (the canvas will remain for the duration of the command list)
+wi::font::SetCanvas(canvas); // setting the canvas area is required to set the drawing area and perform DPI scaling (this is only for the current thread)
 wi::font::Draw("write this!", wiFontParams(10, 20), cmd);
 ```
 Which will write the text <i>write this!</i> to 10, 20 pixel position onto the screen. There are many other parameters to describe the font's position, size, color, etc. See the wiFontParams structure for more details.
@@ -923,7 +1173,7 @@ A simple clickable button. Supports the OnClick event callback.
 A simple static text field.
 
 #### TextInputField
-Supports text input when activated. Pressing Enter will accept the input and fire the OnInputAccepted callback. Pressing the Escape key while active will cancel the text input and restoe the previous state. There can be only one active text input field at a time.
+Supports text input when activated. Pressing Enter will accept the input and fire the OnInputAccepted callback. Pressing the Escape key while active will cancel the text input and restore the previous state. There can be only one active text input field at a time.
 
 #### Slider
 A slider, that can represent float or integer values. The slider also accepts text input to input number values. If the number input is outside of the slider's range, it will expand its range to support the newly assigned value. Upon changing the slider value, whether by text input or sliding, the OnSlide event callback will be fired.
@@ -1027,6 +1277,32 @@ This is to store the startup parameters that were passed to the application from
 [[Header]](../../WickedEngine/wiTimer.h) [[Cpp]](../../WickedEngine/wiTimer.cpp)
 High resolution stopwatch timer
 
+### wiVoxelGrid
+[[Header]](../../WickedEngine/wiVoxelGrid.h) [[Cpp]](../../WickedEngine/wiVoxelGrid.cpp)
+An axis aligned bounding box volume that contains a 3D grid of voxels. It can be used to voxelize the scene, and used by [PathQuery](#wipathquery) for path finding.
+
+The voxel grid is created with the `init()` function, providing the dimensions of the 3D grid. This function will allocate the necessary memory to store the grid, and fill every voxel to empty. To simply clear the grid, use `cleardata()` function, which will not allocate memory, only clear all voxels to empty.
+
+The volume of the grid is specified by the `center` and `voxelSize` members. To set the `voxelSize`, use the `set_voxelsize()` function instead of directly modifying the `voxelSize`. You can also align it easily to an existing AABB with the `from_aabb()` function. Setting these doesn't modify voxel data, so it probably needs to be revoxelized after modifications.
+
+The main feature is that you can inject primitives into the voxel grid, this is the voxelization process. You can inject triangles, AABB, Sphere and Capsule primitives with the `inject_triangle()`, `inject_aabb()`, `inject_sphere()` and the `inject_capsule()` functions, respectively. All the primitives are input to these functions in world space, and they will be mapped into the voxel grid internally by these functions based on the grid center, voxelSize and resolution. These functions can also accept a bool option called `subtract` which - if set to `true` - will modify the voxelization process to remove voxels intead of add them. The voxelization process is performance sensitive, but it can be done from different threads as it is thread safe, using atomic operations to modify voxel data.
+
+To access individual voxels, you can use the `check_voxel()` function to check if a voxel is empty or validm and the `set_voxel()` function to set a voxel to empty or valid. These operations are not thread safe! Also these functions will both accept world position, or voxel coordinates. You can additionally convert world positions to voxel coordinates by using the `world_to_coord()` function, or do the reverse with the `coord_to_world()` function.
+
+Note: There are helper functions to voxelize a whole object or the whole scene, accessible from the [Scene](#scene) object. These are called `VoxelizeObject()` and `VoxelizeScene()`.
+
+### wiPathQuery
+[[Header]](../../WickedEngine/wiPathQuery.h) [[Cpp]](../../WickedEngine/wiPathQuery.cpp)
+Path query can find paths from start to goal position within a voxel grid. To run a path finding query, first prepare a [voxel grid](#wivoxelgrid) with scene data, then process it with the path query.
+
+The usage of the path query at minimum is to call the `process()` function, with start and goal positions and a [voxel grid](#wivoxelgrid). When the function returns, you can check path finding success with the `is_successful()` function, and `get_next_waypoint()` function to find the next waypoint in the path from the start that goes towards the goal.
+
+The path query can be additionally configured with the `flying` bool param. If you set `flying` to `true`, then the path finding will search a path in empty voxels (in the air), otherwise by default it will try to find a path that goes on the ground.
+
+The traversing entity can have a logical size, configured by the `agent_height` and `agent_width` parameters, that specify the approximate size of traversing entity in voxels. `agent_height` will specify how many empty voxels must be above the traversed path at any waypoint. `agent_width` specifies how many empty voxels must be in the horizontal directions. With these you can specify how far the path should keep away from walls and obstacles, and also to not allow going in between tight openings that the logical size would not allow.
+
+Note: processing a path query can take a long time, depending on how far the goal is from the start. Consider doing multiple path queries on multiple threads, or doing them asynchronously across the frame, the [Job System](#job-system) can be used to track completion of asynchronous tasks like this.
+
 
 ## Input
 [[Header]](../../WickedEngine/wiInput.h) [[Cpp]](../../WickedEngine/wiInput.cpp)
@@ -1104,7 +1380,7 @@ The namespace that is a collection of audio related functionality.
 ### Sound
 Represents a sound file in memory. Load a sound file via wiAudio interface.
 ### SoundInstance
-An instance of a sound file that can be played and controlled in various ways through the wiAudio interface.
+An instance of a sound file that can be played and controlled in various ways through the wiAudio interface. (To ensure looped playback of its `Sound`, `SoundInstance::SetLooped(true)` must be called _before_ `audio::CreateSoundInstance`, subsequent SetLooped calls have no effect even if occurring before calling `Play`.)
 ### SoundInstance3D
 This structure describes a relation between listener and sound emitter in 3D space. Used together with a SoundInstance in wiAudio::Update3D() function
 ### SUBMIX_TYPE
@@ -1179,9 +1455,6 @@ The [ObjectComponent](#objectcomponent)'s transform matrix is used as a manipula
 
 The pinned vertices can also be manipulated via <b>skinning animation</b>. If the soft body mesh is skinned and an animation is playing, then the pinned vertices will follow the animation.
 
-<b>Deactivation</b> happens after a while for soft bodies that participated in the simulation for a while, this means after that they will no longer participate in the simulation. This behaviour can be disabled with the `SoftBodyPhysicsComponent::DISABLE_DEACTIVATION` flag.
-
-<b>Resetting</b> a soft body can be accomplished by setting the `SoftBodyPhysicsComponent::FORCE_RESET` flag. This means that the next physics update will reset the soft body mesh to the initial pose.
 
 
 
@@ -1271,18 +1544,25 @@ The interop between shaders and C++ code is handled by shared header (.h) files.
 
 [[Header]](../../WickedEngine/shaders/ShaderInterop.h)
 Shader Interop is used for declaring shared structures or values between C++ Engine code and shader code. There are several ShaderInterop files, postfixed by the subsystem they are used for to keep them minimal and more readable: <br/>
-[ShaderInterop_BVH.h](../WickedEngine/ShaderInterop_BVH.h) <br/>
-[ShaderInterop_EmittedParticle.h](../WickedEngine/ShaderInterop_EmittedParticle.h) <br/>
-[ShaderInterop_FFTGenerator.h](../WickedEngine/ShaderInterop_FFTGenerator.h) <br/>
-[ShaderInterop_Font.h](../WickedEngine/ShaderInterop_Font.h) <br/>
-[ShaderInterop_GPUSortLib.h](../WickedEngine/ShaderInterop_GPUSortLib.h) <br/>
-[ShaderInterop_HairParticle.h](../WickedEngine/ShaderInterop_HairParticle.h) <br/>
-[ShaderInterop_Image.h](../WickedEngine/ShaderInterop_Image.h) <br/>
-[ShaderInterop_Ocean.h](../WickedEngine/ShaderInterop_Ocean.h) <br/>
-[ShaderInterop_Postprocess.h](../WickedEngine/ShaderInterop_Postprocess.h) <br/>
-[ShaderInterop_Raytracing.h](../WickedEngine/ShaderInterop_Raytracing.h) <br/>
-[ShaderInterop_Renderer.h](../WickedEngine/ShaderInterop_Renderer.h) <br/>
-[ShaderInterop_Skinning.h](../WickedEngine/ShaderInterop_Skinning.h) <br/>
+[ShaderInterop_BVH.h](../../WickedEngine/shaders/ShaderInterop_BVH.h) <br/>
+[ShaderInterop_DDGI.h](../../WickedEngine/shaders/ShaderInterop_DDGI.h) <br/>
+[ShaderInterop_EmittedParticle.h](../../WickedEngine/shaders/ShaderInterop_EmittedParticle.h) <br/>
+[ShaderInterop_FFTGenerator.h](../../WickedEngine/shaders/ShaderInterop_FFTGenerator.h) <br/>
+[ShaderInterop_Font.h](../../WickedEngine/shaders/ShaderInterop_Font.h) <br/>
+[ShaderInterop_FSR2.h](../../WickedEngine/shaders/ShaderInterop_FSR2.h) <br/>
+[ShaderInterop_GPUSortLib.h](../../WickedEngine/shaders/ShaderInterop_GPUSortLib.h) <br/>
+[ShaderInterop_HairParticle.h](../../WickedEngine/shaders/ShaderInterop_HairParticle.h) <br/>
+[ShaderInterop_Image.h](../../WickedEngine/shaders/ShaderInterop_Image.h) <br/>
+[ShaderInterop_Ocean.h](../../WickedEngine/shaders/ShaderInterop_Ocean.h) <br/>
+[ShaderInterop_Postprocess.h](../../WickedEngine/shaders/ShaderInterop_Postprocess.h) <br/>
+[ShaderInterop_Raytracing.h](../../WickedEngine/shaders/ShaderInterop_Raytracing.h) <br/>
+[ShaderInterop_Renderer.h](../../WickedEngine/shaders/ShaderInterop_Renderer.h) <br/>
+[ShaderInterop_SurfelGI.h](../../WickedEngine/shaders/ShaderInterop_SurfelGI.h) <br/>
+[ShaderInterop_Terrain.h](../../WickedEngine/shaders/ShaderInterop_Terrain.h) <br/>
+[ShaderInterop_VoxelGrid.h](../../WickedEngine/shaders/ShaderInterop_VoxelGrid.h) <br/>
+[ShaderInterop_VXGI.h](../../WickedEngine/shaders/ShaderInterop_VXGI.h) <br/>
+[ShaderInterop_Weather.h](../../WickedEngine/shaders/ShaderInterop_Weather.h) <br/>
+
 The ShaderInterop also contains the resource macros to help share code between C++ and HLSL, and portability between shader compilers. Read more about macros in the [Shaders section](#shaders)
 
 ### Shader Compiler

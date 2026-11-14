@@ -47,7 +47,6 @@
 #include "wiEnums.h"
 #include "wiInitializer.h"
 #include "wiLua.h"
-#include "wiLuna.h"
 #include "wiGraphics.h"
 #include "wiGraphicsDevice.h"
 #include "wiGUI.h"
@@ -71,15 +70,28 @@
 #include "wiNoise.h"
 #include "wiConfig.h"
 #include "wiTerrain.h"
+#include "wiLocalization.h"
+#include "wiVideo.h"
+#include "wiVoxelGrid.h"
+#include "wiPathQuery.h"
+#include "wiTrailRenderer.h"
+#include "wiGaussianSplatModel.h"
 
-#ifdef _WIN32
-#ifdef PLATFORM_UWP
-#pragma comment(lib,"WickedEngine_UWP.lib")
-#else
+#ifndef WICKED_CMAKE_BUILD
+
+#ifdef PLATFORM_WINDOWS_DESKTOP
 #pragma comment(lib,"WickedEngine_Windows.lib")
-#endif // PLATFORM_UWP
-#endif // _WIN32
+#endif // PLATFORM_WINDOWS_DESKTOP
 
+#ifdef PLATFORM_XBOX
+#pragma comment(lib,"WickedEngine_XBOX.lib")
+#endif // PLATFORM_XBOX
+
+#ifdef PLATFORM_PS5
+#pragma comment(lib,"WickedEngine_PS5.a")
+#endif // PLATFORM_PS5
+
+#endif // WICKED_CMAKE_BUILD
 
 // After version 0.59.11, namespaces were refactored into nested namespaces under the wi:: root namespace.
 // To allow compatibility with older user code, the backwards compatibility definitions are included below.

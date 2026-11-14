@@ -4,31 +4,51 @@
 #include <iomanip>
 #include <mutex>
 #include <string>
+#include <cstdlib>
+
+class nullbuf_t : public std::streambuf
+{
+protected:
+	virtual int_type overflow(int_type ch) override
+	{
+		return traits_type::not_eof(ch);
+	}
+} nullbuf;
 
 std::mutex locker;
 struct ShaderEntry
 {
 	std::string name;
 	wi::graphics::ShaderStage stage = wi::graphics::ShaderStage::Count;
-	wi::graphics::ShaderModel minshadermodel = wi::graphics::ShaderModel::SM_5_0;
+	wi::graphics::ShaderModel minshadermodel = wi::graphics::ShaderModel::SM_6_0;
 	struct Permutation
 	{
 		wi::vector<std::string> defines;
+		Permutation() = default;
+		Permutation(std::initializer_list<std::string> init)
+		{
+			for (auto& x : init)
+			{
+				defines.push_back(x);
+			}
+		}
 	};
 	wi::vector<Permutation> permutations;
+	std::string entrypoint = "main";
 };
 wi::vector<ShaderEntry> shaders = {
 	{"hairparticle_simulateCS", wi::graphics::ShaderStage::CS},
-	{"hairparticle_finishUpdateCS", wi::graphics::ShaderStage::CS},
 	{"emittedparticle_simulateCS", wi::graphics::ShaderStage::CS},
 	{"generateMIPChainCubeCS_float4", wi::graphics::ShaderStage::CS},
-	{"generateMIPChainCubeCS_unorm4", wi::graphics::ShaderStage::CS},
 	{"generateMIPChainCubeArrayCS_float4", wi::graphics::ShaderStage::CS},
-	{"generateMIPChainCubeArrayCS_unorm4", wi::graphics::ShaderStage::CS},
 	{"generateMIPChain3DCS_float4", wi::graphics::ShaderStage::CS},
-	{"generateMIPChain3DCS_unorm4", wi::graphics::ShaderStage::CS},
 	{"generateMIPChain2DCS_float4", wi::graphics::ShaderStage::CS},
-	{"generateMIPChain2DCS_unorm4", wi::graphics::ShaderStage::CS},
+	{"blockcompressCS_BC1", wi::graphics::ShaderStage::CS},
+	{"blockcompressCS_BC3", wi::graphics::ShaderStage::CS},
+	{"blockcompressCS_BC4", wi::graphics::ShaderStage::CS},
+	{"blockcompressCS_BC5", wi::graphics::ShaderStage::CS},
+	{"blockcompressCS_BC6H", wi::graphics::ShaderStage::CS},
+	{"blockcompressCS_BC6H_cubemap", wi::graphics::ShaderStage::CS},
 	{"blur_gaussian_float4CS", wi::graphics::ShaderStage::CS},
 	{"bloomseparateCS", wi::graphics::ShaderStage::CS},
 	{"depthoffield_mainCS", wi::graphics::ShaderStage::CS},
@@ -37,36 +57,49 @@ wi::vector<ShaderEntry> shaders = {
 	{"depthoffield_upsampleCS", wi::graphics::ShaderStage::CS},
 	{"depthoffield_tileMaxCOC_verticalCS", wi::graphics::ShaderStage::CS},
 	{"depthoffield_tileMaxCOC_horizontalCS", wi::graphics::ShaderStage::CS},
-	{"voxelRadianceSecondaryBounceCS", wi::graphics::ShaderStage::CS},
-	{"voxelSceneCopyClearCS", wi::graphics::ShaderStage::CS},
-	{"voxelClearOnlyNormalCS", wi::graphics::ShaderStage::CS},
+	{"vxgi_offsetprevCS", wi::graphics::ShaderStage::CS},
+	{"vxgi_temporalCS", wi::graphics::ShaderStage::CS},
+	{"vxgi_sdf_jumpfloodCS", wi::graphics::ShaderStage::CS},
+	{"vxgi_resolve_diffuseCS", wi::graphics::ShaderStage::CS},
+	{"vxgi_resolve_specularCS", wi::graphics::ShaderStage::CS},
 	{"upsample_bilateral_float1CS", wi::graphics::ShaderStage::CS},
 	{"upsample_bilateral_float4CS", wi::graphics::ShaderStage::CS},
-	{"upsample_bilateral_unorm1CS", wi::graphics::ShaderStage::CS},
-	{"upsample_bilateral_unorm4CS", wi::graphics::ShaderStage::CS},
 	{"temporalaaCS", wi::graphics::ShaderStage::CS},
-	{"tileFrustumsCS", wi::graphics::ShaderStage::CS},
 	{"tonemapCS", wi::graphics::ShaderStage::CS},
 	{"underwaterCS", wi::graphics::ShaderStage::CS},
+	{"mesh_blend_prepareCS", wi::graphics::ShaderStage::CS},
+	{"mesh_blend_expandCS", wi::graphics::ShaderStage::CS},
+	{"mesh_blendPS", wi::graphics::ShaderStage::PS},
 	{"fsr_upscalingCS", wi::graphics::ShaderStage::CS},
 	{"fsr_sharpenCS", wi::graphics::ShaderStage::CS},
+	{"ffx-fsr2/ffx_fsr2_autogen_reactive_pass", wi::graphics::ShaderStage::CS},
+	{"ffx-fsr2/ffx_fsr2_compute_luminance_pyramid_pass", wi::graphics::ShaderStage::CS},
+	{"ffx-fsr2/ffx_fsr2_prepare_input_color_pass", wi::graphics::ShaderStage::CS},
+	{"ffx-fsr2/ffx_fsr2_reconstruct_previous_depth_pass", wi::graphics::ShaderStage::CS},
+	{"ffx-fsr2/ffx_fsr2_depth_clip_pass", wi::graphics::ShaderStage::CS},
+	{"ffx-fsr2/ffx_fsr2_lock_pass", wi::graphics::ShaderStage::CS},
+	{"ffx-fsr2/ffx_fsr2_accumulate_pass", wi::graphics::ShaderStage::CS},
+	{"ffx-fsr2/ffx_fsr2_rcas_pass", wi::graphics::ShaderStage::CS},
 	{"ssaoCS", wi::graphics::ShaderStage::CS},
+	{"ssgi_deinterleaveCS", wi::graphics::ShaderStage::CS},
+	{"ssgiCS", wi::graphics::ShaderStage::CS},
+	{"ssgi_upsampleCS", wi::graphics::ShaderStage::CS},
 	{"rtdiffuseCS", wi::graphics::ShaderStage::CS, wi::graphics::ShaderModel::SM_6_5},
 	{"rtdiffuse_spatialCS", wi::graphics::ShaderStage::CS},
 	{"rtdiffuse_temporalCS", wi::graphics::ShaderStage::CS},
-	{"rtdiffuse_bilateralCS", wi::graphics::ShaderStage::CS},
+	{"rtdiffuse_upsampleCS", wi::graphics::ShaderStage::CS},
 	{"rtreflectionCS", wi::graphics::ShaderStage::CS, wi::graphics::ShaderModel::SM_6_5},
 	{"ssr_tileMaxRoughness_horizontalCS", wi::graphics::ShaderStage::CS},
 	{"ssr_tileMaxRoughness_verticalCS", wi::graphics::ShaderStage::CS},
-	{"ssr_kickjobsCS", wi::graphics::ShaderStage::CS},
 	{"ssr_depthHierarchyCS", wi::graphics::ShaderStage::CS},
 	{"ssr_resolveCS", wi::graphics::ShaderStage::CS},
 	{"ssr_temporalCS", wi::graphics::ShaderStage::CS},
-	{"ssr_bilateralCS", wi::graphics::ShaderStage::CS},
+	{"ssr_upsampleCS", wi::graphics::ShaderStage::CS},
 	{"ssr_raytraceCS", wi::graphics::ShaderStage::CS},
 	{"ssr_raytraceCS_cheap", wi::graphics::ShaderStage::CS},
 	{"ssr_raytraceCS_earlyexit", wi::graphics::ShaderStage::CS},
 	{"sharpenCS", wi::graphics::ShaderStage::CS},
+	{"crt_screenCS", wi::graphics::ShaderStage::CS},
 	{"skinningCS", wi::graphics::ShaderStage::CS},
 	{"resolveMSAADepthStencilCS", wi::graphics::ShaderStage::CS},
 	{"raytraceCS", wi::graphics::ShaderStage::CS},
@@ -87,21 +120,19 @@ wi::vector<ShaderEntry> shaders = {
 	{"motionblur_tileMaxVelocity_horizontalCS", wi::graphics::ShaderStage::CS},
 	{"motionblur_tileMaxVelocity_verticalCS", wi::graphics::ShaderStage::CS},
 	{"luminancePass2CS", wi::graphics::ShaderStage::CS},
-	{"motionblur_kickjobsCS", wi::graphics::ShaderStage::CS},
 	{"motionblurCS", wi::graphics::ShaderStage::CS},
 	{"motionblurCS_cheap", wi::graphics::ShaderStage::CS},
 	{"motionblurCS_earlyexit", wi::graphics::ShaderStage::CS},
 	{"luminancePass1CS", wi::graphics::ShaderStage::CS},
 	{"lightShaftsCS", wi::graphics::ShaderStage::CS},
-	{"lightCullingCS_ADVANCED_DEBUG", wi::graphics::ShaderStage::CS},
-	{"lightCullingCS_DEBUG", wi::graphics::ShaderStage::CS},
-	{"lightCullingCS", wi::graphics::ShaderStage::CS},
-	{"lightCullingCS_ADVANCED", wi::graphics::ShaderStage::CS},
 	{"hbaoCS", wi::graphics::ShaderStage::CS},
-	{"gpusortlib_sortInnerCS", wi::graphics::ShaderStage::CS},
-	{"gpusortlib_sortStepCS", wi::graphics::ShaderStage::CS},
-	{"gpusortlib_kickoffSortCS", wi::graphics::ShaderStage::CS},
-	{"gpusortlib_sortCS", wi::graphics::ShaderStage::CS},
+	{"radix_sortCS", wi::graphics::ShaderStage::CS, wi::graphics::ShaderModel::SM_6_0, {{"FPS_COUNT"}}, "FPS_Count"},
+	{"radix_sortCS", wi::graphics::ShaderStage::CS, wi::graphics::ShaderModel::SM_6_0, {{"FPS_COUNT_REDUCE"}}, "FPS_CountReduce"},
+	{"radix_sortCS", wi::graphics::ShaderStage::CS, wi::graphics::ShaderModel::SM_6_0, {{"FPS_SCAN"}}, "FPS_Scan"},
+	{"radix_sortCS", wi::graphics::ShaderStage::CS, wi::graphics::ShaderModel::SM_6_0, {{"FPS_SCAN_ADD"}}, "FPS_ScanAdd"},
+	{"radix_sortCS", wi::graphics::ShaderStage::CS, wi::graphics::ShaderModel::SM_6_0, {{"FPS_SCATTER"}}, "FPS_Scatter"},
+	{"radix_sortCS", wi::graphics::ShaderStage::CS, wi::graphics::ShaderModel::SM_6_0, {{"FPS_SCATTER", "kRS_ValueCopy"}}, "FPS_Scatter"},
+	{"radix_sortCS", wi::graphics::ShaderStage::CS, wi::graphics::ShaderModel::SM_6_0, {{"FPS_INDIRECT"}}, "FPS_SetupIndirectParameters"},
 	{"fxaaCS", wi::graphics::ShaderStage::CS},
 	{"filterEnvMapCS", wi::graphics::ShaderStage::CS},
 	{"fft_512x512_c2c_CS", wi::graphics::ShaderStage::CS},
@@ -120,70 +151,51 @@ wi::vector<ShaderEntry> shaders = {
 	{"emittedparticle_emitCS_volume", wi::graphics::ShaderStage::CS},
 	{"emittedparticle_finishUpdateCS", wi::graphics::ShaderStage::CS},
 	{"downsample4xCS", wi::graphics::ShaderStage::CS},
+	{"lineardepthCS", wi::graphics::ShaderStage::CS},
 	{"depthoffield_prepassCS_earlyexit", wi::graphics::ShaderStage::CS},
 	{"depthoffield_mainCS_cheap", wi::graphics::ShaderStage::CS},
 	{"depthoffield_mainCS_earlyexit", wi::graphics::ShaderStage::CS },
 	{"depthoffield_postfilterCS", wi::graphics::ShaderStage::CS },
-	{"depthoffield_kickjobsCS", wi::graphics::ShaderStage::CS },
 	{"copytexture2D_float4_borderexpandCS", wi::graphics::ShaderStage::CS },
-	{"copytexture2D_unorm4_borderexpandCS", wi::graphics::ShaderStage::CS },
-	{"copytexture2D_unorm4CS", wi::graphics::ShaderStage::CS },
 	{"copytexture2D_float4CS", wi::graphics::ShaderStage::CS },
 	{"chromatic_aberrationCS", wi::graphics::ShaderStage::CS },
 	{"bvh_hierarchyCS", wi::graphics::ShaderStage::CS },
 	{"bvh_primitivesCS", wi::graphics::ShaderStage::CS },
 	{"bvh_propagateaabbCS", wi::graphics::ShaderStage::CS },
-	{"blur_gaussian_wide_unorm1CS", wi::graphics::ShaderStage::CS },
-	{"blur_gaussian_wide_unorm4CS", wi::graphics::ShaderStage::CS },
-	{"blur_gaussian_unorm1CS", wi::graphics::ShaderStage::CS },
-	{"blur_gaussian_unorm4CS", wi::graphics::ShaderStage::CS },
 	{"blur_gaussian_wide_float1CS", wi::graphics::ShaderStage::CS },
-	{"blur_gaussian_wide_float3CS", wi::graphics::ShaderStage::CS },
 	{"blur_gaussian_wide_float4CS", wi::graphics::ShaderStage::CS },
-	{"blur_bilateral_wide_unorm4CS", wi::graphics::ShaderStage::CS },
 	{"blur_gaussian_float1CS", wi::graphics::ShaderStage::CS },
-	{"blur_gaussian_float3CS", wi::graphics::ShaderStage::CS },
-	{"blur_bilateral_unorm4CS", wi::graphics::ShaderStage::CS },
 	{"blur_bilateral_wide_float1CS", wi::graphics::ShaderStage::CS },
-	{"blur_bilateral_wide_float3CS", wi::graphics::ShaderStage::CS },
 	{"blur_bilateral_wide_float4CS", wi::graphics::ShaderStage::CS },
-	{"blur_bilateral_wide_unorm1CS", wi::graphics::ShaderStage::CS },
 	{"blur_bilateral_float1CS", wi::graphics::ShaderStage::CS },
-	{"blur_bilateral_float3CS", wi::graphics::ShaderStage::CS },
 	{"blur_bilateral_float4CS", wi::graphics::ShaderStage::CS },
-	{"blur_bilateral_unorm1CS", wi::graphics::ShaderStage::CS },
-	{"voxelSceneCopyClearCS_TemporalSmoothing", wi::graphics::ShaderStage::CS },
 	{"normalsfromdepthCS", wi::graphics::ShaderStage::CS },
 	{"volumetricCloud_curlnoiseCS", wi::graphics::ShaderStage::CS },
 	{"volumetricCloud_detailnoiseCS", wi::graphics::ShaderStage::CS },
 	{"volumetricCloud_renderCS", wi::graphics::ShaderStage::CS },
 	{"volumetricCloud_renderCS_capture", wi::graphics::ShaderStage::CS },
-	{"volumetricCloud_renderCS_capture_MSAA", wi::graphics::ShaderStage::CS },
 	{"volumetricCloud_reprojectCS", wi::graphics::ShaderStage::CS },
-	{"volumetricCloud_shadow_filterCS", wi::graphics::ShaderStage::CS },
 	{"volumetricCloud_shadow_renderCS", wi::graphics::ShaderStage::CS },
 	{"volumetricCloud_shapenoiseCS", wi::graphics::ShaderStage::CS },
+	{"volumetricCloud_upsamplePS", wi::graphics::ShaderStage::PS },
 	{"volumetricCloud_weathermapCS", wi::graphics::ShaderStage::CS },
 	{"shadingRateClassificationCS", wi::graphics::ShaderStage::CS },
 	{"shadingRateClassificationCS_DEBUG", wi::graphics::ShaderStage::CS },
+	{"aerialPerspectiveCS", wi::graphics::ShaderStage::CS },
+	{"skyAtmosphere_cameraVolumeLutCS", wi::graphics::ShaderStage::CS },
 	{"skyAtmosphere_transmittanceLutCS", wi::graphics::ShaderStage::CS },
 	{"skyAtmosphere_skyViewLutCS", wi::graphics::ShaderStage::CS },
 	{"skyAtmosphere_multiScatteredLuminanceLutCS", wi::graphics::ShaderStage::CS },
 	{"skyAtmosphere_skyLuminanceLutCS", wi::graphics::ShaderStage::CS },
-	{"upsample_bilateral_uint4CS", wi::graphics::ShaderStage::CS },
 	{"screenspaceshadowCS", wi::graphics::ShaderStage::CS },
 	{"rtshadowCS", wi::graphics::ShaderStage::CS, wi::graphics::ShaderModel::SM_6_5 },
 	{"rtshadow_denoise_tileclassificationCS", wi::graphics::ShaderStage::CS },
 	{"rtshadow_denoise_filterCS", wi::graphics::ShaderStage::CS },
 	{"rtshadow_denoise_temporalCS", wi::graphics::ShaderStage::CS },
+	{"rtshadow_upsampleCS", wi::graphics::ShaderStage::CS },
 	{"rtaoCS", wi::graphics::ShaderStage::CS, wi::graphics::ShaderModel::SM_6_5 },
 	{"rtao_denoise_tileclassificationCS", wi::graphics::ShaderStage::CS },
 	{"rtao_denoise_filterCS", wi::graphics::ShaderStage::CS },
-	{"visibility_resolveCS", wi::graphics::ShaderStage::CS },
-	{"visibility_resolveCS_MSAA", wi::graphics::ShaderStage::CS },
-	{"visibility_indirect_prepareCS", wi::graphics::ShaderStage::CS },
-	{"visibility_velocityCS", wi::graphics::ShaderStage::CS },
-	{"visibility_skyCS", wi::graphics::ShaderStage::CS },
 	{"surfel_coverageCS", wi::graphics::ShaderStage::CS },
 	{"surfel_indirectprepareCS", wi::graphics::ShaderStage::CS },
 	{"surfel_updateCS", wi::graphics::ShaderStage::CS },
@@ -192,6 +204,9 @@ wi::vector<ShaderEntry> shaders = {
 	{"surfel_raytraceCS_rtapi", wi::graphics::ShaderStage::CS, wi::graphics::ShaderModel::SM_6_5 },
 	{"surfel_raytraceCS", wi::graphics::ShaderStage::CS },
 	{"surfel_integrateCS", wi::graphics::ShaderStage::CS },
+	{"surfel_denoiseCS", wi::graphics::ShaderStage::CS },
+	{"ddgi_rayallocationCS", wi::graphics::ShaderStage::CS },
+	{"ddgi_indirectprepareCS", wi::graphics::ShaderStage::CS },
 	{"ddgi_raytraceCS", wi::graphics::ShaderStage::CS },
 	{"ddgi_raytraceCS_rtapi", wi::graphics::ShaderStage::CS, wi::graphics::ShaderModel::SM_6_5 },
 	{"ddgi_updateCS", wi::graphics::ShaderStage::CS },
@@ -199,70 +214,65 @@ wi::vector<ShaderEntry> shaders = {
 	{"terrainVirtualTextureUpdateCS", wi::graphics::ShaderStage::CS },
 	{"terrainVirtualTextureUpdateCS_normalmap", wi::graphics::ShaderStage::CS },
 	{"terrainVirtualTextureUpdateCS_surfacemap", wi::graphics::ShaderStage::CS },
+	{"terrainVirtualTextureUpdateCS_emissivemap", wi::graphics::ShaderStage::CS },
 	{"meshlet_prepareCS", wi::graphics::ShaderStage::CS },
 	{"impostor_prepareCS", wi::graphics::ShaderStage::CS },
 	{"virtualTextureTileRequestsCS", wi::graphics::ShaderStage::CS },
 	{"virtualTextureTileAllocateCS", wi::graphics::ShaderStage::CS },
 	{"virtualTextureResidencyUpdateCS", wi::graphics::ShaderStage::CS },
+	{"windCS", wi::graphics::ShaderStage::CS },
+	{"yuv_to_rgbCS", wi::graphics::ShaderStage::CS },
+	{"wetmap_updateCS", wi::graphics::ShaderStage::CS },
+	{"depth_reprojectCS", wi::graphics::ShaderStage::CS },
+	{"depth_pyramidCS", wi::graphics::ShaderStage::CS },
+	{"lightmap_expandCS", wi::graphics::ShaderStage::CS },
+	{"meshlet_debugCS", wi::graphics::ShaderStage::CS },
+	{"gaussian_splatCS", wi::graphics::ShaderStage::CS },
+	{"gaussian_splat_indirectCS", wi::graphics::ShaderStage::CS },
 
 
-	{"emittedparticlePS_soft", wi::graphics::ShaderStage::PS },
 	{"imagePS", wi::graphics::ShaderStage::PS },
+	{"emittedparticlePS_soft", wi::graphics::ShaderStage::PS },
+	{"emittedparticlePS_shadow", wi::graphics::ShaderStage::PS },
 	{"emittedparticlePS_soft_lighting", wi::graphics::ShaderStage::PS },
 	{"oceanSurfacePS", wi::graphics::ShaderStage::PS },
+	{"oceanSurfacePS_envmap", wi::graphics::ShaderStage::PS },
+	{"oceanSurfacePS_shadowmap", wi::graphics::ShaderStage::PS },
 	{"hairparticlePS", wi::graphics::ShaderStage::PS },
+	{"hairparticlePS_simple", wi::graphics::ShaderStage::PS },
+	{"hairparticlePS_prepass", wi::graphics::ShaderStage::PS },
+	{"hairparticlePS_prepass_depthonly", wi::graphics::ShaderStage::PS },
+	{"hairparticlePS_shadow", wi::graphics::ShaderStage::PS },
 	{"volumetricLight_SpotPS", wi::graphics::ShaderStage::PS },
 	{"volumetricLight_PointPS", wi::graphics::ShaderStage::PS },
 	{"volumetricLight_DirectionalPS", wi::graphics::ShaderStage::PS },
-	{"voxelPS", wi::graphics::ShaderStage::PS },
+	{"volumetriclight_rectanglePS", wi::graphics::ShaderStage::PS },
 	{"vertexcolorPS", wi::graphics::ShaderStage::PS },
 	{"upsample_bilateralPS", wi::graphics::ShaderStage::PS },
 	{"sunPS", wi::graphics::ShaderStage::PS },
 	{"skyPS_dynamic", wi::graphics::ShaderStage::PS },
 	{"skyPS_static", wi::graphics::ShaderStage::PS },
 	{"shadowPS_transparent", wi::graphics::ShaderStage::PS },
-	{"shadowPS_water", wi::graphics::ShaderStage::PS },
 	{"shadowPS_alphatest", wi::graphics::ShaderStage::PS },
+	{"paintdecalPS", wi::graphics::ShaderStage::PS },
 	{"renderlightmapPS", wi::graphics::ShaderStage::PS },
 	{"renderlightmapPS_rtapi", wi::graphics::ShaderStage::PS, wi::graphics::ShaderModel::SM_6_5 },
 	{"raytrace_debugbvhPS", wi::graphics::ShaderStage::PS },
 	{"outlinePS", wi::graphics::ShaderStage::PS },
 	{"oceanSurfaceSimplePS", wi::graphics::ShaderStage::PS },
-	{"objectPS_transparent_pom", wi::graphics::ShaderStage::PS },
-	{"objectPS_water", wi::graphics::ShaderStage::PS },
 	{"objectPS_voxelizer", wi::graphics::ShaderStage::PS },
-	{"objectPS_transparent", wi::graphics::ShaderStage::PS },
-	{"objectPS_transparent_planarreflection", wi::graphics::ShaderStage::PS },
-	{"objectPS_planarreflection", wi::graphics::ShaderStage::PS },
-	{"objectPS_pom", wi::graphics::ShaderStage::PS },
-	{"objectPS", wi::graphics::ShaderStage::PS },
 	{"objectPS_hologram", wi::graphics::ShaderStage::PS },
 	{"objectPS_paintradius", wi::graphics::ShaderStage::PS },
-	{"objectPS_simple", wi::graphics::ShaderStage::PS },
-	{"objectPS_debug", wi::graphics::ShaderStage::PS },
 	{"objectPS_prepass", wi::graphics::ShaderStage::PS },
 	{"objectPS_prepass_alphatest", wi::graphics::ShaderStage::PS },
-	{"objectPS_anisotropic", wi::graphics::ShaderStage::PS },
-	{"objectPS_transparent_anisotropic", wi::graphics::ShaderStage::PS },
-	{"objectPS_cloth", wi::graphics::ShaderStage::PS },
-	{"objectPS_transparent_cloth", wi::graphics::ShaderStage::PS },
-	{"objectPS_clearcoat", wi::graphics::ShaderStage::PS },
-	{"objectPS_transparent_clearcoat", wi::graphics::ShaderStage::PS },
-	{"objectPS_cloth_clearcoat", wi::graphics::ShaderStage::PS },
-	{"objectPS_transparent_cloth_clearcoat", wi::graphics::ShaderStage::PS },
-	{"objectPS_cartoon", wi::graphics::ShaderStage::PS },
-	{"objectPS_transparent_cartoon", wi::graphics::ShaderStage::PS },
-	{"objectPS_unlit", wi::graphics::ShaderStage::PS },
-	{"objectPS_transparent_unlit", wi::graphics::ShaderStage::PS },
-	{"lightVisualizerPS", wi::graphics::ShaderStage::PS },
+	{"objectPS_prepass_depthonly_alphatest", wi::graphics::ShaderStage::PS },
+	{"vRectLightPS", wi::graphics::ShaderStage::PS },
 	{"lensFlarePS", wi::graphics::ShaderStage::PS },
 	{"impostorPS", wi::graphics::ShaderStage::PS },
 	{"impostorPS_simple", wi::graphics::ShaderStage::PS },
 	{"impostorPS_prepass", wi::graphics::ShaderStage::PS },
-	{"hairparticlePS_simple", wi::graphics::ShaderStage::PS },
-	{"hairparticlePS_prepass", wi::graphics::ShaderStage::PS },
+	{"impostorPS_prepass_depthonly", wi::graphics::ShaderStage::PS },
 	{"forceFieldVisualizerPS", wi::graphics::ShaderStage::PS },
-	{"fontPS", wi::graphics::ShaderStage::PS },
 	{"envMap_skyPS_static", wi::graphics::ShaderStage::PS },
 	{"envMap_skyPS_dynamic", wi::graphics::ShaderStage::PS },
 	{"envMapPS", wi::graphics::ShaderStage::PS },
@@ -272,79 +282,84 @@ wi::vector<ShaderEntry> shaders = {
 	{"cubeMapPS", wi::graphics::ShaderStage::PS },
 	{"circlePS", wi::graphics::ShaderStage::PS },
 	{"captureImpostorPS", wi::graphics::ShaderStage::PS },
-	{"ddgi_debugPS", wi::graphics::ShaderStage::PS },
+	{"copyDepthPS", wi::graphics::ShaderStage::PS },
+	{"copyStencilBitPS", wi::graphics::ShaderStage::PS },
+	{"extractStencilBitPS", wi::graphics::ShaderStage::PS },
+	{"trailPS", wi::graphics::ShaderStage::PS },
+	{"waveeffectPS", wi::graphics::ShaderStage::PS },
+	{"gaussian_splatPS", wi::graphics::ShaderStage::PS },
+	{"voidPS", wi::graphics::ShaderStage::PS },
 
 
 	{"hairparticleVS", wi::graphics::ShaderStage::VS },
 	{"emittedparticleVS", wi::graphics::ShaderStage::VS },
+	{"emittedparticleVS_shadow", wi::graphics::ShaderStage::VS },
 	{"imageVS", wi::graphics::ShaderStage::VS },
-	{"fontVS", wi::graphics::ShaderStage::VS },
 	{"voxelVS", wi::graphics::ShaderStage::VS },
 	{"vertexcolorVS", wi::graphics::ShaderStage::VS },
 	{"volumetriclight_directionalVS", wi::graphics::ShaderStage::VS },
 	{"volumetriclight_pointVS", wi::graphics::ShaderStage::VS },
 	{"volumetriclight_spotVS", wi::graphics::ShaderStage::VS },
+	{"volumetriclight_rectangleVS", wi::graphics::ShaderStage::VS },
 	{"vSpotLightVS", wi::graphics::ShaderStage::VS },
 	{"vPointLightVS", wi::graphics::ShaderStage::VS },
+	{"vRectLightVS", wi::graphics::ShaderStage::VS },
 	{"sphereVS", wi::graphics::ShaderStage::VS },
 	{"skyVS", wi::graphics::ShaderStage::VS },
-	{"shadowVS_transparent", wi::graphics::ShaderStage::VS },
-	{"shadowVS", wi::graphics::ShaderStage::VS },
-	{"shadowVS_alphatest", wi::graphics::ShaderStage::VS },
 	{"postprocessVS", wi::graphics::ShaderStage::VS },
+	{"paintdecalVS", wi::graphics::ShaderStage::VS },
 	{"renderlightmapVS", wi::graphics::ShaderStage::VS },
 	{"raytrace_screenVS", wi::graphics::ShaderStage::VS },
 	{"oceanSurfaceVS", wi::graphics::ShaderStage::VS },
-	{"objectVS_simple", wi::graphics::ShaderStage::VS },
-	{"objectVS_voxelizer", wi::graphics::ShaderStage::VS },
-	{"objectVS_common", wi::graphics::ShaderStage::VS },
-	{"objectVS_common_tessellation", wi::graphics::ShaderStage::VS },
-	{"objectVS_prepass", wi::graphics::ShaderStage::VS },
-	{"objectVS_prepass_alphatest", wi::graphics::ShaderStage::VS },
-	{"objectVS_prepass_tessellation", wi::graphics::ShaderStage::VS },
-	{"objectVS_prepass_alphatest_tessellation", wi::graphics::ShaderStage::VS },
-	{"objectVS_simple_tessellation", wi::graphics::ShaderStage::VS },
 	{"objectVS_debug", wi::graphics::ShaderStage::VS },
+	{"objectVS_voxelizer", wi::graphics::ShaderStage::VS },
 	{"lensFlareVS", wi::graphics::ShaderStage::VS },
 	{"impostorVS", wi::graphics::ShaderStage::VS },
 	{"forceFieldPointVisualizerVS", wi::graphics::ShaderStage::VS },
 	{"forceFieldPlaneVisualizerVS", wi::graphics::ShaderStage::VS },
 	{"envMap_skyVS", wi::graphics::ShaderStage::VS },
 	{"envMapVS", wi::graphics::ShaderStage::VS },
-	{"envMap_skyVS_emulation", wi::graphics::ShaderStage::VS },
-	{"envMapVS_emulation", wi::graphics::ShaderStage::VS },
-	{"cubeShadowVS", wi::graphics::ShaderStage::VS },
-	{"cubeShadowVS_alphatest", wi::graphics::ShaderStage::VS },
-	{"cubeShadowVS_emulation", wi::graphics::ShaderStage::VS },
-	{"cubeShadowVS_alphatest_emulation", wi::graphics::ShaderStage::VS },
-	{"cubeShadowVS_transparent", wi::graphics::ShaderStage::VS },
-	{"cubeShadowVS_transparent_emulation", wi::graphics::ShaderStage::VS },
 	{"occludeeVS", wi::graphics::ShaderStage::VS },
 	{"ddgi_debugVS", wi::graphics::ShaderStage::VS },
-
-
-	{"envMap_skyGS_emulation", wi::graphics::ShaderStage::GS },
-	{"envMapGS_emulation", wi::graphics::ShaderStage::GS },
-	{"cubeShadowGS_emulation", wi::graphics::ShaderStage::GS },
-	{"cubeShadowGS_alphatest_emulation", wi::graphics::ShaderStage::GS },
-	{"cubeShadowGS_transparent_emulation", wi::graphics::ShaderStage::GS },
 	{"voxelGS", wi::graphics::ShaderStage::GS },
 	{"objectGS_voxelizer", wi::graphics::ShaderStage::GS },
+	{"objectVS_simple", wi::graphics::ShaderStage::VS },
+	{"objectVS_common", wi::graphics::ShaderStage::VS },
+	{"objectVS_common_tessellation", wi::graphics::ShaderStage::VS },
+	{"objectVS_prepass", wi::graphics::ShaderStage::VS },
+	{"objectVS_prepass_alphatest", wi::graphics::ShaderStage::VS },
+	{"objectVS_prepass_tessellation", wi::graphics::ShaderStage::VS },
+	{"objectVS_simple_tessellation", wi::graphics::ShaderStage::VS },
+	{"shadowVS", wi::graphics::ShaderStage::VS },
+	{"shadowVS_alphatest", wi::graphics::ShaderStage::VS },
+	{"shadowVS_transparent", wi::graphics::ShaderStage::VS },
+	{"screenVS", wi::graphics::ShaderStage::VS },
+	{"voxelgridVS", wi::graphics::ShaderStage::VS },
+	{"trailVS", wi::graphics::ShaderStage::VS },
+	{"gaussian_splatVS", wi::graphics::ShaderStage::VS },
+
 
 
 	{"objectDS", wi::graphics::ShaderStage::DS },
 	{"objectDS_prepass", wi::graphics::ShaderStage::DS },
-	{"objectDS_prepass_alphatest", wi::graphics::ShaderStage::DS },
 	{"objectDS_simple", wi::graphics::ShaderStage::DS },
 
 
 	{"objectHS", wi::graphics::ShaderStage::HS },
 	{"objectHS_prepass", wi::graphics::ShaderStage::HS },
-	{"objectHS_prepass_alphatest", wi::graphics::ShaderStage::HS },
 	{"objectHS_simple", wi::graphics::ShaderStage::HS },
 
-
 	{"emittedparticleMS", wi::graphics::ShaderStage::MS },
+
+	{"objectMS", wi::graphics::ShaderStage::MS },
+	{"objectMS_prepass", wi::graphics::ShaderStage::MS },
+	{"objectMS_prepass_alphatest", wi::graphics::ShaderStage::MS },
+	{"objectMS_simple", wi::graphics::ShaderStage::MS },
+	{"shadowMS", wi::graphics::ShaderStage::MS },
+	{"shadowMS_alphatest", wi::graphics::ShaderStage::MS },
+	{"shadowMS_transparent", wi::graphics::ShaderStage::MS },
+
+	{"objectAS", wi::graphics::ShaderStage::AS },
 
 
 	//{"rtreflectionLIB", wi::graphics::ShaderStage::LIB },
@@ -362,74 +377,200 @@ bool shaderdump_enabled = false;
 
 using namespace wi::graphics;
 
+std::ostream nullout(&nullbuf);
+
 int main(int argc, char* argv[])
 {
-	std::cout << "[Wicked Engine Offline Shader Compiler]" << std::endl;
-	std::cout << "Available command arguments:" << std::endl;
-	std::cout << "\thlsl5 : \tCompile shaders to hlsl5 (dx11) format (using d3dcompiler)" << std::endl;
-	std::cout << "\thlsl6 : \tCompile shaders to hlsl6 (dx12) format (using dxcompiler)" << std::endl;
-	std::cout << "\tspirv : \tCompile shaders to spirv (vulkan) format (using dxcompiler)" << std::endl;
-	std::cout << "\trebuild : \tAll shaders will be rebuilt, regardless if they are outdated or not" << std::endl;
-	std::cout << "\tshaderdump : \tShaders will be saved to wiShaderDump.h C++ header file (rebuild is assumed)" << std::endl;
-	std::cout << "Command arguments used: ";
+	wi::shadercompiler::Flags compile_flags = wi::shadercompiler::Flags::NONE;
 
 	wi::arguments::Parse(argc, argv);
+	std::ostream* out;
+
+	if (wi::arguments::HasArgument("quiet"))
+	{
+		wi::backlog::SetLogLevel(wi::backlog::LogLevel::Error);
+		out = &nullout;
+	}
+	else
+	{
+		out = &std::cout;
+	}
+
+	*out << "[Wicked Engine Offline Shader Compiler]\n";
+	*out << "Available command arguments:\n";
+	*out << "\thlsl5 : \t\tCompile shaders to hlsl5 (dx11) format (using d3dcompiler)\n";
+	*out << "\thlsl6 : \t\tCompile shaders to hlsl6 (dx12) format (using dxcompiler)\n";
+	*out << "\tspirv : \t\tCompile shaders to spirv (vulkan) format (using dxcompiler)\n";
+	*out << "\tmetal : \t\tCompile shaders to Apple Metal format (using dxcompiler and metal shader converter)\n";
+	*out << "\thlsl6_xs : \t\tCompile shaders to hlsl6 Xbox Series native (dx12) format (requires Xbox SDK)\n";
+	*out << "\tps5 : \t\t\tCompile shaders to PlayStation 5 native format (requires PlayStation 5 SDK)\n";
+	*out << "\trebuild : \t\tAll shaders will be rebuilt, regardless if they are outdated or not\n";
+	*out << "\tdisable_optimization : \tShaders will be compiled without optimizations\n";
+	*out << "\tstrip_reflection : \tReflection will be stripped from shader binary to reduce file size\n";
+	*out << "\tshaderdump : \t\tShaders will be saved to wiShaderDump.h C++ header file (can be combined with \"rebuild\")\n";
+	*out << "\tdebuginfo : \t\tKeep symbol data for shader debugging\n";
+	*out << "\tquiet : \t\tOnly print errors\n";
+	*out << "\tsm6.1 : \t\tIncrease all compilations to shader model 6.1\n";
+	*out << "\tsm6.2 : \t\tIncrease all compilations to shader model 6.2\n";
+	*out << "\tsm6.3 : \t\tIncrease all compilations to shader model 6.3\n";
+	*out << "\tsm6.4 : \t\tIncrease all compilations to shader model 6.4\n";
+	*out << "\tsm6.5 : \t\tIncrease all compilations to shader model 6.5\n";
+	*out << "\tsm6.6 : \t\tIncrease all compilations to shader model 6.6\n";
+	*out << "Command arguments used: ";
 
 	if (wi::arguments::HasArgument("hlsl5"))
 	{
 		targets.push_back({ ShaderFormat::HLSL5, "shaders/hlsl5/" });
-		std::cout << "hlsl5 ";
+		*out << "hlsl5 ";
 	}
 	if (wi::arguments::HasArgument("hlsl6"))
 	{
 		targets.push_back({ ShaderFormat::HLSL6, "shaders/hlsl6/" });
-		std::cout << "hlsl6 ";
+		*out << "hlsl6 ";
 	}
 	if (wi::arguments::HasArgument("spirv"))
 	{
 		targets.push_back({ ShaderFormat::SPIRV, "shaders/spirv/" });
-		std::cout << "spirv ";
+		*out << "spirv ";
+	}
+	if (wi::arguments::HasArgument("metal"))
+	{
+		targets.push_back({ ShaderFormat::METAL, "shaders/metal/" });
+		*out << "metal ";
+	}
+	if (wi::arguments::HasArgument("hlsl6_xs"))
+	{
+		targets.push_back({ ShaderFormat::HLSL6_XS, "shaders/hlsl6_xs/" });
+		*out << "hlsl6_xs ";
+	}
+	if (wi::arguments::HasArgument("ps5"))
+	{
+		targets.push_back({ ShaderFormat::PS5, "shaders/ps5/" });
+		*out << "ps5 ";
 	}
 
 	if (wi::arguments::HasArgument("shaderdump"))
 	{
 		shaderdump_enabled = true;
-		rebuild = true;
-		std::cout << "shaderdump ";
+		*out << "shaderdump ";
 	}
 
 	if (wi::arguments::HasArgument("rebuild"))
 	{
 		rebuild = true;
-		std::cout << "rebuild ";
+		*out << "rebuild ";
 	}
 
-	std::cout << std::endl;
+	if (wi::arguments::HasArgument("disable_optimization"))
+	{
+		compile_flags |= wi::shadercompiler::Flags::DISABLE_OPTIMIZATION;
+		*out << "disable_optimization ";
+	}
+
+	if (wi::arguments::HasArgument("debuginfo"))
+	{
+		compile_flags |= wi::shadercompiler::Flags::KEEP_DEBUG_INFORMATION;
+		*out << "debuginfo ";
+	}
+
+	if (wi::arguments::HasArgument("strip_reflection"))
+	{
+		compile_flags |= wi::shadercompiler::Flags::STRIP_REFLECTION;
+		*out << "strip_reflection ";
+	}
+
+	ShaderModel minshadermodel_override = ShaderModel::SM_5_0;
+	if (wi::arguments::HasArgument("sm6.1"))
+	{
+		minshadermodel_override = ShaderModel::SM_6_1;
+		*out << "sm6.1 ";
+	}
+	if (wi::arguments::HasArgument("sm6.2"))
+	{
+		minshadermodel_override = ShaderModel::SM_6_2;
+		*out << "sm6.2 ";
+	}
+	if (wi::arguments::HasArgument("sm6.3"))
+	{
+		minshadermodel_override = ShaderModel::SM_6_3;
+		*out << "sm6.3 ";
+	}
+	if (wi::arguments::HasArgument("sm6.4"))
+	{
+		minshadermodel_override = ShaderModel::SM_6_4;
+		*out << "sm6.4 ";
+	}
+	if (wi::arguments::HasArgument("sm6.5"))
+	{
+		minshadermodel_override = ShaderModel::SM_6_5;
+		*out << "sm6.5 ";
+	}
+	if (wi::arguments::HasArgument("sm6.6"))
+	{
+		minshadermodel_override = ShaderModel::SM_6_6;
+		*out << "sm6.6 ";
+	}
+	if (wi::arguments::HasArgument("sm6.7"))
+	{
+		minshadermodel_override = ShaderModel::SM_6_7;
+		*out << "sm6.7 ";
+	}
+
+	*out << "\n";
 
 	if (targets.empty())
 	{
 		targets = {
+#ifdef __APPLE__
+			{ ShaderFormat::METAL, "shaders/metal/" },
+#else
 			//{ ShaderFormat::HLSL5, "shaders/hlsl5/" },
 			{ ShaderFormat::HLSL6, "shaders/hlsl6/" },
 			{ ShaderFormat::SPIRV, "shaders/spirv/" },
+#endif // __APPLE__
 		};
-		std::cout << "No shader formats were specified, assuming command arguments: hlsl5 spirv hlsl6" << std::endl;
+		*out << "No shader formats were specified, assuming command arguments: spirv hlsl6\n";
 	}
+
+	// permutations for objectPS:
+	shaders.push_back({ "objectPS", wi::graphics::ShaderStage::PS });
+	for (auto& x : wi::scene::MaterialComponent::shaderTypeDefines)
+	{
+		shaders.back().permutations.emplace_back().defines = x;
+
+		// same but with TRANSPARENT:
+		shaders.back().permutations.emplace_back().defines = x;
+		shaders.back().permutations.back().defines.push_back("TRANSPARENT");
+	}
+
+	// permutations for visibility_analyzeCS:
+	shaders.push_back({ "visibility_analyzeCS", wi::graphics::ShaderStage::CS });
+	shaders.back().permutations.emplace_back();
+	shaders.back().permutations.emplace_back().defines = { "PRIMITIVEID_MSAA" };
+
+	// permutations for visibility_resolveCS:
+	shaders.push_back({ "visibility_resolveCS", wi::graphics::ShaderStage::CS });
+	shaders.back().permutations.emplace_back().defines = { "PRIMITIVEID_UNIFORM" };
+	shaders.back().permutations.emplace_back().defines = { "PRIMITIVEID_DIVERGENT" };
+	shaders.back().permutations.emplace_back().defines = { "PRIMITIVEID_UNIFORM", "MATERIAL_BINNING" };
+	shaders.back().permutations.emplace_back().defines = { "PRIMITIVEID_DIVERGENT", "MATERIAL_BINNING" };
+
+	// permutations for visibility_velocityCS:
+	shaders.push_back({ "visibility_velocityCS", wi::graphics::ShaderStage::CS });
+	shaders.back().permutations.emplace_back().defines = { "PRIMITIVEID_UNIFORM" };
+	shaders.back().permutations.emplace_back().defines = { "PRIMITIVEID_DIVERGENT" };
 
 	// permutations for visibility_surfaceCS:
 	shaders.push_back({ "visibility_surfaceCS", wi::graphics::ShaderStage::CS });
 	for (auto& x : wi::scene::MaterialComponent::shaderTypeDefines)
 	{
 		shaders.back().permutations.emplace_back().defines = x;
+		shaders.back().permutations.back().defines.push_back("PRIMITIVEID_UNIFORM");
 	}
-
-	// permutations for visibility_surfaceCS REDUCED:
-	shaders.push_back({ "visibility_surfaceCS", wi::graphics::ShaderStage::CS });
 	for (auto& x : wi::scene::MaterialComponent::shaderTypeDefines)
 	{
-		auto defines = x;
-		defines.push_back("REDUCED");
-		shaders.back().permutations.emplace_back().defines = defines;
+		shaders.back().permutations.emplace_back().defines = x;
+		shaders.back().permutations.back().defines.push_back("PRIMITIVEID_DIVERGENT");
 	}
 
 	// permutations for visibility_shadeCS:
@@ -437,16 +578,54 @@ int main(int argc, char* argv[])
 	for (auto& x : wi::scene::MaterialComponent::shaderTypeDefines)
 	{
 		shaders.back().permutations.emplace_back().defines = x;
+		shaders.back().permutations.back().defines.push_back("PRIMITIVEID_UNIFORM");
+	}
+	for (auto& x : wi::scene::MaterialComponent::shaderTypeDefines)
+	{
+		shaders.back().permutations.emplace_back().defines = x;
+		shaders.back().permutations.back().defines.push_back("PRIMITIVEID_DIVERGENT");
+	}
+
+	// permutations for ssgiCS:
+	shaders.push_back({ "ssgiCS", wi::graphics::ShaderStage::CS });
+	shaders.back().permutations.emplace_back().defines = { "WIDE" };
+	// permutations for ssgi_upsampleCS:
+	shaders.push_back({ "ssgi_upsampleCS", wi::graphics::ShaderStage::CS });
+	shaders.back().permutations.emplace_back().defines = { "WIDE" };
+
+	// permutations for copyStencilBitPS:
+	shaders.push_back({ "copyStencilBitPS", wi::graphics::ShaderStage::PS });
+	shaders.back().permutations.emplace_back().defines = { "MSAA" };
+
+	// permutations for yuv_to_rgbCS:
+	shaders.push_back({ "yuv_to_rgbCS", wi::graphics::ShaderStage::CS });
+	shaders.back().permutations.emplace_back().defines = { "ARRAY" };
+
+	// permutations for lightCullingCS:
+	shaders.push_back({ "lightCullingCS", wi::graphics::ShaderStage::CS });
+	shaders.back().permutations.emplace_back().defines = {};
+	shaders.back().permutations.emplace_back().defines = { "DEBUG" };
+	shaders.back().permutations.emplace_back().defines = { "ADVANCED" };
+	shaders.back().permutations.emplace_back().defines = { "ADVANCED", "DEBUG" };
+
+	// Simplify permutation iteration:
+	for (auto& shader : shaders)
+	{
+		if (shader.permutations.empty())
+		{
+			shader.permutations.emplace_back();
+		}
 	}
 
 	wi::jobsystem::Initialize();
 	wi::jobsystem::context ctx;
 
-	std::string SHADERSOURCEPATH = wi::renderer::GetShaderSourcePath();
+	static std::string SHADERSOURCEPATH = wi::renderer::GetShaderSourcePath();
 	wi::helper::MakePathAbsolute(SHADERSOURCEPATH);
 
-	std::cout << "[Wicked Engine Offline Shader Compiler] Searching for outdated shaders..." << std::endl;
+	*out << "[Wicked Engine Offline Shader Compiler] Searching for outdated shaders...\n";
 	wi::Timer timer;
+	static int errors = 0;
 
 	for (auto& target : targets)
 	{
@@ -467,32 +646,58 @@ int main(int argc, char* argv[])
 					continue;
 				}
 			}
-			wi::vector<ShaderEntry::Permutation> permutations = shader.permutations;
-			if (permutations.empty())
-			{
-				permutations.emplace_back();
-			}
 
-			for (auto permutation : permutations)
+			for (auto& permutation : shader.permutations)
 			{
-				wi::jobsystem::Execute(ctx, [=](wi::jobsystem::JobArgs args) {
+				wi::jobsystem::Execute(ctx, [&target, &permutation, &shader, &out, SHADERPATH, compile_flags, minshadermodel_override](wi::jobsystem::JobArgs args) {
+
 					std::string shaderbinaryfilename = SHADERPATH + shader.name;
 					for (auto& def : permutation.defines)
 					{
 						shaderbinaryfilename += "_" + def;
 					}
 					shaderbinaryfilename += ".cso";
-					if (!rebuild && !wi::shadercompiler::IsShaderOutdated(shaderbinaryfilename))
+
+					wi::shadercompiler::CompilerOutput output;
+
+					if (!wi::shadercompiler::IsShaderOutdated(shaderbinaryfilename))
 					{
-						return;
+						if (!rebuild)
+						{
+							if (shaderdump_enabled)
+							{
+								auto vec = wi::allocator::make_shared<std::vector<uint8_t>>();
+
+								if (wi::helper::FileRead(shaderbinaryfilename, *vec))
+								{
+									output.internal_state = vec;
+									output.shaderdata = vec->data();
+									output.shadersize = vec->size();
+									locker.lock();
+									results[shaderbinaryfilename] = output;
+									*out << "up-to-date: " << shaderbinaryfilename << std::endl;
+									locker.unlock();
+								}
+								else
+								{
+									locker.lock();
+									std::cerr << "ERROR reading binary shader: " << shaderbinaryfilename << std::endl;
+									locker.unlock();
+								}
+							}
+							return;
+						}
 					}
 
 					wi::shadercompiler::CompilerInput input;
+					input.entrypoint = shader.entrypoint;
+					input.flags = compile_flags;
 					input.format = target.format;
 					input.stage = shader.stage;
 					input.shadersourcefilename = SHADERSOURCEPATH + shader.name + ".hlsl";
 					input.include_directories.push_back(SHADERSOURCEPATH);
-					input.minshadermodel = shader.minshadermodel;
+					input.include_directories.push_back(SHADERSOURCEPATH + wi::helper::GetDirectoryFromPath(shader.name));
+					input.minshadermodel = std::max(shader.minshadermodel, minshadermodel_override);
 					input.defines = permutation.defines;
 
 					if (input.minshadermodel > ShaderModel::SM_5_0 && target.format == ShaderFormat::HLSL5)
@@ -500,8 +705,17 @@ int main(int argc, char* argv[])
 						// if shader format cannot support shader model, then we cancel the task without returning error
 						return;
 					}
+					if (target.format == ShaderFormat::PS5 && (input.minshadermodel >= ShaderModel::SM_6_5 || input.stage == ShaderStage::MS || input.stage == ShaderStage::AS))
+					{
+						// TODO PS5 raytracing, mesh shader
+						return;
+					}
+					if (target.format == ShaderFormat::HLSL6_XS && (input.stage == ShaderStage::MS || input.stage == ShaderStage::AS))
+					{
+						// TODO Xbox mesh shader
+						return;
+					}
 
-					wi::shadercompiler::CompilerOutput output;
 					wi::shadercompiler::Compile(input, output);
 
 					if (output.IsValid())
@@ -511,9 +725,9 @@ int main(int argc, char* argv[])
 						locker.lock();
 						if (!output.error_message.empty())
 						{
-							std::cerr << output.error_message << std::endl;
+							std::cerr << output.error_message << "\n";
 						}
-						std::cout << "shader compiled: " << shaderbinaryfilename << std::endl;
+						*out << "shader compiled: " << shaderbinaryfilename << "\n";
 						if (shaderdump_enabled)
 						{
 							results[shaderbinaryfilename] = output;
@@ -523,23 +737,25 @@ int main(int argc, char* argv[])
 					else
 					{
 						locker.lock();
-						std::cerr << "shader compile FAILED: " << shaderbinaryfilename << std::endl << output.error_message;
+						std::cerr << "shader compile FAILED: " << shaderbinaryfilename << "\n" << output.error_message;
+						errors++;
 						locker.unlock();
-						std::exit(1);
 					}
 
-					});
+				});
 			}
 		}
 	}
 	wi::jobsystem::Wait(ctx);
 
-	std::cout << "[Wicked Engine Offline Shader Compiler] Finished in " << std::setprecision(4) << timer.elapsed_seconds() << " seconds" << std::endl;
+	*out << "[Wicked Engine Offline Shader Compiler] Finished in " << std::setprecision(4) << timer.elapsed_seconds() << " seconds with " << errors << " errors\n";
 
 	if (shaderdump_enabled)
 	{
-		std::cout << "[Wicked Engine Offline Shader Compiler] Creating ShaderDump..." << std::endl;
+		*out << "[Wicked Engine Offline Shader Compiler] Creating ShaderDump...\n";
 		timer.record();
+		size_t total_raw = 0;
+		size_t total_compressed = 0;
 		std::string ss;
 		ss += "namespace wiShaderDump {\n";
 		for (auto& x : results)
@@ -547,33 +763,49 @@ int main(int argc, char* argv[])
 			auto& name = x.first;
 			auto& output = x.second;
 
-			std::string name_repl = name;
-			std::replace(name_repl.begin(), name_repl.end(), '/', '_');
-			std::replace(name_repl.begin(), name_repl.end(), '.', '_');
-			ss += "const uint8_t " + name_repl + "[] = {";
-			for (size_t i = 0; i < output.shadersize; ++i)
-			{
-				ss += std::to_string((uint32_t)output.shaderdata[i]) + ",";
+			wi::vector<uint8_t> compressed;
+			bool success = wi::helper::Compress(output.shaderdata, output.shadersize, compressed, 9);
+			if (success) {
+				total_raw += output.shadersize;
+				total_compressed += compressed.size();
 			}
-			ss += "};\n";
-		}
-		ss += "struct ShaderDumpEntry{const uint8_t* data; size_t size;};\n";
-		ss += "const wi::unordered_map<std::string, ShaderDumpEntry> shaderdump = {\n";
-		for (auto& x : results)
-		{
-			auto& name = x.first;
-			auto& output = x.second;
+			else
+			{
+				wi::helper::DebugOut("Compression failed while creating shader dump!", wi::helper::DebugLevel::Error);
+				continue;
+			}
 
 			std::string name_repl = name;
 			std::replace(name_repl.begin(), name_repl.end(), '/', '_');
 			std::replace(name_repl.begin(), name_repl.end(), '.', '_');
+			std::replace(name_repl.begin(), name_repl.end(), '-', '_');
+			ss += "static const uint8_t " + name_repl + "[] = {";
+			for (size_t i = 0; i < compressed.size(); ++i)
+			{
+				ss += std::to_string((uint32_t)compressed[i]) + ",";
+			}
+			ss += "};\n";
+		}
+		*out << "[Wicked Engine Offline Shader Compiler] Compressed shaders: " << total_raw << " -> " << total_compressed << " (" << std::setprecision(3) << (100. * total_compressed / total_raw) << "%)" << std::endl;
+		ss += "struct ShaderDumpEntry{const uint8_t* data; size_t size;};\n";
+		ss += "static const wi::unordered_map<std::string, ShaderDumpEntry> shaderdump = {\n";
+		for (auto& x : results)
+		{
+			auto& name = x.first;
+
+			std::string name_repl = name;
+			std::replace(name_repl.begin(), name_repl.end(), '/', '_');
+			std::replace(name_repl.begin(), name_repl.end(), '.', '_');
+			std::replace(name_repl.begin(), name_repl.end(), '-', '_');
 			ss += "{\"" + name + "\", {" + name_repl + ",sizeof(" + name_repl + ")}},\n";
 		}
 		ss += "};\n"; // map end
 		ss += "}\n"; // namespace end
 		wi::helper::FileWrite("wiShaderDump.h", (uint8_t*)ss.c_str(), ss.length());
-		std::cout << "[Wicked Engine Offline Shader Compiler] ShaderDump written to wiShaderDump.h in " << std::setprecision(4) << timer.elapsed_seconds() << " seconds" << std::endl;
+		*out << "[Wicked Engine Offline Shader Compiler] ShaderDump written to wiShaderDump.h in " << std::setprecision(4) << timer.elapsed_seconds() << " seconds\n";
 	}
 
-	return 0;
+	wi::jobsystem::ShutDown();
+
+	return errors;
 }

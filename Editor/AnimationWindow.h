@@ -1,6 +1,4 @@
 #pragma once
-#include "WickedEngine.h"
-
 class EditorComponent;
 
 class AnimationWindow : public wi::gui::Window
@@ -14,8 +12,11 @@ public:
 
 	wi::gui::Label infoLabel;
 	wi::gui::ComboBox modeComboBox;
-	wi::gui::CheckBox loopedCheckBox;
+	wi::gui::Button loopTypeButton;
 	wi::gui::Button	playButton;
+	wi::gui::Button	playFromStartButton;
+	wi::gui::Button	backwardsButton;
+	wi::gui::Button	backwardsFromEndButton;
 	wi::gui::Button	stopButton;
 	wi::gui::Slider	timerSlider;
 	wi::gui::Slider	amountSlider;
@@ -28,10 +29,12 @@ public:
 
 	wi::gui::ComboBox retargetCombo;
 
-	void Update();
+	wi::gui::CheckBox rootMotionCheckBox;
+	wi::gui::ComboBox rootBoneComboBox;
+
+	void UpdateData();
 
 	void RefreshKeyframesList();
 
 	void ResizeLayout() override;
 };
-

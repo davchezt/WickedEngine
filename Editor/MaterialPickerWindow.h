@@ -1,6 +1,4 @@
 #pragma once
-#include "WickedEngine.h"
-
 class EditorComponent;
 
 class MaterialPickerWindow : public wi::gui::Window
@@ -10,13 +8,19 @@ public:
 
 	EditorComponent* editor = nullptr;
 
-	wi::vector<wi::gui::Button> buttons;
+	std::deque<wi::gui::Button> buttons;
 
 	wi::gui::Slider zoomSlider;
+	wi::gui::CheckBox showMeshMaterialCheckBox;
+	wi::gui::CheckBox showInternalMaterialCheckBox;
 
 	void ResizeLayout() override;
 
 	// Recreating buttons shouldn't be done every frame because interaction states need multi-frame execution
 	void RecreateButtons();
+
+private:
+	bool ShouldShowMaterial(const wi::scene::MaterialComponent& material, wi::ecs::Entity entity) const;
+	bool MaterialIsUsedInMesh(wi::ecs::Entity materialEntity) const;
 };
 

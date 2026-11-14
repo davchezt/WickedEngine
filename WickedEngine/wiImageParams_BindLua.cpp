@@ -3,18 +3,18 @@
 
 namespace wi::lua
 {
-	const char ImageParams_BindLua::className[] = "ImageParams";
-
 	Luna<ImageParams_BindLua>::FunctionType ImageParams_BindLua::methods[] = {
 		lunamethod(ImageParams_BindLua, GetPos),
 		lunamethod(ImageParams_BindLua, GetSize),
 		lunamethod(ImageParams_BindLua, GetPivot),
 		lunamethod(ImageParams_BindLua, GetColor),
 		lunamethod(ImageParams_BindLua, GetOpacity),
+		lunamethod(ImageParams_BindLua, GetSaturation),
 		lunamethod(ImageParams_BindLua, GetFade),
 		lunamethod(ImageParams_BindLua, GetRotation),
 		lunamethod(ImageParams_BindLua, GetTexOffset),
 		lunamethod(ImageParams_BindLua, GetTexOffset2),
+		lunamethod(ImageParams_BindLua, GetBorderSoften),
 		lunamethod(ImageParams_BindLua, GetDrawRect),
 		lunamethod(ImageParams_BindLua, GetDrawRect2),
 		lunamethod(ImageParams_BindLua, IsDrawRectEnabled),
@@ -22,12 +22,14 @@ namespace wi::lua
 		lunamethod(ImageParams_BindLua, IsMirrorEnabled),
 		lunamethod(ImageParams_BindLua, IsBackgroundBlurEnabled),
 		lunamethod(ImageParams_BindLua, IsBackgroundEnabled),
+		lunamethod(ImageParams_BindLua, IsDistortionMaskEnabled),
 
 		lunamethod(ImageParams_BindLua, SetPos),
 		lunamethod(ImageParams_BindLua, SetSize),
 		lunamethod(ImageParams_BindLua, SetPivot),
 		lunamethod(ImageParams_BindLua, SetColor),
 		lunamethod(ImageParams_BindLua, SetOpacity),
+		lunamethod(ImageParams_BindLua, SetSaturation),
 		lunamethod(ImageParams_BindLua, SetFade),
 		lunamethod(ImageParams_BindLua, SetStencil),
 		lunamethod(ImageParams_BindLua, SetStencilRefMode),
@@ -37,6 +39,7 @@ namespace wi::lua
 		lunamethod(ImageParams_BindLua, SetRotation),
 		lunamethod(ImageParams_BindLua, SetTexOffset),
 		lunamethod(ImageParams_BindLua, SetTexOffset2),
+		lunamethod(ImageParams_BindLua, SetBorderSoften),
 		lunamethod(ImageParams_BindLua, EnableDrawRect),
 		lunamethod(ImageParams_BindLua, EnableDrawRect2),
 		lunamethod(ImageParams_BindLua, DisableDrawRect),
@@ -47,6 +50,25 @@ namespace wi::lua
 		lunamethod(ImageParams_BindLua, DisableBackgroundBlur),
 		lunamethod(ImageParams_BindLua, EnableBackground),
 		lunamethod(ImageParams_BindLua, DisableBackground),
+		lunamethod(ImageParams_BindLua, EnableDistortionMask),
+		lunamethod(ImageParams_BindLua, DisableDistortionMask),
+		lunamethod(ImageParams_BindLua, SetMaskAlphaRange),
+		lunamethod(ImageParams_BindLua, GetMaskAlphaRange),
+
+		lunamethod(ImageParams_BindLua, SetAngularSoftnessDirection),
+		lunamethod(ImageParams_BindLua, SetAngularSoftnessInnerAngle),
+		lunamethod(ImageParams_BindLua, SetAngularSoftnessOuterAngle),
+		lunamethod(ImageParams_BindLua, EnableAngularSoftnessDoubleSided),
+		lunamethod(ImageParams_BindLua, EnableAngularSoftnessInverse),
+		lunamethod(ImageParams_BindLua, DisableAngularSoftnessDoubleSided),
+		lunamethod(ImageParams_BindLua, DisableAngularSoftnessInverse),
+
+		lunamethod(ImageParams_BindLua, EnableCornerRounding),
+		lunamethod(ImageParams_BindLua, DisableCornerRounding),
+		lunamethod(ImageParams_BindLua, SetCornerRounding),
+
+		lunamethod(ImageParams_BindLua, SetGradient),
+
 		{ nullptr, nullptr }
 	};
 	Luna<ImageParams_BindLua>::PropertyType ImageParams_BindLua::properties[] = {
@@ -69,27 +91,32 @@ namespace wi::lua
 
 	int ImageParams_BindLua::GetPos(lua_State* L)
 	{
-		Luna<Vector_BindLua>::push(L, new Vector_BindLua(XMLoadFloat3(&params.pos)));
+		Luna<Vector_BindLua>::push(L, XMLoadFloat3(&params.pos));
 		return 1;
 	}
 	int ImageParams_BindLua::GetSize(lua_State* L)
 	{
-		Luna<Vector_BindLua>::push(L, new Vector_BindLua(XMLoadFloat2(&params.siz)));
+		Luna<Vector_BindLua>::push(L, XMLoadFloat2(&params.siz));
 		return 1;
 	}
 	int ImageParams_BindLua::GetPivot(lua_State* L)
 	{
-		Luna<Vector_BindLua>::push(L, new Vector_BindLua(XMLoadFloat2(&params.pivot)));
+		Luna<Vector_BindLua>::push(L, XMLoadFloat2(&params.pivot));
 		return 1;
 	}
 	int ImageParams_BindLua::GetColor(lua_State* L)
 	{
-		Luna<Vector_BindLua>::push(L, new Vector_BindLua(XMLoadFloat4(&params.color)));
+		Luna<Vector_BindLua>::push(L, XMLoadFloat4(&params.color));
 		return 1;
 	}
 	int ImageParams_BindLua::GetOpacity(lua_State* L)
 	{
 		wi::lua::SSetFloat(L, params.opacity);
+		return 1;
+	}
+	int ImageParams_BindLua::GetSaturation(lua_State* L)
+	{
+		wi::lua::SSetFloat(L, params.saturation);
 		return 1;
 	}
 	int ImageParams_BindLua::GetFade(lua_State* L)
@@ -104,22 +131,27 @@ namespace wi::lua
 	}
 	int ImageParams_BindLua::GetTexOffset(lua_State* L)
 	{
-		Luna<Vector_BindLua>::push(L, new Vector_BindLua(XMLoadFloat2(&params.texOffset)));
+		Luna<Vector_BindLua>::push(L, XMLoadFloat2(&params.texOffset));
 		return 1;
 	}
 	int ImageParams_BindLua::GetTexOffset2(lua_State* L)
 	{
-		Luna<Vector_BindLua>::push(L, new Vector_BindLua(XMLoadFloat2(&params.texOffset2)));
+		Luna<Vector_BindLua>::push(L, XMLoadFloat2(&params.texOffset2));
+		return 1;
+	}
+	int ImageParams_BindLua::GetBorderSoften(lua_State* L)
+	{
+		wi::lua::SSetFloat(L, params.border_soften);
 		return 1;
 	}
 	int ImageParams_BindLua::GetDrawRect(lua_State* L)
 	{
-		Luna<Vector_BindLua>::push(L, new Vector_BindLua(XMLoadFloat4(&params.drawRect)));
+		Luna<Vector_BindLua>::push(L, XMLoadFloat4(&params.drawRect));
 		return 1;
 	}
 	int ImageParams_BindLua::GetDrawRect2(lua_State* L)
 	{
-		Luna<Vector_BindLua>::push(L, new Vector_BindLua(XMLoadFloat4(&params.drawRect2)));
+		Luna<Vector_BindLua>::push(L, XMLoadFloat4(&params.drawRect2));
 		return 1;
 	}
 	int ImageParams_BindLua::IsDrawRectEnabled(lua_State* L)
@@ -145,6 +177,11 @@ namespace wi::lua
 	int ImageParams_BindLua::IsBackgroundEnabled(lua_State* L)
 	{
 		wi::lua::SSetBool(L, params.isBackgroundEnabled());
+		return 1;
+	}
+	int ImageParams_BindLua::IsDistortionMaskEnabled(lua_State* L)
+	{
+		wi::lua::SSetBool(L, params.isDistortionMaskEnabled());
 		return 1;
 	}
 
@@ -226,6 +263,19 @@ namespace wi::lua
 		else
 		{
 			wi::lua::SError(L, "SetOpacity(float x) not enough arguments!");
+		}
+		return 0;
+	}
+	int ImageParams_BindLua::SetSaturation(lua_State* L)
+	{
+		int argc = wi::lua::SGetArgCount(L);
+		if (argc > 0)
+		{
+			params.saturation = wi::lua::SGetFloat(L, 1);
+		}
+		else
+		{
+			wi::lua::SError(L, "SetSaturation(float x) not enough arguments!");
 		}
 		return 0;
 	}
@@ -355,6 +405,19 @@ namespace wi::lua
 		}
 		return 0;
 	}
+	int ImageParams_BindLua::SetBorderSoften(lua_State* L)
+	{
+		int argc = wi::lua::SGetArgCount(L);
+		if (argc > 0)
+		{
+			params.border_soften = wi::lua::SGetFloat(L, 1);
+		}
+		else
+		{
+			wi::lua::SError(L, "SetBorderSoften(float alpha) not enough arguments!");
+		}
+		return 0;
+	}
 	int ImageParams_BindLua::EnableDrawRect(lua_State* L)
 	{
 		int argc = wi::lua::SGetArgCount(L);
@@ -433,6 +496,155 @@ namespace wi::lua
 		params.disableBackground();
 		return 0;
 	}
+	int ImageParams_BindLua::EnableDistortionMask(lua_State* L)
+	{
+		params.enableDistortionMask();
+		return 0;
+	}
+	int ImageParams_BindLua::DisableDistortionMask(lua_State* L)
+	{
+		params.disableDistortionMask();
+		return 0;
+	}
+	int ImageParams_BindLua::SetMaskAlphaRange(lua_State* L)
+	{
+		int argc = wi::lua::SGetArgCount(L);
+		if (argc < 2)
+		{
+			wi::lua::SError(L, "SetMaskAlphaRange(float start, end): not enough arguments!");
+			return 0;
+		}
+		params.mask_alpha_range_start = wi::lua::SGetFloat(L, 1);
+		params.mask_alpha_range_end = wi::lua::SGetFloat(L, 2);
+		return 0;
+	}
+	int ImageParams_BindLua::GetMaskAlphaRange(lua_State* L)
+	{
+		wi::lua::SSetFloat(L, params.mask_alpha_range_start);
+		wi::lua::SSetFloat(L, params.mask_alpha_range_end);
+		return 2;
+	}
+
+	int ImageParams_BindLua::SetAngularSoftnessDirection(lua_State* L)
+	{
+		int argc = wi::lua::SGetArgCount(L);
+		if (argc < 1)
+		{
+			wi::lua::SError(L, "SetAngularSoftnessDirection(Vector value) : not enough arguments!");
+			return 0;
+		}
+		Vector_BindLua* v = Luna<Vector_BindLua>::lightcheck(L, 1);
+		if (v == nullptr)
+		{
+			wi::lua::SError(L, "SetAngularSoftnessDirection(Vector value) : first argument is not a Vector!");
+			return 0;
+		}
+		params.angular_softness_direction = v->GetFloat2();
+		return 0;
+	}
+	int ImageParams_BindLua::SetAngularSoftnessInnerAngle(lua_State* L)
+	{
+		int argc = wi::lua::SGetArgCount(L);
+		if (argc < 1)
+		{
+			wi::lua::SError(L, "SetAngularSoftnessInnerAngle(float value) : not enough arguments!");
+			return 0;
+		}
+		params.angular_softness_inner_angle = wi::lua::SGetFloat(L, 1);
+		return 0;
+	}
+	int ImageParams_BindLua::SetAngularSoftnessOuterAngle(lua_State* L)
+	{
+		int argc = wi::lua::SGetArgCount(L);
+		if (argc < 1)
+		{
+			wi::lua::SError(L, "SetAngularSoftnessOuterAngle(float value) : not enough arguments!");
+			return 0;
+		}
+		params.angular_softness_outer_angle = wi::lua::SGetFloat(L, 1);
+		return 0;
+	}
+	int ImageParams_BindLua::EnableAngularSoftnessDoubleSided(lua_State* L)
+	{
+		params.enableAngularSoftnessDoubleSided();
+		return 0;
+	}
+	int ImageParams_BindLua::EnableAngularSoftnessInverse(lua_State* L)
+	{
+		params.enableAngularSoftnessInverse();
+		return 0;
+	}
+	int ImageParams_BindLua::DisableAngularSoftnessDoubleSided(lua_State* L)
+	{
+		params.disableAngularSoftnessDoubleSided();
+		return 0;
+	}
+	int ImageParams_BindLua::DisableAngularSoftnessInverse(lua_State* L)
+	{
+		params.disableAngularSoftnessInverse();
+		return 0;
+	}
+
+	int ImageParams_BindLua::EnableCornerRounding(lua_State* L)
+	{
+		params.enableCornerRounding();
+		return 0;
+	}
+	int ImageParams_BindLua::DisableCornerRounding(lua_State* L)
+	{
+		params.disableCornerRounding();
+		return 0;
+	}
+	int ImageParams_BindLua::SetCornerRounding(lua_State* L)
+	{
+		int argc = wi::lua::SGetArgCount(L);
+		if (argc < 2)
+		{
+			wi::lua::SError(L, "SetCornerRounding(int corner, float rounding, opt int segments = 18): not enough arguments!");
+			return 0;
+		}
+		int corner = clamp(wi::lua::SGetInt(L, 1), 0, (int)arraysize(params.corners_rounding) - 1);
+		params.corners_rounding[corner].radius = wi::lua::SGetFloat(L, 2);
+		if (argc > 2)
+		{
+			params.corners_rounding[corner].segments = wi::lua::SGetInt(L, 3);
+		}
+		return 0;
+	}
+
+	int ImageParams_BindLua::SetGradient(lua_State* L)
+	{
+		int argc = wi::lua::SGetArgCount(L);
+		if (argc < 4)
+		{
+			wi::lua::SError(L, "SetGradient(ImageGradientType type, Vector uv_start, Vector uv_end, Vector color): not enough arguments!");
+			return 0;
+		}
+		int type = wi::lua::SGetInt(L, 1);
+		Vector_BindLua* s = Luna<Vector_BindLua>::lightcheck(L, 2);
+		if (s == nullptr)
+		{
+			wi::lua::SError(L, "SetGradient(ImageGradientType type, Vector uv_start, Vector uv_end, Vector color): second argument is not a Vector!");
+			return 0;
+		}
+		Vector_BindLua* e = Luna<Vector_BindLua>::lightcheck(L, 3);
+		if (s == nullptr)
+		{
+			wi::lua::SError(L, "SetGradient(ImageGradientType type, Vector uv_start, Vector uv_end, Vector color): third argument is not a Vector!");
+			return 0;
+		}
+		Vector_BindLua* c = Luna<Vector_BindLua>::lightcheck(L, 4);
+		if (s == nullptr)
+		{
+			wi::lua::SError(L, "SetGradient(ImageGradientType type, Vector uv_start, Vector uv_end, Vector color): fourth argument is not a Vector!");
+			return 0;
+		}
+		params.gradient = (wi::image::Params::Gradient)type;
+		params.gradient_uv_start = s->GetFloat2();
+		params.gradient_uv_end = e->GetFloat2();
+		params.gradient_color = c->GetFloat4();
+		return 0;
+	}
 
 	ImageParams_BindLua::ImageParams_BindLua(lua_State* L)
 	{
@@ -470,32 +682,42 @@ namespace wi::lua
 			initialized = true;
 			Luna<ImageParams_BindLua>::Register(wi::lua::GetLuaState());
 
-			wi::lua::RunText("STENCILMODE_DISABLED		= 0");
-			wi::lua::RunText("STENCILMODE_EQUAL			= 1");
-			wi::lua::RunText("STENCILMODE_LESS			= 2");
-			wi::lua::RunText("STENCILMODE_LESSEQUAL		= 3");
-			wi::lua::RunText("STENCILMODE_GREATER		= 4");
-			wi::lua::RunText("STENCILMODE_GREATEREQUAL	= 5");
-			wi::lua::RunText("STENCILMODE_NOT			= 6");
-			wi::lua::RunText("STENCILMODE_ALWAYS			= 7");
+			wi::lua::RunText(R"(
+STENCILMODE_DISABLED		= 0
+STENCILMODE_EQUAL			= 1
+STENCILMODE_LESS			= 2
+STENCILMODE_LESSEQUAL		= 3
+STENCILMODE_GREATER			= 4
+STENCILMODE_GREATEREQUAL	= 5
+STENCILMODE_NOT				= 6
+STENCILMODE_ALWAYS			= 7
 
-			wi::lua::RunText("STENCILREFMODE_ENGINE		= 0");
-			wi::lua::RunText("STENCILREFMODE_USER		= 1");
-			wi::lua::RunText("STENCILREFMODE_ALL			= 2");
+STENCILREFMODE_ENGINE		= 0
+STENCILREFMODE_USER			= 1
+STENCILREFMODE_ALL			= 2
 
-			wi::lua::RunText("SAMPLEMODE_CLAMP			= 0");
-			wi::lua::RunText("SAMPLEMODE_WRAP			= 1");
-			wi::lua::RunText("SAMPLEMODE_MIRROR			= 2");
+SAMPLEMODE_CLAMP			= 0
+SAMPLEMODE_WRAP				= 1
+SAMPLEMODE_MIRROR			= 2
 
-			wi::lua::RunText("QUALITY_NEAREST			= 0");
-			wi::lua::RunText("QUALITY_LINEAR				= 1");
-			wi::lua::RunText("QUALITY_ANISOTROPIC		= 2");
-			wi::lua::RunText("QUALITY_BICUBIC			= 3");
+QUALITY_NEAREST				= 0
+QUALITY_LINEAR				= 1
+QUALITY_ANISOTROPIC			= 2
+QUALITY_BICUBIC				= 3
 
-			wi::lua::RunText("BLENDMODE_OPAQUE			= 0");
-			wi::lua::RunText("BLENDMODE_ALPHA			= 1");
-			wi::lua::RunText("BLENDMODE_PREMULTIPLIED	= 2");
-			wi::lua::RunText("BLENDMODE_ADDITIVE			= 3");
+BLENDMODE_OPAQUE			= 0
+BLENDMODE_ALPHA				= 1
+BLENDMODE_PREMULTIPLIED		= 2
+BLENDMODE_ADDITIVE			= 3
+
+ImageGradientType = {
+	None = 0,
+	Linear = 1,
+	LinearReflected = 2,
+	Circular = 3,
+}
+)");
+
 		}
 	}
 

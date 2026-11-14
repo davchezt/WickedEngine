@@ -13,7 +13,7 @@ namespace wi::lua::primitive
 	public:
 		wi::primitive::Ray ray;
 
-		static const char className[];
+		inline static constexpr char className[] = "Ray";
 		static Luna<Ray_BindLua>::FunctionType methods[];
 		static Luna<Ray_BindLua>::PropertyType properties[];
 
@@ -25,6 +25,8 @@ namespace wi::lua::primitive
 		int GetDirection(lua_State* L);
 		int SetOrigin(lua_State* L);
 		int SetDirection(lua_State* L);
+		int CreateFromPoints(lua_State* L);
+		int GetPlacementOrientation(lua_State* L);
 	};
 
 	class AABB_BindLua
@@ -32,7 +34,7 @@ namespace wi::lua::primitive
 	public:
 		wi::primitive::AABB aabb;
 
-		static const char className[];
+		inline static constexpr char className[] = "AABB";
 		static Luna<AABB_BindLua>::FunctionType methods[];
 		static Luna<AABB_BindLua>::PropertyType properties[];
 
@@ -49,6 +51,7 @@ namespace wi::lua::primitive
 		int GetHalfExtents(lua_State* L);
 		int Transform(lua_State* L);
 		int GetAsBoxMatrix(lua_State* L);
+		int ProjectToScreen(lua_State* L);
 	};
 
 	class Sphere_BindLua
@@ -56,7 +59,7 @@ namespace wi::lua::primitive
 	public:
 		wi::primitive::Sphere sphere;
 
-		static const char className[];
+		inline static constexpr char className[] = "Sphere";
 		static Luna<Sphere_BindLua>::FunctionType methods[];
 		static Luna<Sphere_BindLua>::PropertyType properties[];
 
@@ -68,6 +71,7 @@ namespace wi::lua::primitive
 		int GetRadius(lua_State* L);
 		int SetCenter(lua_State* L);
 		int SetRadius(lua_State* L);
+		int GetPlacementOrientation(lua_State* L);
 	};
 
 	class Capsule_BindLua
@@ -75,7 +79,7 @@ namespace wi::lua::primitive
 	public:
 		wi::primitive::Capsule capsule;
 
-		static const char className[];
+		inline static constexpr char className[] = "Capsule";
 		static Luna<Capsule_BindLua>::FunctionType methods[];
 		static Luna<Capsule_BindLua>::PropertyType properties[];
 
@@ -90,5 +94,6 @@ namespace wi::lua::primitive
 		int SetBase(lua_State* L);
 		int SetTip(lua_State* L);
 		int SetRadius(lua_State* L);
+		int GetPlacementOrientation(lua_State* L);
 	};
 }

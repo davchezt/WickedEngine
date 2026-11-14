@@ -93,10 +93,10 @@ float3 HierarchicalRaymarch(float3 origin, float3 direction, float2 screenSize, 
 	// Offset to the bounding boxes uv space to intersect the ray with the center of the next pixel.
 	// This means we ever so slightly over shoot into the next region. 
 	float2 uvOffset = 0.005 * exp2(HiZTraceMostDetailedLevel) / screenSize;
-	uvOffset = direction.xy < 0 ? -uvOffset : uvOffset;
+	uvOffset = select(direction.xy < 0, -uvOffset, uvOffset);
 
 	// Offset applied depending on current mip resolution to move the boundary to the left/right upper/lower border depending on ray direction.
-	float2 floorOffset = direction.xy < 0 ? 0 : 1;
+	float2 floorOffset = select(direction.xy < 0, 0, 1);
 
 	// Initially advance ray to avoid immediate self intersections.
 	float tCurrent;
@@ -227,10 +227,7 @@ float ValidateHit(float3 hit, float hitDepth, float2 prevHitUV)
 [numthreads(POSTPROCESS_BLOCKSIZE * POSTPROCESS_BLOCKSIZE, 1, 1)]
 void main(uint3 Gid : SV_GroupID, uint3 GTid : SV_GroupThreadID)
 {
-	// This pass is rendered at half-res
-	const uint downsampleFactor = 2;
-
-	const uint2 pixel = GetReflectionIndirectDispatchCoord(Gid, GTid, tiles, downsampleFactor);
+	const uint2 pixel = GetReflectionIndirectDispatchCoord(Gid, GTid, tiles, ssr_downscalefactor);
 	const float2 uv = (pixel + 0.5f) * postprocess.resolution_rcp;
 
 #ifdef SSR_EARLYEXIT
@@ -242,13 +239,15 @@ void main(uint3 Gid : SV_GroupID, uint3 GTid : SV_GroupThreadID)
 #else
 
 	// This is necessary for accurate upscaling. This is so we don't reuse the same half-res pixels
-	uint2 screenJitter = floor(blue_noise(uint2(0, 0)).xy * downsampleFactor);
-	uint2 jitterPixel = screenJitter + pixel * downsampleFactor;
+	uint2 screenJitter = floor(blue_noise(uint2(0, 0)).xy * ssr_downscalefactor);
+	uint2 jitterPixel = screenJitter + pixel * ssr_downscalefactor;
 	float2 jitterUV = (screenJitter + pixel + 0.5f) * postprocess.resolution_rcp;
 
 	// Due to HiZ tracing, the tracing and the pass components must match depth.
 	float depth = texture_depth_hierarchy[screenJitter + pixel].r;
-	float roughness = texture_roughness[jitterPixel];
+
+	const half3 normal_roughness = texture_normal_roughness[jitterPixel].rgb;
+	half roughness = normal_roughness.b;
 
 	if (!NeedReflection(roughness, depth, ssr_roughness_cutoff))
 	{
@@ -258,9 +257,9 @@ void main(uint3 Gid : SV_GroupID, uint3 GTid : SV_GroupThreadID)
 		return;
 	}
 
-	float3 N = decode_oct(texture_normal[jitterPixel]);
+	float3 N = decode_normal(normal_roughness.rg);
 	float3 P = reconstruct_position(jitterUV, depth);
-	float3 V = normalize(GetCamera().position - P);
+	float3 V = normalize(GetCamera().frustum_corners.screen_to_nearplane(uv) - P);
 
 	float4 H;
 	float3 L;
@@ -330,9 +329,9 @@ void main(uint3 Gid : SV_GroupID, uint3 GTid : SV_GroupThreadID)
 	rayEndScreen.xy = rayEndScreen.xy * float2(0.5, -0.5) + float2(0.5, 0.5);
 
 #ifdef SSR_CHEAP
-
-	rayStartScreen.xy *= postprocess.params1.xy; // Ratio factor between hierarchy and pass
-	rayEndScreen.xy *= postprocess.params1.xy;
+	const float2 ratiofactor = float2(ssr_ratiofactorx, ssr_ratiofactory);
+	rayStartScreen.xy *= ratiofactor; // Ratio factor between hierarchy and pass
+	rayEndScreen.xy *= ratiofactor;
 
 	float3 rayDirectionScreen = rayEndScreen - rayStartScreen;
 
@@ -342,7 +341,7 @@ void main(uint3 Gid : SV_GroupID, uint3 GTid : SV_GroupThreadID)
 	bool validHit = false;
 	float3 hit = RayMarch(rayStartScreen, rayDirectionScreen, roughness, jitter, validHit);
 
-	hit.xy *= postprocess.params1.zw; // Undo ratio
+	hit.xy /= ratiofactor; // Undo ratio
 
 #else
 
@@ -368,7 +367,7 @@ void main(uint3 Gid : SV_GroupID, uint3 GTid : SV_GroupThreadID)
 
 	if (validHit)
 	{
-		const float3 Phit = reconstruct_position(jitterUV, hit.z, GetCamera().inverse_projection);
+		const float3 Phit = reconstruct_position(jitterUV, hit.z);
 		output_rayLengths[pixel] = distance(P, Phit);
 	}
 	else

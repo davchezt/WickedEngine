@@ -7,6 +7,7 @@
 #include "wiMath.h"
 #include "wiECS.h"
 #include "wiScene_Decl.h"
+#include "wiScene_Components.h"
 
 namespace wi
 {
@@ -20,18 +21,17 @@ namespace wi
 	public:
 
 		// This is serialized, order of enums shouldn't change!
-		enum PARTICLESHADERTYPE
+		enum PARTICLESHADERTYPE : uint32_t
 		{
 			SOFT,
 			SOFT_DISTORTION,
 			SIMPLE,
 			SOFT_LIGHTING,
 			PARTICLESHADERTYPE_COUNT,
-			ENUM_FORCE_UINT32 = 0xFFFFFFFF,
 		};
 
 		ParticleCounters statistics = {};
-		wi::graphics::GPUBuffer statisticsReadbackBuffer[wi::graphics::GraphicsDevice::GetBufferCount() + 1];
+		wi::graphics::GPUBuffer statisticsReadbackBuffer[wi::graphics::GraphicsDevice::GetBufferCount()];
 
 		wi::graphics::GPUBuffer particleBuffer;
 		wi::graphics::GPUBuffer aliveList[2];
@@ -43,12 +43,15 @@ namespace wi
 		wi::graphics::GPUBuffer counterBuffer;
 		wi::graphics::GPUBuffer indirectBuffers; // kickoffUpdate, simulation, draw
 		wi::graphics::GPUBuffer constantBuffer;
-		wi::graphics::GPUBuffer vertexBuffer_POS;
-		wi::graphics::GPUBuffer vertexBuffer_UVS;
-		wi::graphics::GPUBuffer vertexBuffer_COL;
+		wi::graphics::GPUBuffer generalBuffer;
+		wi::scene::MeshComponent::BufferView vb_pos;
+		wi::scene::MeshComponent::BufferView vb_nor;
+		wi::scene::MeshComponent::BufferView vb_uvs;
+		wi::scene::MeshComponent::BufferView vb_col;
 		wi::graphics::GPUBuffer primitiveBuffer; // raytracing
 		wi::graphics::GPUBuffer culledIndirectionBuffer; // rasterization
 		wi::graphics::GPUBuffer culledIndirectionBuffer2; // rasterization
+		wi::graphics::Texture opacityCurveTex;
 
 		wi::graphics::RaytracingAccelerationStructure BLAS;
 
@@ -57,17 +60,24 @@ namespace wi
 
 		float emit = 0.0f;
 		int burst = 0;
+		float dt = 0;
+		uint32_t active_frames = 0;
 
 		uint32_t MAX_PARTICLES = 1000;
+
+		mutable wi::vector<EmitLocation> emit_locations;
 
 	public:
 		void UpdateCPU(const wi::scene::TransformComponent& transform, float dt);
 		void Burst(int num);
+		void Burst(int num, const XMFLOAT3& position, const wi::Color& color = wi::Color::White());
+		void Burst(int num, const XMFLOAT4X4& transform, const wi::Color& color = wi::Color::White());
 		void Restart();
 
 		// Must have a transform and material component, but mesh is optional
-		void UpdateGPU(uint32_t instanceIndex, const wi::scene::TransformComponent& transform, const wi::scene::MeshComponent* mesh, wi::graphics::CommandList cmd) const;
-		void Draw(const wi::scene::MaterialComponent& material, wi::graphics::CommandList cmd) const;
+		void UpdateGPU(uint32_t instanceIndex, const wi::scene::MeshComponent* mesh, wi::graphics::CommandList cmd) const;
+		void Draw(const wi::scene::MaterialComponent& material, wi::graphics::CommandList cmd, const PARTICLESHADERTYPE* shadertype_override = nullptr) const;
+		void DrawForShadowmap(const wi::scene::MaterialComponent& material, wi::graphics::CommandList cmd, uint16_t camera_mask = 1) const;
 
 		void CreateRaytracingRenderData();
 
@@ -84,6 +94,8 @@ namespace wi
 			FLAG_HAS_VOLUME = 1 << 5,
 			FLAG_FRAME_BLENDING = 1 << 6,
 			FLAG_COLLIDERS_DISABLED = 1 << 7,
+			FLAG_USE_RAIN_BLOCKER = 1 << 8,
+			FLAG_TAKE_COLOR_FROM_MESH = 1 << 9,
 		};
 		uint32_t _flags = FLAG_EMPTY;
 
@@ -105,6 +117,9 @@ namespace wi
 		float motionBlurAmount = 0.0f;
 		float mass = 1.0f;
 		float random_color = 0;
+		float opacityCurveControlPeakStart = 0.1f; // peak start of the opacity relative to the particle lifeteime 
+		float opacityCurveControlPeakEnd = 0.5f; // peak end of the opacity relative to the particle lifeteime
+		int burst_on_create = 0; // burst count once when emitter gets created
 
 		XMFLOAT3 velocity = {}; // starting velocity of all new particles
 		XMFLOAT3 gravity = {}; // constant gravity force
@@ -127,10 +142,13 @@ namespace wi
 		uint32_t GetMaxParticleCount() const { return MAX_PARTICLES; }
 		uint64_t GetMemorySizeInBytes() const;
 
+		bool IsInactive() const { return active_frames == 0; }
+
 		// Non-serialized attributes:
 		XMFLOAT3 center;
-		uint32_t statisticsReadBackIndex = 0;
 		uint32_t layerMask = ~0u;
+		XMFLOAT4X4 worldMatrix = wi::math::IDENTITY_MATRIX;
+		bool bursted_on_create = false;
 
 		inline bool IsDebug() const { return _flags & FLAG_DEBUG; }
 		inline bool IsPaused() const { return _flags & FLAG_PAUSED; }
@@ -140,6 +158,7 @@ namespace wi
 		inline bool IsVolumeEnabled() const { return _flags & FLAG_HAS_VOLUME; }
 		inline bool IsFrameBlendingEnabled() const { return _flags & FLAG_FRAME_BLENDING; }
 		inline bool IsCollidersDisabled() const { return _flags & FLAG_COLLIDERS_DISABLED; }
+		inline bool IsTakeColorFromMesh() const { return _flags & FLAG_TAKE_COLOR_FROM_MESH; }
 
 		inline void SetDebug(bool value) { if (value) { _flags |= FLAG_DEBUG; } else { _flags &= ~FLAG_DEBUG; } }
 		inline void SetPaused(bool value) { if (value) { _flags |= FLAG_PAUSED; } else { _flags &= ~FLAG_PAUSED; } }
@@ -149,6 +168,12 @@ namespace wi
 		inline void SetVolumeEnabled(bool value) { if (value) { _flags |= FLAG_HAS_VOLUME; } else { _flags &= ~FLAG_HAS_VOLUME; } }
 		inline void SetFrameBlendingEnabled(bool value) { if (value) { _flags |= FLAG_FRAME_BLENDING; } else { _flags &= ~FLAG_FRAME_BLENDING; } }
 		inline void SetCollidersDisabled(bool value) { if (value) { _flags |= FLAG_COLLIDERS_DISABLED; } else { _flags &= ~FLAG_COLLIDERS_DISABLED; } }
+		inline void SetTakeColorFromMesh(bool value) { if (value) { _flags |= FLAG_TAKE_COLOR_FROM_MESH; } else { _flags &= ~FLAG_TAKE_COLOR_FROM_MESH; } }
+
+		// Set the opacity curve parameters
+		//	peak : start peak of the opacity relative to particle lifetime [0,1]
+		void SetOpacityCurveControl(float peakStart, float peakEnd);
+		const wi::graphics::Texture* GetOpacityCurveTex() const { return &opacityCurveTex; }
 
 		void Serialize(wi::Archive& archive, wi::ecs::EntitySerializer& seri);
 

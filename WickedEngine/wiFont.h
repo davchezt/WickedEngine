@@ -48,7 +48,7 @@ namespace wi::font
 		wi::Color shadowColor; // transparent disables, any other color enables shadow under text
 		float h_wrap = -1; // wrap start width (-1 default for no wrap) (logical canvas units)
 		int style = 0; // 0: use default font style, other values can be taken from the wi::font::AddFontStyle() funtion's return value
-		float softness = 0.1f; // value in [0,1] range (requires SDF rendering to be enabled)
+		float softness = 0; // value in [0,1] range (requires SDF rendering to be enabled)
 		float bolden = 0; // value in [0,1] range (requires SDF rendering to be enabled)
 		float shadow_softness = 0.5f; // value in [0,1] range (requires SDF rendering to be enabled)
 		float shadow_bolden = 0.1f; // value in [0,1] range (requires SDF rendering to be enabled)
@@ -56,6 +56,8 @@ namespace wi::font
 		float shadow_offset_y = 0; // offset for shadow under the text in logical canvas coordinates
 		Cursor cursor; // cursor can be used to continue text drawing by taking the Draw's return value (optional)
 		float hdr_scaling = 1.0f; // a scaling value for use by linear output mapping
+		float intensity = 1.0f; // color multiplier
+		float shadow_intensity = 1.0f; // shadow color multiplier
 		const XMMATRIX* customProjection = nullptr;
 		const XMMATRIX* customRotation = nullptr;
 
@@ -66,6 +68,8 @@ namespace wi::font
 			OUTPUT_COLOR_SPACE_HDR10_ST2084 = 1 << 1,
 			OUTPUT_COLOR_SPACE_LINEAR = 1 << 2,
 			DEPTH_TEST = 1 << 3,
+			FLIP_HORIZONTAL = 1 << 4,
+			FLIP_VERTICAL = 1 << 5,
 		};
 		uint32_t _flags = SDF_RENDERING;
 
@@ -73,6 +77,8 @@ namespace wi::font
 		constexpr bool isHDR10OutputMappingEnabled() const { return _flags & OUTPUT_COLOR_SPACE_HDR10_ST2084; }
 		constexpr bool isLinearOutputMappingEnabled() const { return _flags & OUTPUT_COLOR_SPACE_LINEAR; }
 		constexpr bool isDepthTestEnabled() const { return _flags & DEPTH_TEST; }
+		constexpr bool isFlippedHorizontally() const { return _flags & FLIP_HORIZONTAL; }
+		constexpr bool isFlippedVertically() const { return _flags & FLIP_VERTICAL; }
 
 		// enable Signed Distance Field (SDF) font rendering (enabled by default)
 		constexpr void enableSDFRendering() { _flags |= SDF_RENDERING; }
@@ -81,11 +87,15 @@ namespace wi::font
 		// enable linear output mapping, which means removing gamma curve and outputting in linear space (useful for blending in HDR space)
 		constexpr void enableLinearOutputMapping(float scaling = 1.0f) { _flags |= OUTPUT_COLOR_SPACE_LINEAR; hdr_scaling = scaling; }
 		constexpr void enableDepthTest() { _flags |= DEPTH_TEST; }
+		constexpr void enableFlipHorizontally() { _flags |= FLIP_HORIZONTAL; }
+		constexpr void enableFlipVertically() { _flags |= FLIP_VERTICAL; }
 
 		constexpr void disableSDFRendering() { _flags &= ~SDF_RENDERING; }
 		constexpr void disableHDR10OutputMapping() { _flags &= ~OUTPUT_COLOR_SPACE_HDR10_ST2084; }
 		constexpr void disableLinearOutputMapping() { _flags &= ~OUTPUT_COLOR_SPACE_LINEAR; }
 		constexpr void disableDepthTest() { _flags &= ~DEPTH_TEST; }
+		constexpr void disableFlipHorizontally() { _flags &= ~FLIP_HORIZONTAL; }
+		constexpr void disableFlipVertically() { _flags &= ~FLIP_VERTICAL; }
 
 		Params(
 			float posX = 0,
@@ -140,15 +150,17 @@ namespace wi::font
 	//	fontName : name of the font (it doesn't need to be a path)
 	//	data : binary data of the .ttf font
 	//	size : size of the font binary data
+	//  copyData : whether data is copied away for storage. If false (default) developer must ensure that it is not deleted
 	//	Returns fontStyleID that is reusable. If font already exists, just return its ID
 	//	NOTE: When loading font with this method, the developer must ensure that font data is
-	//	not deleted while the font is in use
-	int AddFontStyle(const std::string& fontName, const uint8_t* data, size_t size);
+	//	not deleted while the font is in use (unless copyData is specified as true)
+	int AddFontStyle(const std::string& fontName, const uint8_t* data, size_t size, bool copyData = false);
 
 	// Set canvas for the CommandList to handle DPI-aware font rendering on the current thread
 	void SetCanvas(const wi::Canvas& current_canvas);
 	// Call once per frame to update font atlas texture
-	void UpdateAtlas();
+	//	upscaling : this should be the DPI upscaling factor, otherwise there will be no upscaling. Upscaling will cause glyphs to be cached at higher resolution.
+	void UpdateAtlas(float upscaling = 1.0f);
 
 	// Draw text with specified parameters and return cursor for last word
 	//	The next Draw() can continue from where this left off by using the return value of this function
@@ -167,6 +179,14 @@ namespace wi::font
 	XMFLOAT2 TextSize(const wchar_t* text, const Params& params);
 	XMFLOAT2 TextSize(const std::string& text, const Params& params);
 	XMFLOAT2 TextSize(const std::wstring& text, const Params& params);
+
+	// Computes the text's cursor coordinate for a given string
+	Cursor TextCursor(const char* text, size_t text_length, const Params& params);
+	Cursor TextCursor(const wchar_t* text, size_t text_length, const Params& params);
+	Cursor TextCursor(const char* text, const Params& params);
+	Cursor TextCursor(const wchar_t* text, const Params& params);
+	Cursor TextCursor(const std::string& text, const Params& params);
+	Cursor TextCursor(const std::wstring& text, const Params& params);
 
 	// Computes the text's width in logical canvas coordinates
 	//	Avoid calling TextWidth() and TextHeight() both, instead use TextSize() if you need both measurements!

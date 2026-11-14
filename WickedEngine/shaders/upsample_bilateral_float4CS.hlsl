@@ -2,12 +2,21 @@
 #include "ShaderInterop_Postprocess.h"
 
 #ifndef UPSAMPLE_FORMAT
-#define UPSAMPLE_FORMAT float4
+#define UPSAMPLE_FORMAT half4
 #endif // UPSAMPLE_FORMAT
 
 PUSHCONSTANT(postprocess, PostProcess);
 
 Texture2D<UPSAMPLE_FORMAT> input : register(t0);
+Texture2D<float> input_depth_high : register(t1);
+Texture2D<float> input_depth_low : register(t2);
+
+static const float2 offsets[] = {
+	float2(-0.5, -0.5),
+	float2(0.5, -0.5),
+	float2(-0.5, 0.5),
+	float2(0.5, 0.5),
+};
 
 // Note: this post process can be either a pixel shader or compute shader, depending on use case
 
@@ -26,81 +35,45 @@ void main(uint3 DTid : SV_DispatchThreadID)
 	const float2 uv = (pixel + 0.5f) * postprocess.resolution_rcp;
 #endif // USE_PIXELSHADER
 
-
 	const float threshold = postprocess.params0.x;
-	const float lowres_depthchain_mip = postprocess.params0.w;
+	const uint lowres_depthchain_mip = uint(postprocess.params0.w);
 	const float2 lowres_size = postprocess.params1.xy;
 	const float2 lowres_texel_size = postprocess.params1.zw;
+	
+	const float lineardepth_highres = compute_lineardepth(input_depth_high[pixel]);
+	
+	UPSAMPLE_FORMAT color = 0;
+	half sum = 0;
 
-	const float2 uv00 = uv - lowres_texel_size * 0.5;
-	const float2 uv10 = uv00 + float2(lowres_texel_size.x, 0);
-	const float2 uv01 = uv00 + float2(0, lowres_texel_size.y);
-	const float2 uv11 = uv00 + lowres_texel_size;
+	int2 lowres_pixel = int2(float2(pixel) * postprocess.params0.w);
 
-	const float4 lineardepth_highres = texture_lineardepth[pixel].xxxx;
-	const float4 lineardepth_lowres = float4(
-		texture_lineardepth.SampleLevel(sampler_point_clamp, uv00, lowres_depthchain_mip),
-		texture_lineardepth.SampleLevel(sampler_point_clamp, uv10, lowres_depthchain_mip),
-		texture_lineardepth.SampleLevel(sampler_point_clamp, uv01, lowres_depthchain_mip),
-		texture_lineardepth.SampleLevel(sampler_point_clamp, uv11, lowres_depthchain_mip)
-	);
-
-	const float4 depth_diff = abs(lineardepth_highres - lineardepth_lowres) * GetCamera().z_far;
-	const float accum_diff = dot(depth_diff, float4(1, 1, 1, 1));
-
-	UPSAMPLE_FORMAT color;
-
-	[branch]
-	if (accum_diff < threshold)
+	for(uint i = 0; i < 4; ++i)
 	{
-#ifdef UPSAMPLE_DISABLE_FILTERING
-		color = input[floor(uv * lowres_size)];
-#else
-		// small error, take bilinear sample:
-		color = input.SampleLevel(sampler_linear_clamp, uv, 0);
-#endif // UPSAMPLE_DISABLE_FILTERING
+		const float2 sample_uv = uv + offsets[i] * lowres_texel_size;
+		const float4 zzzz = compute_lineardepth(input_depth_low.GatherRed(sampler_linear_clamp, sample_uv));
+		const half4 wwww = max(0.001, 1 - saturate(abs(zzzz - lineardepth_highres) * threshold));
+		const half4 rrrr = input.GatherRed(sampler_linear_clamp, sample_uv);
+		const half4 gggg = input.GatherGreen(sampler_linear_clamp, sample_uv);
+		const half4 bbbb = input.GatherBlue(sampler_linear_clamp, sample_uv);
+		const half4 aaaa = input.GatherAlpha(sampler_linear_clamp, sample_uv);
+		
+		float2 sam_pixel = sample_uv * lowres_size + (-0.5 + 1.0 / 512.0); // (1.0 / 512.0) correction is described here: https://www.reedbeta.com/blog/texture-gathers-and-coordinate-precision/
+		half2 sam_pixel_frac = frac(sam_pixel);
+
+		color += (UPSAMPLE_FORMAT)half4(
+			bilinear(rrrr * wwww, sam_pixel_frac),
+			bilinear(gggg * wwww, sam_pixel_frac),
+			bilinear(bbbb * wwww, sam_pixel_frac),
+			bilinear(aaaa * wwww, sam_pixel_frac)
+		);
+		
+		half weight = bilinear(wwww, sam_pixel_frac);
+		sum += weight;
 	}
-	else
+	
+	if(sum > 0)
 	{
-		// large error:
-
-#ifdef UPSAMPLE_DISABLE_FILTERING
-		// find nearest sample to current depth:
-		float min_depth_diff = depth_diff[0];
-		float2 uv_nearest = uv00;
-
-		if (depth_diff[1] < min_depth_diff)
-		{
-			uv_nearest = uv10;
-			min_depth_diff = depth_diff[1];
-		}
-
-		if (depth_diff[2] < min_depth_diff)
-		{
-			uv_nearest = uv01;
-			min_depth_diff = depth_diff[2];
-		}
-
-		if (depth_diff[3] < min_depth_diff)
-		{
-			uv_nearest = uv11;
-			min_depth_diff = depth_diff[3];
-		}
-		color = input[floor(uv_nearest * lowres_size)];
-#else
-
-		// depth-weighted blending:
-		float4 weights = saturate(1 - abs(lineardepth_highres - lineardepth_lowres));
-		float sum = weights[0] + weights[1] + weights[2] + weights[3];
-		weights /= max(sum, 0.0001);
-
-		color = 0;
-		color += input.SampleLevel(sampler_point_clamp, uv00, 0) * weights[0];
-		color += input.SampleLevel(sampler_point_clamp, uv10, 0) * weights[1];
-		color += input.SampleLevel(sampler_point_clamp, uv01, 0) * weights[2];
-		color += input.SampleLevel(sampler_point_clamp, uv11, 0) * weights[3];
-
-#endif // UPSAMPLE_DISABLE_FILTERING
+		color /= sum;
 	}
 
 #ifdef USE_PIXELSHADER

@@ -11,63 +11,80 @@
 #endif
 #include <SDKDDKVer.h>
 #include <windows.h>
-#include <tchar.h>
 
-#if WINAPI_FAMILY == WINAPI_FAMILY_APP
-#define PLATFORM_UWP
-#define wiLoadLibrary(name) LoadPackagedLibrary(_T(name),0)
-#define wiGetProcAddress(handle,name) GetProcAddress(handle, name)
-#include <winrt/Windows.UI.Core.h>
-#include <winrt/Windows.Graphics.Display.h>
-#include <winrt/Windows.ApplicationModel.Core.h>
+#if WINAPI_FAMILY == WINAPI_FAMILY_GAMES
+#define PLATFORM_XBOX
 #else
 #define PLATFORM_WINDOWS_DESKTOP
+#endif // WINAPI_FAMILY_GAMES
 #define wiLoadLibrary(name) LoadLibraryA(name)
+#define wiFreeLibrary(handle) FreeLibrary(handle)
 #define wiGetProcAddress(handle,name) GetProcAddress(handle, name)
-#endif // UWP
-
+#elif defined(__SCE__)
+#define PLATFORM_PS5
+#elif defined(__APPLE__)
+#define PLATFORM_APPLE
+#if TARGET_OS_OSX
+#define PLATFORM_MACOS
+#elif TARGET_OS_IOS
+#define PLATFORM_IOS
+#endif // TARGET_OS_OSX
+#include "wiAppleHelper.h"
+#include <cstdlib>
 #else
-
 #define PLATFORM_LINUX
-#define wiLoadLibrary(name) dlopen(name, RTLD_LAZY)
-#define wiGetProcAddress(handle,name) dlsym(handle, name)
-typedef void* HMODULE;
-
 #endif // _WIN32
 
 #ifdef SDL2
 #include <SDL2/SDL.h>
 #include <SDL_vulkan.h>
 #include "sdl2.h"
+#elif defined(SDL3)
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_vulkan.h>
+#include "sdl3.h"
 #endif
 
+#if defined(PLATFORM_LINUX) || defined(PLATFORM_APPLE)
+#include <dlfcn.h>
+#define wiLoadLibrary(name) dlopen(name, RTLD_LAZY)
+#define wiFreeLibrary(handle) dlclose(handle)
+#define wiGetProcAddress(handle,name) dlsym(handle, name)
+typedef void* HMODULE;
+#endif // defined(PLATFORM_LINUX) || defined(PLATFORM_APPLE)
 
 namespace wi::platform
 {
 #ifdef _WIN32
-#ifdef PLATFORM_UWP
-	using window_type = const winrt::Windows::UI::Core::CoreWindow*;
-#else
 	using window_type = HWND;
-#endif // PLATFORM_UWP
-#elif SDL2
+	using error_type = HRESULT;
+#elif defined(SDL2) || defined(SDL3)
 	using window_type = SDL_Window*;
+	using error_type = int;
+#elif defined(__APPLE__)
+	using window_type = void*;
+	using error_type = int;
 #else
-	using window_type = int;
+	using window_type = void*;
+	using error_type = int;
 #endif // _WIN32
 
 	inline void Exit()
 	{
-#ifdef _WIN32
-#ifndef PLATFORM_UWP
+#if defined(_WIN32)
 		PostQuitMessage(0);
-#else
-		winrt::Windows::ApplicationModel::Core::CoreApplication::Exit();
-#endif // PLATFORM_UWP
-#endif // _WIN32
-#ifdef SDL2
-		SDL_Quit();
+#elif defined(SDL2)
+		SDL_Event quit_event;
+		quit_event.type = SDL_QUIT;
+		SDL_PushEvent(&quit_event);
+#elif defined(SDL3)
+		SDL_Event quit_event;
+		quit_event.type = SDL_EVENT_QUIT;
+		SDL_PushEvent(&quit_event);
+#elif defined(__APPLE__)
+		std::exit(0);
 #endif
+		
 	}
 
 	struct WindowProperties
@@ -75,29 +92,113 @@ namespace wi::platform
 		int width = 0;
 		int height = 0;
 		float dpi = 96;
+		float inset_left = 0;
+		float inset_right = 0;
+		float inset_top = 0;
+		float inset_bottom = 0;
 	};
 	inline void GetWindowProperties(window_type window, WindowProperties* dest)
 	{
 #ifdef PLATFORM_WINDOWS_DESKTOP
 		dest->dpi = (float)GetDpiForWindow(window);
+#endif // WINDOWS_DESKTOP
+
+#ifdef PLATFORM_XBOX
+		dest->dpi = 96.f;
+#endif // PLATFORM_XBOX
+
+#if defined(PLATFORM_WINDOWS_DESKTOP) || defined(PLATFORM_XBOX)
 		RECT rect;
 		GetClientRect(window, &rect);
 		dest->width = int(rect.right - rect.left);
 		dest->height = int(rect.bottom - rect.top);
-#endif // WINDOWS_DESKTOP
-
-#ifdef PLATFORM_UWP
-		dest->dpi = winrt::Windows::Graphics::Display::DisplayInformation::GetForCurrentView().LogicalDpi();
-		float dpiscale = dest->dpi / 96.f;
-		dest->width = uint32_t(window->Bounds().Width * dpiscale);
-		dest->height = uint32_t(window->Bounds().Height * dpiscale);
-#endif // PLATFORM_UWP
+#endif // PLATFORM_WINDOWS_DESKTOP || PLATFORM_XBOX
 
 #ifdef PLATFORM_LINUX
 		int window_width, window_height;
 		SDL_GetWindowSize(window, &window_width, &window_height);
+#ifdef SDL2
 		SDL_Vulkan_GetDrawableSize(window, &dest->width, &dest->height);
-		dest->dpi = ((float) dest->width / (float) window_width) * 96.0;
+#elif defined(SDL3)
+		SDL_GetWindowSizeInPixels(window, &dest->width, &dest->height);
+#endif
+		dest->dpi = ((float)dest->width / (float)window_width) * 96.f;
 #endif // PLATFORM_LINUX
+		
+#ifdef PLATFORM_APPLE
+		XMUINT2 size = wi::apple::GetWindowSize(window);
+		dest->width = size.x;
+		dest->height = size.y;
+		dest->dpi = wi::apple::GetDPIForWindow(window);
+		wi::apple::GetSafeArea(window, dest->inset_left, dest->inset_right, dest->inset_top, dest->inset_bottom);
+#endif // PLATFORM_APPLE
+	}
+
+	inline void SetWindowFullScreen(window_type window, bool fullscreen)
+	{
+#if defined(PLATFORM_WINDOWS_DESKTOP)
+		// Based on: https://devblogs.microsoft.com/oldnewthing/20100412-00/?p=14353
+		static WINDOWPLACEMENT wp = {};
+		const DWORD dwStyle = GetWindowLong(window, GWL_STYLE);
+		const bool has_overlapped_style = dwStyle & WS_OVERLAPPEDWINDOW;
+		const bool isFullScreen = !has_overlapped_style;
+
+		if (fullscreen && !isFullScreen) {
+			MONITORINFO mi = { sizeof(mi) };
+			if (GetWindowPlacement(window, &wp) &&
+				GetMonitorInfo(MonitorFromWindow(window,
+					MONITOR_DEFAULTTOPRIMARY), &mi)) {
+				SetWindowLong(window, GWL_STYLE,
+					dwStyle & ~WS_OVERLAPPEDWINDOW);
+				SetWindowPos(window, HWND_TOP,
+					mi.rcMonitor.left, mi.rcMonitor.top,
+					mi.rcMonitor.right - mi.rcMonitor.left,
+					mi.rcMonitor.bottom - mi.rcMonitor.top,
+					SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+			}
+		}
+		else if (!fullscreen && isFullScreen) {
+			if (!has_overlapped_style) {
+				SetWindowLong(window, GWL_STYLE,
+					dwStyle | WS_OVERLAPPEDWINDOW);
+			}
+			SetWindowPlacement(window, &wp);
+			SetWindowPos(window, NULL, 0, 0, 0, 0,
+				SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+				SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+		}
+
+#elif defined(PLATFORM_LINUX)
+#ifdef SDL2
+		SDL_SetWindowFullscreen(window, fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+#elif defined(SDL3)
+		SDL_SetWindowFullscreen(window, fullscreen);
+#endif
+#elif defined(__APPLE__)
+		wi::apple::SetWindowFullScreen(window, fullscreen);
+#endif // PLATFORM_WINDOWS_DESKTOP
+	}
+
+	inline bool IsWindowFullScreen(window_type window)
+	{
+#if defined(PLATFORM_WINDOWS_DESKTOP)
+		return (GetWindowLong(window, GWL_STYLE) & WS_OVERLAPPEDWINDOW) == 0;
+#elif defined(PLATFORM_LINUX)
+#ifdef SDL2
+		auto flags = SDL_GetWindowFlags(window);
+		if (flags & SDL_WINDOW_FULLSCREEN_DESKTOP)
+			return true;
+		else if (flags & SDL_WINDOW_FULLSCREEN)
+			return true;
+		else
+			return false;
+#elif defined(SDL3)
+		return (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0;
+#endif
+#elif defined(__APPLE__)
+		return wi::apple::IsWindowFullScreen(window);
+#else
+		return true;
+#endif
 	}
 }

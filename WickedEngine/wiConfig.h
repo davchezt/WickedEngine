@@ -1,9 +1,11 @@
 #pragma once
 #include "CommonInclude.h"
+#include "wiUnorderedMap.h"
+#include "wiVector.h"
 
 #include <string>
 #include <vector>
-#include <unordered_map>
+#include <mutex>
 
 namespace wi::config
 {
@@ -20,32 +22,62 @@ namespace wi::config
 		// Get the associated value for the key:
 		bool GetBool(const char* name) const;
 		int GetInt(const char* name) const;
+		uint32_t GetUint(const char* name) const;
 		float GetFloat(const char* name) const;
 		std::string GetText(const char* name) const;
+
+		// Get multiple values for the key (comma-separated in the file):
+		wi::vector<std::string> GetTextArray(const char* name) const;
+		wi::vector<int> GetIntArray(const char* name) const;
+		wi::vector<float> GetFloatArray(const char* name) const;
+
+		// Get the number of values for the key:
+		size_t GetCount(const char* name) const;
 
 		// Set the associated value for the key:
 		void Set(const char* name, bool value);
 		void Set(const char* name, int value);
+		void Set(const char* name, uint32_t value);
 		void Set(const char* name, float value);
 		void Set(const char* name, const char* value);
 		void Set(const char* name, const std::string& value);
 
+		// Set multiple values for the key:
+		void Set(const char* name, const wi::vector<std::string>& values);
+		void Set(const char* name, const wi::vector<int>& values);
+		void Set(const char* name, const wi::vector<float>& values);
+
+		wi::unordered_map<std::string, std::string>::iterator begin() { return values.begin(); }
+		wi::unordered_map<std::string, std::string>::const_iterator begin() const { return values.begin(); }
+		wi::unordered_map<std::string, std::string>::iterator end() { return values.end(); }
+		wi::unordered_map<std::string, std::string>::const_iterator end() const { return values.end(); }
+
 	protected:
-		std::unordered_map<std::string, std::string> values;
+		wi::unordered_map<std::string, std::string> values;
 	};
 
-	struct File : public Section
+	struct File final : public Section
 	{
 		// Open a config file (.ini format)
 		bool Open(const char* filename);
+		bool Open(const std::string& filename) { return Open(filename.c_str()); }
 		// Write back the config file with the current keys and values
 		void Commit();
+		// Check whether a section exists
+		bool HasSection(const char* name) const;
 		// Get access to a named section. If it doesn't exist, then it will be created
 		Section& GetSection(const char* name);
+		// Returns a list of sections sorted by name
+		wi::vector<std::pair<std::string, const Section*>> GetSortedSections() const;
+
+		wi::unordered_map<std::string, Section>::iterator begin() { return sections.begin(); }
+		wi::unordered_map<std::string, Section>::const_iterator begin() const { return sections.begin(); }
+		wi::unordered_map<std::string, Section>::iterator end() { return sections.end(); }
+		wi::unordered_map<std::string, Section>::const_iterator end() const { return sections.end(); }
 
 	private:
 		std::string filename;
-		std::unordered_map<std::string, Section> sections;
+		wi::unordered_map<std::string, Section> sections;
 		struct Line
 		{
 			std::string section_label;
@@ -53,6 +85,7 @@ namespace wi::config
 			std::string key;
 			std::string comment;
 		};
-		std::vector<Line> opened_order;
+		wi::vector<Line> opened_order;
+		std::mutex locker;
 	};
 }

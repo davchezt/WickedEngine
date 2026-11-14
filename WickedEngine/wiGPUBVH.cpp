@@ -66,7 +66,7 @@ namespace wi
 			desc.bind_flags = BindFlag::SHADER_RESOURCE;
 			desc.stride = sizeof(uint);
 			desc.size = desc.stride;
-			desc.misc_flags = ResourceMiscFlag::BUFFER_RAW;
+			desc.misc_flags = ResourceMiscFlag::BUFFER_STRUCTURED;
 			desc.usage = Usage::DEFAULT;
 			device->CreateBuffer(&desc, nullptr, &primitiveCounterBuffer);
 			device->SetName(&primitiveCounterBuffer, "GPUBVH::primitiveCounterBuffer");
@@ -124,10 +124,10 @@ namespace wi
 			device->SetName(&primitiveBuffer, "GPUBVH::primitiveBuffer");
 
 			desc.bind_flags = BindFlag::SHADER_RESOURCE | BindFlag::UNORDERED_ACCESS;
+			desc.stride = sizeof(uint);
 			desc.size = desc.stride * primitiveCapacity;
 			desc.misc_flags = ResourceMiscFlag::BUFFER_STRUCTURED;
 			desc.usage = Usage::DEFAULT;
-			desc.stride = sizeof(float); // morton buffer is float because sorting must be done and gpu sort operates on floats for now!
 			device->CreateBuffer(&desc, nullptr, &primitiveMortonBuffer);
 			device->SetName(&primitiveMortonBuffer, "GPUBVH::primitiveMortonBuffer");
 		}
@@ -232,15 +232,13 @@ namespace wi
 					);
 				}
 			}
-
-			GPUBarrier barriers[] = {
-				GPUBarrier::Memory()
-			};
-			device->Barrier(barriers, arraysize(barriers), cmd);
 		}
 
 		{
 			GPUBarrier barriers[] = {
+				GPUBarrier::Buffer(&primitiveBuffer, ResourceState::UNORDERED_ACCESS, ResourceState::SHADER_RESOURCE),
+				GPUBarrier::Memory(&primitiveIDBuffer),
+				GPUBarrier::Memory(&primitiveMortonBuffer),
 				GPUBarrier::Buffer(&primitiveCounterBuffer, ResourceState::SHADER_RESOURCE, ResourceState::COPY_DST),
 			};
 			device->Barrier(barriers, arraysize(barriers), cmd);
@@ -258,6 +256,14 @@ namespace wi
 		device->EventBegin("BVH - Sort Primitive Mortons", cmd);
 		wi::gpusortlib::Sort(primitiveCount, primitiveMortonBuffer, primitiveCounterBuffer, 0, primitiveIDBuffer, cmd);
 		device->EventEnd(cmd);
+
+		{
+			GPUBarrier barriers[] = {
+				GPUBarrier::Buffer(&primitiveIDBuffer, ResourceState::UNORDERED_ACCESS, ResourceState::SHADER_RESOURCE),
+				GPUBarrier::Buffer(&primitiveMortonBuffer, ResourceState::UNORDERED_ACCESS, ResourceState::SHADER_RESOURCE),
+			};
+			device->Barrier(barriers, arraysize(barriers), cmd);
+		}
 
 		device->EventBegin("BVH - Build Hierarchy", cmd);
 		{
@@ -278,20 +284,20 @@ namespace wi
 
 			device->Dispatch((primitiveCount + BVH_BUILDER_GROUPSIZE - 1) / BVH_BUILDER_GROUPSIZE, 1, 1, cmd);
 
-			GPUBarrier barriers[] = {
-				GPUBarrier::Memory()
-			};
-			device->Barrier(barriers, arraysize(barriers), cmd);
 		}
 		device->EventEnd(cmd);
 
-		device->EventBegin("BVH - Propagate AABB", cmd);
 		{
 			GPUBarrier barriers[] = {
-				GPUBarrier::Memory()
+				GPUBarrier::Memory(&bvhNodeBuffer),
+				GPUBarrier::Memory(&bvhFlagBuffer),
+				GPUBarrier::Buffer(&bvhParentBuffer, ResourceState::UNORDERED_ACCESS, ResourceState::SHADER_RESOURCE),
 			};
 			device->Barrier(barriers, arraysize(barriers), cmd);
+		}
 
+		device->EventBegin("BVH - Propagate AABB", cmd);
+		{
 			device->BindComputeShader(&computeShaders[CSTYPE_BVH_PROPAGATEAABB], cmd);
 			const GPUResource* uavs[] = {
 				&bvhNodeBuffer,
@@ -309,9 +315,16 @@ namespace wi
 
 			device->Dispatch((primitiveCount + BVH_BUILDER_GROUPSIZE - 1) / BVH_BUILDER_GROUPSIZE, 1, 1, cmd);
 
-			device->Barrier(barriers, arraysize(barriers), cmd);
 		}
 		device->EventEnd(cmd);
+
+		{
+			GPUBarrier barriers[] = {
+				GPUBarrier::Buffer(&bvhNodeBuffer, ResourceState::UNORDERED_ACCESS, ResourceState::SHADER_RESOURCE),
+				GPUBarrier::Buffer(&bvhFlagBuffer, ResourceState::UNORDERED_ACCESS, ResourceState::SHADER_RESOURCE),
+			};
+			device->Barrier(barriers, arraysize(barriers), cmd);
+		}
 
 		wi::profiler::EndRange(range); // BVH rebuild
 
@@ -424,6 +437,6 @@ namespace wi
 		static wi::eventhandler::Handle handle = wi::eventhandler::Subscribe(wi::eventhandler::EVENT_RELOAD_SHADERS, [](uint64_t userdata) { GPUBVH_Internal::LoadShaders(); });
 		GPUBVH_Internal::LoadShaders();
 
-		wi::backlog::post("wi::GPUBVH Initialized (" + std::to_string((int)std::round(timer.elapsed())) + " ms)");
+		wilog("wi::GPUBVH Initialized (%d ms)", (int)std::round(timer.elapsed()));
 	}
 }

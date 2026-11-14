@@ -4,8 +4,6 @@
 namespace wi::lua
 {
 
-	const char RenderPath3D_BindLua::className[] = "RenderPath3D";
-
 	Luna<RenderPath3D_BindLua>::FunctionType RenderPath3D_BindLua::methods[] = {
 		lunamethod(RenderPath2D_BindLua, AddSprite),
 		lunamethod(RenderPath2D_BindLua, AddFont),
@@ -21,6 +19,8 @@ namespace wi::lua
 		lunamethod(RenderPath2D_BindLua, SetLayerOrder),
 		lunamethod(RenderPath2D_BindLua, SetSpriteOrder),
 		lunamethod(RenderPath2D_BindLua, SetFontOrder),
+		lunamethod(RenderPath2D_BindLua, GetHDRScaling),
+		lunamethod(RenderPath2D_BindLua, SetHDRScaling),
 
 		lunamethod(RenderPath_BindLua, GetLayerMask),
 		lunamethod(RenderPath_BindLua, SetLayerMask),
@@ -28,11 +28,14 @@ namespace wi::lua
 		lunamethod(RenderPath3D_BindLua, SetResolutionScale),
 		lunamethod(RenderPath3D_BindLua, SetAO),
 		lunamethod(RenderPath3D_BindLua, SetAOPower),
+		lunamethod(RenderPath3D_BindLua, SetAORange),
 		lunamethod(RenderPath3D_BindLua, SetSSREnabled),
+		lunamethod(RenderPath3D_BindLua, SetSSGIEnabled),
 		lunamethod(RenderPath3D_BindLua, SetRaytracedDiffuseEnabled),
 		lunamethod(RenderPath3D_BindLua, SetRaytracedReflectionsEnabled),
 		lunamethod(RenderPath3D_BindLua, SetShadowsEnabled),
 		lunamethod(RenderPath3D_BindLua, SetReflectionsEnabled),
+		lunamethod(RenderPath3D_BindLua, SetPlanarReflectionQuality),
 		lunamethod(RenderPath3D_BindLua, SetFXAAEnabled),
 		lunamethod(RenderPath3D_BindLua, SetBloomEnabled),
 		lunamethod(RenderPath3D_BindLua, SetBloomThreshold),
@@ -45,9 +48,11 @@ namespace wi::lua
 		lunamethod(RenderPath3D_BindLua, SetDepthOfFieldEnabled),
 		lunamethod(RenderPath3D_BindLua, SetEyeAdaptionEnabled),
 		lunamethod(RenderPath3D_BindLua, SetMSAASampleCount),
+		lunamethod(RenderPath3D_BindLua, SetCRTFilterEnabled),
 		lunamethod(RenderPath3D_BindLua, SetSharpenFilterEnabled),
 		lunamethod(RenderPath3D_BindLua, SetSharpenFilterAmount),
 		lunamethod(RenderPath3D_BindLua, SetExposure),
+		lunamethod(RenderPath3D_BindLua, SetHDRCalibration),
 		lunamethod(RenderPath3D_BindLua, SetMotionBlurStrength),
 		lunamethod(RenderPath3D_BindLua, SetDepthOfFieldStrength),
 		lunamethod(RenderPath3D_BindLua, SetLightShaftsStrength),
@@ -55,6 +60,35 @@ namespace wi::lua
 		lunamethod(RenderPath3D_BindLua, SetOutlineThickness),
 		lunamethod(RenderPath3D_BindLua, SetOutlineThreshold),
 		lunamethod(RenderPath3D_BindLua, SetOutlineColor),
+		lunamethod(RenderPath3D_BindLua, SetFSREnabled),
+		lunamethod(RenderPath3D_BindLua, SetFSRSharpness),
+		lunamethod(RenderPath3D_BindLua, SetFSR2Enabled),
+		lunamethod(RenderPath3D_BindLua, SetFSR2Sharpness),
+		lunamethod(RenderPath3D_BindLua, SetFSR2Preset),
+		lunamethod(RenderPath3D_BindLua, SetTonemap),
+		lunamethod(RenderPath3D_BindLua, SetVisibilityComputeShadingEnabled),
+
+		lunamethod(RenderPath3D_BindLua, SetCropLeft),
+		lunamethod(RenderPath3D_BindLua, SetCropTop),
+		lunamethod(RenderPath3D_BindLua, SetCropRight),
+		lunamethod(RenderPath3D_BindLua, SetCropBottom),
+
+		lunamethod(RenderPath3D_BindLua, GetLastPostProcessRT),
+
+		lunamethod(RenderPath3D_BindLua, SetDistortionOverlay),
+		lunamethod(RenderPath3D_BindLua, SetChromaticAberrationEnabled),
+		lunamethod(RenderPath3D_BindLua, SetChromaticAberrationAmount),
+		lunamethod(RenderPath3D_BindLua, SetEyeAdaptionRate),
+		lunamethod(RenderPath3D_BindLua, SetEyeAdaptionKey),
+		lunamethod(RenderPath3D_BindLua, SetContrast),
+		lunamethod(RenderPath3D_BindLua, SetSaturation),
+		lunamethod(RenderPath3D_BindLua, SetBrightness),
+		lunamethod(RenderPath3D_BindLua, SetLightShaftsFadeSpeed),
+		lunamethod(RenderPath3D_BindLua, SetMeshBlendEnabled),
+		lunamethod(RenderPath3D_BindLua, SetOcclusionCullingEnabled),
+		lunamethod(RenderPath3D_BindLua, SetSSGIDepthRejection),
+
+		lunamethod(RenderPath2D_BindLua, CopyFrom),
 		{ NULL, NULL }
 	};
 	Luna<RenderPath3D_BindLua>::PropertyType RenderPath3D_BindLua::properties[] = {
@@ -111,6 +145,22 @@ namespace wi::lua
 			wi::lua::SError(L, "SetAOPower(float value) not enough arguments!");
 		return 0;
 	}
+	int RenderPath3D_BindLua::SetAORange(lua_State* L)
+	{
+		if (component == nullptr)
+		{
+			wi::lua::SError(L, "SetAORange(float value) component is null!");
+			return 0;
+		}
+		if (wi::lua::SGetArgCount(L) > 0)
+		{
+			float value = wi::lua::SGetFloat(L, 1);
+			((RenderPath3D*)component)->setAORange(value);
+		}
+		else
+			wi::lua::SError(L, "SetAORange(float value) not enough arguments!");
+		return 0;
+	}
 	int RenderPath3D_BindLua::SetSSREnabled(lua_State* L)
 	{
 		if (component == nullptr)
@@ -122,6 +172,19 @@ namespace wi::lua
 			((RenderPath3D*)component)->setSSREnabled(wi::lua::SGetBool(L, 1));
 		else
 			wi::lua::SError(L, "SetSSREnabled(bool value) not enough arguments!");
+		return 0;
+	}
+	int RenderPath3D_BindLua::SetSSGIEnabled(lua_State* L)
+	{
+		if (component == nullptr)
+		{
+			wi::lua::SError(L, "SetSSGIEnabled(bool value) component is null!");
+			return 0;
+		}
+		if (wi::lua::SGetArgCount(L) > 0)
+			((RenderPath3D*)component)->setSSGIEnabled(wi::lua::SGetBool(L, 1));
+		else
+			wi::lua::SError(L, "SetSSGIEnabled(bool value) not enough arguments!");
 		return 0;
 	}
 	int RenderPath3D_BindLua::SetRaytracedDiffuseEnabled(lua_State* L)
@@ -167,13 +230,26 @@ namespace wi::lua
 	{
 		if (component == nullptr)
 		{
-			wi::lua::SError(L, "SetShadowsEnabled(bool value) component is null!");
+			wi::lua::SError(L, "SetReflectionsEnabled(bool value) component is null!");
 			return 0;
 		}
 		if (wi::lua::SGetArgCount(L) > 0)
 			((RenderPath3D*)component)->setReflectionsEnabled(wi::lua::SGetBool(L, 1));
 		else
-			wi::lua::SError(L, "SetShadowsEnabled(bool value) not enough arguments!");
+			wi::lua::SError(L, "SetReflectionsEnabled(bool value) not enough arguments!");
+		return 0;
+	}
+	int RenderPath3D_BindLua::SetPlanarReflectionQuality(lua_State* L)
+	{
+		if (component == nullptr)
+		{
+			wi::lua::SError(L, "SetPlanarReflectionQuality(float resolutionScale, int msaaSampleCount) component is null!");
+			return 0;
+		}
+		if (wi::lua::SGetArgCount(L) > 1)
+			((RenderPath3D*)component)->setPlanarReflectionQuality(wi::lua::SGetFloat(L, 1), wi::lua::SGetInt(L, 2));
+		else
+			wi::lua::SError(L, "SetPlanarReflectionQuality(float resolutionScale, int msaaSampleCount) not enough arguments!");
 		return 0;
 	}
 	int RenderPath3D_BindLua::SetFXAAEnabled(lua_State* L)
@@ -340,6 +416,21 @@ namespace wi::lua
 			wi::lua::SError(L, "SetMSAASampleCount(int value) not enough arguments!");
 		return 0;
 	}
+	int RenderPath3D_BindLua::SetCRTFilterEnabled(lua_State* L)
+	{
+		if (component == nullptr)
+		{
+			wi::lua::SError(L, "SetCRTFilterEnabled(bool value) component is null!");
+			return 0;
+		}
+		if (wi::lua::SGetArgCount(L) > 0)
+		{
+			((RenderPath3D*)component)->setCRTFilterEnabled(wi::lua::SGetBool(L, 1));
+		}
+		else
+			wi::lua::SError(L, "SetCRTFilterEnabled(bool value) not enough arguments!");
+		return 0;
+	}
 	int RenderPath3D_BindLua::SetSharpenFilterEnabled(lua_State* L)
 	{
 		if (component == nullptr)
@@ -383,6 +474,21 @@ namespace wi::lua
 		}
 		else
 			wi::lua::SError(L, "SetExposure(float value) not enough arguments!");
+		return 0;
+	}
+	int RenderPath3D_BindLua::SetHDRCalibration(lua_State* L)
+	{
+		if (component == nullptr)
+		{
+			wi::lua::SError(L, "SetHDRCalibration(float value) component is null!");
+			return 0;
+		}
+		if (wi::lua::SGetArgCount(L) > 0)
+		{
+			((RenderPath3D*)component)->setHDRCalibration(wi::lua::SGetFloat(L, 1));
+		}
+		else
+			wi::lua::SError(L, "SetHDRCalibration(float value) not enough arguments!");
 		return 0;
 	}
 	int RenderPath3D_BindLua::SetMotionBlurStrength(lua_State* L)
@@ -490,6 +596,355 @@ namespace wi::lua
 			wi::lua::SError(L, "SetOutlineColor(float r,g,b,a) not enough arguments!");
 		return 0;
 	}
+	int RenderPath3D_BindLua::SetFSREnabled(lua_State* L)
+	{
+		if (component == nullptr)
+		{
+			wi::lua::SError(L, "SetFSREnabled(bool value) component is null!");
+			return 0;
+		}
+		if (wi::lua::SGetArgCount(L) > 0)
+			((RenderPath3D*)component)->setFSREnabled(wi::lua::SGetBool(L, 1));
+		else
+			wi::lua::SError(L, "SetFSREnabled(bool value) not enough arguments!");
+		return 0;
+	}
+	int RenderPath3D_BindLua::SetFSRSharpness(lua_State* L)
+	{
+		if (component == nullptr)
+		{
+			wi::lua::SError(L, "SetFSRSharpness(float value) component is null!");
+			return 0;
+		}
+		if (wi::lua::SGetArgCount(L) > 0)
+		{
+			((RenderPath3D*)component)->setFSRSharpness(wi::lua::SGetFloat(L, 1));
+		}
+		else
+			wi::lua::SError(L, "SetFSRSharpness(float value) not enough arguments!");
+		return 0;
+	}
+	int RenderPath3D_BindLua::SetFSR2Enabled(lua_State* L)
+	{
+		if (component == nullptr)
+		{
+			wi::lua::SError(L, "SetFSR2Enabled(bool value) component is null!");
+			return 0;
+		}
+		if (wi::lua::SGetArgCount(L) > 0)
+			((RenderPath3D*)component)->setFSR2Enabled(wi::lua::SGetBool(L, 1));
+		else
+			wi::lua::SError(L, "SetFSR2Enabled(bool value) not enough arguments!");
+		return 0;
+	}
+	int RenderPath3D_BindLua::SetFSR2Sharpness(lua_State* L)
+	{
+		if (component == nullptr)
+		{
+			wi::lua::SError(L, "SetFSR2Sharpness(float value) component is null!");
+			return 0;
+		}
+		if (wi::lua::SGetArgCount(L) > 0)
+		{
+			((RenderPath3D*)component)->setFSR2Sharpness(wi::lua::SGetFloat(L, 1));
+		}
+		else
+			wi::lua::SError(L, "SetFSR2Sharpness(float value) not enough arguments!");
+		return 0;
+	}
+	int RenderPath3D_BindLua::SetFSR2Preset(lua_State* L)
+	{
+		if (component == nullptr)
+		{
+			wi::lua::SError(L, "SetFSR2Preset(FSR2_Preset value) component is null!");
+			return 0;
+		}
+		if (wi::lua::SGetArgCount(L) > 0)
+		{
+			((RenderPath3D*)component)->setFSR2Preset((wi::RenderPath3D::FSR2_Preset)wi::lua::SGetInt(L, 1));
+		}
+		else
+			wi::lua::SError(L, "SetFSR2Preset(FSR2_Preset value) not enough arguments!");
+		return 0;
+	}
+	int RenderPath3D_BindLua::SetTonemap(lua_State* L)
+	{
+		if (component == nullptr)
+		{
+			wi::lua::SError(L, "SetTonemap(Tonemap value) component is null!");
+			return 0;
+		}
+		if (wi::lua::SGetArgCount(L) > 0)
+		{
+			((RenderPath3D*)component)->setTonemap((wi::renderer::Tonemap)wi::lua::SGetInt(L, 1));
+		}
+		else
+			wi::lua::SError(L, "SetTonemap(Tonemap value) not enough arguments!");
+		return 0;
+	}
+	int RenderPath3D_BindLua::SetCropLeft(lua_State* L)
+	{
+		((RenderPath3D*)component)->crop_left = wi::lua::SGetFloat(L, 1);
+		return 0;
+	}
+	int RenderPath3D_BindLua::SetCropTop(lua_State* L)
+	{
+		((RenderPath3D*)component)->crop_top = wi::lua::SGetFloat(L, 1);
+		return 0;
+	}
+	int RenderPath3D_BindLua::SetCropRight(lua_State* L)
+	{
+		((RenderPath3D*)component)->crop_right = wi::lua::SGetFloat(L, 1);
+		return 0;
+	}
+	int RenderPath3D_BindLua::SetCropBottom(lua_State* L)
+	{
+		((RenderPath3D*)component)->crop_bottom = wi::lua::SGetFloat(L, 1);
+		return 0;
+	}
+	int RenderPath3D_BindLua::SetVisibilityComputeShadingEnabled(lua_State* L)
+	{
+		if (component == nullptr)
+		{
+			wi::lua::SError(L, "SetVisibilityComputeShadingEnabled(bool value) component is null!");
+			return 0;
+		}
+		if (wi::lua::SGetArgCount(L) > 0)
+			((RenderPath3D*)component)->setVisibilityComputeShadingEnabled(wi::lua::SGetBool(L, 1));
+		else
+			wi::lua::SError(L, "SetVisibilityComputeShadingEnabled(bool value) not enough arguments!");
+		return 0;
+	}
+
+	int RenderPath3D_BindLua::GetLastPostProcessRT(lua_State* L)
+	{
+		const wi::graphics::Texture* tex = ((RenderPath3D*)component)->GetLastPostprocessRT();
+		if (tex == nullptr)
+			return 0;
+		Luna<Texture_BindLua>::push(L, *tex);
+		return 1;
+	}
+
+	int RenderPath3D_BindLua::SetDistortionOverlay(lua_State* L)
+	{
+		int argc = wi::lua::SGetArgCount(L);
+		if (argc < 1)
+		{
+			wi::lua::SError(L, "SetDistortionOverlay(Texture texture) not enough arguments!");
+			return 0;
+		}
+		Texture_BindLua* tex = Luna<Texture_BindLua>::lightcheck(L, 1);
+		if (tex == nullptr)
+		{
+			wi::lua::SError(L, "SetDistortionOverlay(Texture texture) first argument is not a Texture!");
+			return 0;
+		}
+		if (tex->resource.IsValid())
+		{
+			((RenderPath3D*)component)->distortion_overlay = tex->resource.GetTexture();
+		}
+		else
+		{
+			((RenderPath3D*)component)->distortion_overlay = {};
+		}
+		return 0;
+	}
+
+	int RenderPath3D_BindLua::SetChromaticAberrationEnabled(lua_State* L)
+	{
+		if (component == nullptr)
+		{
+			wi::lua::SError(L, "SetChromaticAberrationEnabled(bool value) component is null!");
+			return 0;
+		}
+		if (wi::lua::SGetArgCount(L) > 0)
+		{
+			((RenderPath3D*)component)->setChromaticAberrationEnabled(wi::lua::SGetBool(L, 1));
+		}
+		else
+			wi::lua::SError(L, "SetChromaticAberrationEnabled(bool value) not enough arguments!");
+		return 0;
+	}
+
+	int RenderPath3D_BindLua::SetChromaticAberrationAmount(lua_State* L)
+	{
+		if (component == nullptr)
+		{
+			wi::lua::SError(L, "SetChromaticAberrationAmount(float value) component is null!");
+			return 0;
+		}
+		if (wi::lua::SGetArgCount(L) > 0)
+		{
+			((RenderPath3D*)component)->setChromaticAberrationAmount(wi::lua::SGetFloat(L, 1));
+		}
+		else
+			wi::lua::SError(L, "SetChromaticAberrationAmount(float value) not enough arguments!");
+		return 0;
+	}
+
+	int RenderPath3D_BindLua::SetEyeAdaptionRate(lua_State* L)
+	{
+		if (component == nullptr)
+		{
+			wi::lua::SError(L, "SetEyeAdaptionRate(float value) component is null!");
+			return 0;
+		}
+		if (wi::lua::SGetArgCount(L) > 0)
+		{
+			((RenderPath3D*)component)->setEyeAdaptionRate(wi::lua::SGetFloat(L, 1));
+		}
+		else
+			wi::lua::SError(L, "SetEyeAdaptionRate(float value) not enough arguments!");
+		return 0;
+	}
+
+	int RenderPath3D_BindLua::SetEyeAdaptionKey(lua_State* L)
+	{
+		if (component == nullptr)
+		{
+			wi::lua::SError(L, "SetEyeAdaptionKey(float value) component is null!");
+			return 0;
+		}
+		if (wi::lua::SGetArgCount(L) > 0)
+		{
+			((RenderPath3D*)component)->setEyeAdaptionKey(wi::lua::SGetFloat(L, 1));
+		}
+		else
+			wi::lua::SError(L, "SetEyeAdaptionKey(float value) not enough arguments!");
+		return 0;
+	}
+
+	int RenderPath3D_BindLua::SetContrast(lua_State* L)
+	{
+		if (component == nullptr)
+		{
+			wi::lua::SError(L, "SetContrast(float value) component is null!");
+			return 0;
+		}
+		if (wi::lua::SGetArgCount(L) > 0)
+		{
+			((RenderPath3D*)component)->setContrast(wi::lua::SGetFloat(L, 1));
+		}
+		else
+			wi::lua::SError(L, "SetContrast(float value) not enough arguments!");
+		return 0;
+	}
+
+	int RenderPath3D_BindLua::SetSaturation(lua_State* L)
+	{
+		if (component == nullptr)
+		{
+			wi::lua::SError(L, "SetSaturation(float value) component is null!");
+			return 0;
+		}
+		if (wi::lua::SGetArgCount(L) > 0)
+		{
+			((RenderPath3D*)component)->setSaturation(wi::lua::SGetFloat(L, 1));
+		}
+		else
+			wi::lua::SError(L, "SetSaturation(float value) not enough arguments!");
+		return 0;
+	}
+
+	int RenderPath3D_BindLua::SetBrightness(lua_State* L)
+	{
+		if (component == nullptr)
+		{
+			wi::lua::SError(L, "SetBrightness(float value) component is null!");
+			return 0;
+		}
+		if (wi::lua::SGetArgCount(L) > 0)
+		{
+			((RenderPath3D*)component)->setBrightness(wi::lua::SGetFloat(L, 1));
+		}
+		else
+			wi::lua::SError(L, "SetBrightness(float value) not enough arguments!");
+		return 0;
+	}
+
+	int RenderPath3D_BindLua::SetLightShaftsFadeSpeed(lua_State* L)
+	{
+		if (component == nullptr)
+		{
+			wi::lua::SError(L, "SetLightShaftsFadeSpeed(float value) component is null!");
+			return 0;
+		}
+		if (wi::lua::SGetArgCount(L) > 0)
+		{
+			((RenderPath3D*)component)->setLightShaftsFadeSpeed(wi::lua::SGetFloat(L, 1));
+		}
+		else
+			wi::lua::SError(L, "SetLightShaftsFadeSpeed(float value) not enough arguments!");
+		return 0;
+	}
+
+	int RenderPath3D_BindLua::SetMeshBlendEnabled(lua_State* L)
+	{
+		if (component == nullptr)
+		{
+			wi::lua::SError(L, "SetMeshBlendEnabled(bool value) component is null!");
+			return 0;
+		}
+		if (wi::lua::SGetArgCount(L) > 0)
+		{
+			((RenderPath3D*)component)->setMeshBlendEnabled(wi::lua::SGetBool(L, 1));
+		}
+		else
+			wi::lua::SError(L, "SetMeshBlendEnabled(bool value) not enough arguments!");
+		return 0;
+	}
+
+	int RenderPath3D_BindLua::SetOcclusionCullingEnabled(lua_State* L)
+	{
+		if (component == nullptr)
+		{
+			wi::lua::SError(L, "SetOcclusionCullingEnabled(bool value) component is null!");
+			return 0;
+		}
+		if (wi::lua::SGetArgCount(L) > 0)
+		{
+			((RenderPath3D*)component)->setOcclusionCullingEnabled(wi::lua::SGetBool(L, 1));
+		}
+		else
+			wi::lua::SError(L, "SetOcclusionCullingEnabled(bool value) not enough arguments!");
+		return 0;
+	}
+
+	int RenderPath3D_BindLua::SetSSGIDepthRejection(lua_State* L)
+	{
+		if (component == nullptr)
+		{
+			wi::lua::SError(L, "SetSSGIDepthRejection(float value) component is null!");
+			return 0;
+		}
+		if (wi::lua::SGetArgCount(L) > 0)
+		{
+			((RenderPath3D*)component)->setSSGIDepthRejection(wi::lua::SGetFloat(L, 1));
+		}
+		else
+			wi::lua::SError(L, "SetSSGIDepthRejection(float value) not enough arguments!");
+		return 0;
+	}
+
+static const std::string value_bindings = R"(
+AO_DISABLED = 0
+AO_SSAO = 1
+AO_HBAO = 2
+AO_MSAO = 3
+AO_RTAO = 4
+
+FSR2_Preset = {
+	Quality = 0,
+	Balanced = 1,
+	Performance = 2,
+	Ultra_Performance = 3,
+}
+
+Tonemap = {
+	Reinhard = 0,
+	ACES = 1,
+}
+)";
 
 	void RenderPath3D_BindLua::Bind()
 	{
@@ -499,11 +954,7 @@ namespace wi::lua
 			initialized = true;
 			Luna<RenderPath3D_BindLua>::Register(wi::lua::GetLuaState());
 
-			wi::lua::RunText("AO_DISABLED = 0");
-			wi::lua::RunText("AO_SSAO = 1");
-			wi::lua::RunText("AO_HBAO = 2");
-			wi::lua::RunText("AO_MSAO = 3");
-			wi::lua::RunText("AO_RTAO = 4");
+			wi::lua::RunText(value_bindings);
 		}
 	}
 

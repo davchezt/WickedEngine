@@ -9,7 +9,7 @@ namespace wi::lua
 	class Input_BindLua
 	{
 	public:
-		static const char className[];
+		inline static constexpr char className[] = "Input";
 		static Luna<Input_BindLua>::FunctionType methods[];
 		static Luna<Input_BindLua>::PropertyType properties[];
 
@@ -17,6 +17,7 @@ namespace wi::lua
 
 		int Down(lua_State* L);
 		int Press(lua_State* L);
+		int Release(lua_State* L);
 		int Hold(lua_State* L);
 		int GetPointer(lua_State* L);
 		int SetPointer(lua_State* L);
@@ -25,6 +26,19 @@ namespace wi::lua
 		int GetAnalog(lua_State* L);
 		int GetTouches(lua_State* L);
 		int SetControllerFeedback(lua_State* L);
+		int WhatIsPressed(lua_State* L);
+		int IsGamepadButton(lua_State* L);
+		int ButtonToString(lua_State* L);
+		int StringToButton(lua_State* L);
+		int SetCursor(lua_State* L);
+		int SetCursorFromFile(lua_State* L);
+		int ResetCursor(lua_State* L);
+		int ResetCursors(lua_State* L);
+		
+		int GetTouchPinch(lua_State* L);
+		int GetTouchPan(lua_State* L);
+		int IsTouchPanning(lua_State* L);
+		int IsTouchPanStarting(lua_State* L);
 
 		static void Bind();
 	};
@@ -33,7 +47,7 @@ namespace wi::lua
 	{
 	public:
 		wi::input::Touch touch;
-		static const char className[];
+		inline static constexpr char className[] = "Touch";
 		static Luna<Touch_BindLua>::FunctionType methods[];
 		static Luna<Touch_BindLua>::PropertyType properties[];
 
@@ -50,7 +64,7 @@ namespace wi::lua
 	{
 	public:
 		wi::input::ControllerFeedback feedback;
-		static const char className[];
+		inline static constexpr char className[] = "ControllerFeedback";
 		static Luna<ControllerFeedback_BindLua>::FunctionType methods[];
 		static Luna<ControllerFeedback_BindLua>::PropertyType properties[];
 

@@ -8,20 +8,36 @@
 
 struct PatchSimulationData
 {
-	float3 position;
-	uint tangent_random;
-	uint3 normal_velocity; // packed fp16
-	uint binormal_length;
+	float3 prevTail;
+	float3 currentTail;
+};
+
+enum HAIR_FLAGS
+{
+	HAIR_FLAG_REGENERATE_FRAME = 1 << 0,
+	HAIR_FLAG_UNORM_POS = 1 << 1,
+	HAIR_FLAG_CAMERA_BEND = 1 << 2,
+	HAIR_FLAG_RAYTRACED = 1 << 3, // Set when the system has a valid BLAS, so the raytracing position buffer is consumed
+};
+
+struct HairParticleAtlasRect
+{
+	float4 texMulAdd;
+	float size;
+	float aspect;
+	float padding1;
+	float padding2;
 };
 
 CBUFFER(HairParticleCB, CBSLOT_OTHER_HAIRPARTICLE)
 {
 	ShaderTransform xHairTransform;
+	ShaderTransform xHairBaseMeshUnormRemap;
 
-	uint xHairRegenerate;
-	float xLength;
-	float xStiffness;
-	float xHairRandomness;
+	uint xHairFlags;
+	float xHairLength;
+	float xHairStiffness;
+	float xHairDrag;
 
 	uint xHairParticleCount;
 	uint xHairStrandCount;
@@ -30,16 +46,20 @@ CBUFFER(HairParticleCB, CBSLOT_OTHER_HAIRPARTICLE)
 
 	float xHairViewDistance;
 	uint xHairBaseMeshIndexCount;
-	uint xHairBaseMeshVertexPositionStride;
 	uint xHairInstanceIndex;
-
-	uint2 xHairFramesXY;
-	uint xHairFrameCount;
-	uint xHairFrameStart;
-
-	float2 xHairTexMul;
-	float xHairAspect;
 	uint xHairLayerMask;
+
+	float xHairRandomness;
+	float xHairAspect;
+	float xHairUniformity;
+	uint xHairAtlasRectCount;
+
+	float xHairGravityPower;
+	uint xHairBillboardCount;
+	float xHair_padding0;
+	float xHair_padding1;
+
+	HairParticleAtlasRect xHairAtlasRects[64];
 };
 
 #endif // WI_SHADERINTEROP_HAIRPARTICLE_H

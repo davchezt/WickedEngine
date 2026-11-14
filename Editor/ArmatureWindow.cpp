@@ -1,6 +1,5 @@
 #include "stdafx.h"
 #include "ArmatureWindow.h"
-#include "Editor.h"
 
 using namespace wi::ecs;
 using namespace wi::scene;
@@ -9,8 +8,8 @@ void ArmatureWindow::Create(EditorComponent* _editor)
 {
 	editor = _editor;
 
-	wi::gui::Window::Create(ICON_ARMATURE " Armature", wi::gui::Window::WindowControls::COLLAPSE | wi::gui::Window::WindowControls::CLOSE);
-	SetSize(XMFLOAT2(670, 350));
+	wi::gui::Window::Create(ICON_ARMATURE " Armature", wi::gui::Window::WindowControls::COLLAPSE | wi::gui::Window::WindowControls::CLOSE | wi::gui::Window::WindowControls::FIT_ALL_WIDGETS_VERTICAL);
+	SetSize(XMFLOAT2(670, 380));
 
 	closeButton.SetTooltip("Delete ArmatureComponent");
 	OnClose([=](wi::gui::EventArgs args) {
@@ -23,7 +22,7 @@ void ArmatureWindow::Create(EditorComponent* _editor)
 
 		editor->RecordEntity(archive, entity);
 
-		editor->optionsWnd.RefreshEntityTree();
+		editor->componentsWnd.RefreshEntityTree();
 		});
 
 	float x = 60;
@@ -33,43 +32,142 @@ void ArmatureWindow::Create(EditorComponent* _editor)
 	float wid = 220;
 
 	infoLabel.Create("");
-	infoLabel.SetSize(XMFLOAT2(100, 50));
 	infoLabel.SetText("This window will stay open even if you select other entities until it is collapsed, so you can select other bone entities.");
+	infoLabel.SetFitTextEnabled(true);
 	AddWidget(&infoLabel);
 
 	resetPoseButton.Create("Reset Pose");
+	resetPoseButton.SetTooltip("Reset Pose will be performed on the Armature, based on the bone inverse bind matrices.");
 	resetPoseButton.SetSize(XMFLOAT2(wid, hei));
 	resetPoseButton.OnClick([=](wi::gui::EventArgs args) {
 		wi::scene::Scene& scene = editor->GetCurrentScene();
+		scene.ResetPose(entity);
+	});
+	AddWidget(&resetPoseButton);
+
+	createHumanoidButton.Create("Try to create humanoid rig");
+	createHumanoidButton.SetTooltip("Tries to create a humanoid component based on bone naming convention.\nIt supports the VRM and Mixamo naming convention.");
+	createHumanoidButton.SetSize(XMFLOAT2(wid, hei));
+	createHumanoidButton.OnClick([=](wi::gui::EventArgs args) {
+		wi::scene::Scene& scene = editor->GetCurrentScene();
+		if (scene.humanoids.Contains(entity))
+		{
+			wi::helper::messageBox("Humanoid Component already exists!");
+			return;
+		}
+
 		const ArmatureComponent* armature = scene.armatures.GetComponent(entity);
 		if (armature == nullptr)
 			return;
 
-		XMMATRIX R = XMMatrixIdentity();
-		const TransformComponent* armature_transform = scene.transforms.GetComponent(entity);
-		if (armature_transform != nullptr)
-		{
-			R = XMMatrixInverse(nullptr, XMLoadFloat4x4(&armature_transform->world));
-		}
+		static const wi::unordered_map<HumanoidComponent::HumanoidBone, wi::vector<std::string>> mapping = {
+			{HumanoidComponent::HumanoidBone::Hips, {"Hips", "pelvis"}},
+			{HumanoidComponent::HumanoidBone::Spine, {"Spine", "spine_01"}},
+			{HumanoidComponent::HumanoidBone::Chest, {"Chest", "Spine1", "spine_02"}},
+			{HumanoidComponent::HumanoidBone::UpperChest, {"UpperChest", "Spine2", "spine_03"}},
+			{HumanoidComponent::HumanoidBone::Neck, {"Neck"}},
+
+			{HumanoidComponent::HumanoidBone::Head, {"Head"}},
+			{HumanoidComponent::HumanoidBone::LeftEye, {"LeftEye"}},
+			{HumanoidComponent::HumanoidBone::RightEye, {"RightEye"}},
+			{HumanoidComponent::HumanoidBone::Jaw, {"Jaw"}},
+
+			{HumanoidComponent::HumanoidBone::LeftUpperLeg, {"LeftUpperLeg", "LeftUpLeg", "thigh_l"}},
+			{HumanoidComponent::HumanoidBone::LeftLowerLeg, {"LeftLowerLeg", "LeftLeg", "calf_l"}},
+			{HumanoidComponent::HumanoidBone::LeftFoot, {"LeftFoot", "foot_l"}},
+			{HumanoidComponent::HumanoidBone::LeftToes, {"LeftToe", "ball_l"}},
+			{HumanoidComponent::HumanoidBone::RightUpperLeg, {"RightUpperLeg", "RightUpLeg", "thigh_r"}},
+			{HumanoidComponent::HumanoidBone::RightLowerLeg, {"RightLowerLeg", "RightLeg", "calf_r"}},
+			{HumanoidComponent::HumanoidBone::RightFoot, {"RightFoot", "foot_r"}},
+			{HumanoidComponent::HumanoidBone::RightToes, {"RightToe", "ball_r"}},
+
+			{HumanoidComponent::HumanoidBone::LeftShoulder, {"LeftShoulder", "clavicle_l"}},
+			{HumanoidComponent::HumanoidBone::LeftUpperArm, {"LeftUpperArm", "LeftArm", "upperarm_l"}},
+			{HumanoidComponent::HumanoidBone::LeftLowerArm, {"LeftLowerArm", "LeftForeArm", "lowerarm_l"}},
+			{HumanoidComponent::HumanoidBone::LeftHand, {"LeftHand", "hand_l"}},
+			{HumanoidComponent::HumanoidBone::RightShoulder, {"RightShoulder", "clavicle_r"}},
+			{HumanoidComponent::HumanoidBone::RightUpperArm, {"RightUpperArm", "RightArm", "upperarm_r"}},
+			{HumanoidComponent::HumanoidBone::RightLowerArm, {"RightLowerArm", "RightForeArm", "lowerarm_r"}},
+			{HumanoidComponent::HumanoidBone::RightHand, {"RightHand", "hand_r"}},
+
+			{HumanoidComponent::HumanoidBone::LeftThumbMetacarpal, {"LeftThumbMetacarpal", "LeftHandThumb1", "thumb_01_l"}},
+			{HumanoidComponent::HumanoidBone::LeftThumbProximal, {"LeftThumbProximal", "LeftHandThumb2", "thumb_02_l"}},
+			{HumanoidComponent::HumanoidBone::LeftThumbDistal, {"LeftThumbDistal", "LeftHandThumb3", "thumb_03_l"}},
+			{HumanoidComponent::HumanoidBone::LeftIndexProximal, {"LeftIndexProximal", "LeftHandIndex1", "index_01_l"}},
+			{HumanoidComponent::HumanoidBone::LeftIndexIntermediate, {"LeftIndexIntermediate", "LeftHandIndex2", "index_02_l"}},
+			{HumanoidComponent::HumanoidBone::LeftIndexDistal, {"LeftIndexDistal", "LeftHandIndex3", "index_03_l"}},
+			{HumanoidComponent::HumanoidBone::LeftMiddleProximal, {"LeftMiddleProximal", "LeftHandMiddle1", "middle_01_l"}},
+			{HumanoidComponent::HumanoidBone::LeftMiddleIntermediate, {"LeftMiddleIntermediate", "LeftHandMiddle2", "middle_02_l"}},
+			{HumanoidComponent::HumanoidBone::LeftMiddleDistal, {"LeftMiddleDistal", "LeftHandMiddle3", "middle_03_l"}},
+			{HumanoidComponent::HumanoidBone::LeftRingProximal, {"LeftRingProximal", "LeftHandRing1", "ring_01_l"}},
+			{HumanoidComponent::HumanoidBone::LeftRingIntermediate, {"LeftRingIntermediate", "LeftHandRing2", "ring_02_l"}},
+			{HumanoidComponent::HumanoidBone::LeftRingDistal, {"LeftRingDistal", "LeftHandRing3", "ring_03_l"}},
+			{HumanoidComponent::HumanoidBone::LeftLittleProximal, {"LeftLittleProximal", "LeftHandPinky1", "pinky_01_l"}},
+			{HumanoidComponent::HumanoidBone::LeftLittleIntermediate, {"LeftLittleIntermediate", "LeftHandPinky2", "pinky_02_l"}},
+			{HumanoidComponent::HumanoidBone::LeftLittleDistal, {"LeftLittleDistal", "LeftHandPinky3", "pinky_03_l"}},
+			{HumanoidComponent::HumanoidBone::RightThumbMetacarpal, {"RightThumbMetacarpal", "RightHandThumb1", "thumb_01_r"}},
+			{HumanoidComponent::HumanoidBone::RightThumbProximal, {"RightThumbProximal", "RightHandThumb2", "thumb_02_r"}},
+			{HumanoidComponent::HumanoidBone::RightThumbDistal, {"RightThumbDistal", "RightHandThumb3", "thumb_03_r"}},
+			{HumanoidComponent::HumanoidBone::RightIndexIntermediate, {"RightIndexIntermediate", "RightHandIndex2", "index_01_r"}},
+			{HumanoidComponent::HumanoidBone::RightIndexDistal, {"RightIndexDistal", "RightHandIndex3", "index_02_r"}},
+			{HumanoidComponent::HumanoidBone::RightIndexProximal, {"RightIndexProximal", "RightHandIndex1", "index_03_r"}},
+			{HumanoidComponent::HumanoidBone::RightMiddleProximal, {"RightMiddleProximal", "RightHandMiddle1", "middle_01_r"}},
+			{HumanoidComponent::HumanoidBone::RightMiddleIntermediate, {"RightMiddleIntermediate", "RightHandMiddle2", "middle_02_r"}},
+			{HumanoidComponent::HumanoidBone::RightMiddleDistal, {"RightMiddleDistal", "RightHandMiddle3", "middle_03_r"}},
+			{HumanoidComponent::HumanoidBone::RightRingProximal, {"RightRingProximal", "RightHandRing1", "ring_01_r"}},
+			{HumanoidComponent::HumanoidBone::RightRingIntermediate, {"RightRingIntermediate", "RightHandRing2", "ring_02_r"}},
+			{HumanoidComponent::HumanoidBone::RightRingDistal, {"RightRingDistal", "RightHandRing3", "ring_03_r"}},
+			{HumanoidComponent::HumanoidBone::RightLittleProximal, {"RightLittleProximal", "RightHandPinky1", "pinky_01_r"}},
+			{HumanoidComponent::HumanoidBone::RightLittleIntermediate, {"RightLittleIntermediate", "RightHandPinky2", "pinky_02_r"}},
+			{HumanoidComponent::HumanoidBone::RightLittleDistal, {"RightLittleDistal", "RightHandPinky3", "pinky_03_r"}},
+		};
+
+		HumanoidComponent humanoid;
+		bool found_anything = false;
 
 		for (size_t i = 0; i < armature->boneCollection.size(); ++i)
 		{
 			Entity bone = armature->boneCollection[i];
-			TransformComponent* transform = scene.transforms.GetComponent(bone);
-			if (transform != nullptr)
+			NameComponent* name = scene.names.GetComponent(bone);
+			if (name == nullptr)
+				continue;
+
+			size_t iType = 0;
+			for (auto& humanoidBone : humanoid.bones)
 			{
-				transform->ClearTransform();
-				transform->MatrixTransform(XMMatrixInverse(nullptr, XMLoadFloat4x4(&armature->inverseBindMatrices[i])) * R);
-				transform->UpdateTransform();
-				const HierarchyComponent* hier = scene.hierarchy.GetComponent(bone);
-				if (hier != nullptr && hier->parentID != INVALID_ENTITY)
+				if (humanoidBone == INVALID_ENTITY)
 				{
-					scene.Component_Attach(bone, hier->parentID, false);
+					HumanoidComponent::HumanoidBone type = (HumanoidComponent::HumanoidBone)iType;
+					auto it = mapping.find(type);
+					if (it != mapping.end())
+					{
+						for (auto& candidate : it->second)
+						{
+							if (wi::helper::toUpper(name->name).find(wi::helper::toUpper(candidate)) != std::string::npos)
+							{
+								humanoidBone = bone;
+								found_anything = true;
+								break;
+							}
+						}
+					}
 				}
+				iType++;
 			}
 		}
-		});
-	AddWidget(&resetPoseButton);
+
+		if (found_anything)
+		{
+			scene.humanoids.Create(entity) = humanoid;
+			editor->componentsWnd.humanoidWnd.SetEntity(INVALID_ENTITY);
+			editor->componentsWnd.humanoidWnd.SetEntity(entity);
+		}
+		else
+		{
+			wi::helper::messageBox("No matching humanoid bones found!");
+		}
+	});
+	AddWidget(&createHumanoidButton);
 
 	boneList.Create("Bones: ");
 	boneList.SetSize(XMFLOAT2(wid, 200));
@@ -79,7 +177,7 @@ void ArmatureWindow::Create(EditorComponent* _editor)
 		if (args.iValue < 0)
 			return;
 
-		wi::Archive& archive = editor->AdvanceHistory();
+		wi::Archive& archive = editor->AdvanceHistory(true);
 		archive << EditorComponent::HISTORYOP_SELECTION;
 		// record PREVIOUS selection state...
 		editor->RecordSelection(archive);
@@ -100,7 +198,7 @@ void ArmatureWindow::Create(EditorComponent* _editor)
 		// record NEW selection state...
 		editor->RecordSelection(archive);
 
-		editor->optionsWnd.RefreshEntityTree();
+		editor->componentsWnd.RefreshEntityTree();
 
 		});
 	AddWidget(&boneList);
@@ -121,7 +219,7 @@ void ArmatureWindow::SetEntity(Entity entity)
 
 	const ArmatureComponent* armature = scene.armatures.GetComponent(entity);
 
-	if (armature != nullptr || IsCollapsed())
+	if (armature != nullptr || (IsCollapsed() && !scene.Entity_IsDescendant(entity, this->entity)))
 	{
 		this->entity = entity;
 		RefreshBoneList();
@@ -163,45 +261,14 @@ void ArmatureWindow::RefreshBoneList()
 void ArmatureWindow::ResizeLayout()
 {
 	wi::gui::Window::ResizeLayout();
-	const float padding = 4;
-	const float width = GetWidgetAreaSize().x;
-	float y = padding;
-	float jump = 20;
+	layout.margin_left = 110;
 
-	const float margin_left = 110;
-	const float margin_right = 45;
+	layout.add_fullwidth(infoLabel);
+	layout.add_fullwidth(resetPoseButton);
+	layout.add_fullwidth(createHumanoidButton);
 
-	auto add = [&](wi::gui::Widget& widget) {
-		if (!widget.IsVisible())
-			return;
-		widget.SetPos(XMFLOAT2(margin_left, y));
-		widget.SetSize(XMFLOAT2(width - margin_left - margin_right, widget.GetScale().y));
-		y += widget.GetSize().y;
-		y += padding;
-	};
-	auto add_right = [&](wi::gui::Widget& widget) {
-		if (!widget.IsVisible())
-			return;
-		widget.SetPos(XMFLOAT2(width - margin_right - widget.GetSize().x, y));
-		y += widget.GetSize().y;
-		y += padding;
-	};
-	auto add_fullwidth = [&](wi::gui::Widget& widget) {
-		if (!widget.IsVisible())
-			return;
-		const float margin_left = padding;
-		const float margin_right = padding;
-		widget.SetPos(XMFLOAT2(margin_left, y));
-		widget.SetSize(XMFLOAT2(width - margin_left - margin_right, widget.GetScale().y));
-		y += widget.GetSize().y;
-		y += padding;
-	};
+	layout.jump();
 
-	add_fullwidth(infoLabel);
-	add_fullwidth(resetPoseButton);
-
-	y += jump;
-
-	add_fullwidth(boneList);
+	layout.add_fullwidth(boneList);
 
 }

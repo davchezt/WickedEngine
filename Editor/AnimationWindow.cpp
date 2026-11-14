@@ -1,78 +1,17 @@
 #include "stdafx.h"
 #include "AnimationWindow.h"
-#include "Editor.h"
 
 using namespace wi::ecs;
 using namespace wi::scene;
 
-XMMATRIX ComputeWorldMatrixRecursive(Scene& scene, Entity entity, XMMATRIX localMatrix)
-{
-	HierarchyComponent* hier = scene.hierarchy.GetComponent(entity);
-	if (hier != nullptr)
-	{
-		Entity parentID = hier->parentID;
-		while (parentID != INVALID_ENTITY)
-		{
-			TransformComponent* transform_parent = scene.transforms.GetComponent(parentID);
-			if (transform_parent == nullptr)
-				break;
-
-			localMatrix *= transform_parent->GetLocalMatrix();
-
-			const HierarchyComponent* hier_recursive = scene.hierarchy.GetComponent(parentID);
-			if (hier_recursive != nullptr)
-			{
-				parentID = hier_recursive->parentID;
-			}
-			else
-			{
-				parentID = INVALID_ENTITY;
-			}
-		}
-	}
-	return localMatrix;
-}
-XMMATRIX ComputeInverseParentMatrixRecursive(Scene& scene, Entity entity)
-{
-	XMMATRIX inverseParentMatrix = XMMatrixIdentity();
-
-	HierarchyComponent* hier = scene.hierarchy.GetComponent(entity);
-	if (hier != nullptr)
-	{
-		Entity parentID = hier->parentID;
-		while (parentID != INVALID_ENTITY)
-		{
-			TransformComponent* transform_parent = scene.transforms.GetComponent(parentID);
-			if (transform_parent == nullptr)
-				break;
-
-			inverseParentMatrix *= transform_parent->GetLocalMatrix();
-
-			const HierarchyComponent* hier_recursive = scene.hierarchy.GetComponent(parentID);
-			if (hier_recursive != nullptr)
-			{
-				parentID = hier_recursive->parentID;
-			}
-			else
-			{
-				parentID = INVALID_ENTITY;
-			}
-		}
-
-		inverseParentMatrix = XMMatrixInverse(nullptr, inverseParentMatrix);
-	}
-	return inverseParentMatrix;
-}
-
 void AnimationWindow::Create(EditorComponent* _editor)
 {
 	editor = _editor;
-	wi::gui::Window::Create(ICON_ANIMATION " Animation", wi::gui::Window::WindowControls::COLLAPSE | wi::gui::Window::WindowControls::CLOSE);
-	SetSize(XMFLOAT2(520, 500));
+	wi::gui::Window::Create(ICON_ANIMATION " Animation", wi::gui::Window::WindowControls::COLLAPSE | wi::gui::Window::WindowControls::CLOSE | wi::gui::Window::WindowControls::FIT_ALL_WIDGETS_VERTICAL);
+	SetSize(XMFLOAT2(520, 540));
 
 	closeButton.SetTooltip("Delete AnimationComponent");
 	OnClose([=](wi::gui::EventArgs args) {
-
 		wi::Archive& archive = editor->AdvanceHistory();
 		archive << EditorComponent::HISTORYOP_COMPONENT_DATA;
 		editor->RecordEntity(archive, entity);
@@ -81,7 +20,7 @@ void AnimationWindow::Create(EditorComponent* _editor)
 
 		editor->RecordEntity(archive, entity);
 
-		editor->optionsWnd.RefreshEntityTree();
+		editor->componentsWnd.RefreshEntityTree();
 		});
 
 	float x = 80;
@@ -89,10 +28,12 @@ void AnimationWindow::Create(EditorComponent* _editor)
 	float hei = 18;
 	float wid = 200;
 	float step = hei + 4;
+	float padding = 4;
 
 	infoLabel.Create("");
 	infoLabel.SetSize(XMFLOAT2(100, 50));
 	infoLabel.SetText("The animation window will stay open even if you select other entities until it is collapsed, so you can record other entities' data.");
+	infoLabel.SetFitTextEnabled(true);
 	AddWidget(&infoLabel);
 
 	modeComboBox.Create("Sampling: ");
@@ -102,7 +43,7 @@ void AnimationWindow::Create(EditorComponent* _editor)
 	modeComboBox.AddItem("Step", AnimationComponent::AnimationSampler::Mode::STEP);
 	modeComboBox.AddItem("Linear", AnimationComponent::AnimationSampler::Mode::LINEAR);
 	modeComboBox.AddItem("Cubic spline", AnimationComponent::AnimationSampler::Mode::CUBICSPLINE);
-	modeComboBox.OnSelect([&](wi::gui::EventArgs args) {
+	modeComboBox.OnSelect([this](wi::gui::EventArgs args) {
 		AnimationComponent* animation = editor->GetCurrentScene().animations.GetComponent(entity);
 		if (animation != nullptr)
 		{
@@ -131,24 +72,72 @@ void AnimationWindow::Create(EditorComponent* _editor)
 	modeComboBox.SetTooltip("Choose how animation data is interpreted between keyframes.\nNote that Cubic spline sampling requires spline animation data, otherwise, it will fall back to Linear!\nCurrently spline animation data creation is not supported, but it can be imported from GLTF/VRM models.");
 	AddWidget(&modeComboBox);
 
-	loopedCheckBox.Create("Looped: ");
-	loopedCheckBox.SetTooltip("Toggle animation looping behaviour.");
-	loopedCheckBox.SetSize(XMFLOAT2(hei, hei));
-	loopedCheckBox.SetPos(XMFLOAT2(x, y += step));
-	loopedCheckBox.OnClick([&](wi::gui::EventArgs args) {
+	loopTypeButton.Create("LoopType");
+	loopTypeButton.SetText(ICON_LOOP);
+	loopTypeButton.SetDescription("Loop type: ");
+	loopTypeButton.SetSize(XMFLOAT2(hei, hei));
+	loopTypeButton.SetPos(XMFLOAT2(x, y += step));
+	loopTypeButton.OnClick([this](wi::gui::EventArgs args) {
 		AnimationComponent* animation = editor->GetCurrentScene().animations.GetComponent(entity);
 		if (animation != nullptr)
 		{
-			animation->SetLooped(args.bValue);
+			if (animation->IsLooped())
+			{
+				animation->SetPingPong();
+			}
+			else if (animation->IsPingPong())
+			{
+				animation->SetPlayOnce();
+			}
+			else
+			{
+				animation->SetLooped();
+			}
 		}
 	});
-	loopedCheckBox.SetCheckText(ICON_LOOP);
-	AddWidget(&loopedCheckBox);
+	AddWidget(&loopTypeButton);
 
-	playButton.Create(ICON_PLAY);
-	playButton.SetSize(XMFLOAT2(100, hei));
-	playButton.SetPos(XMFLOAT2(loopedCheckBox.GetPos().x + loopedCheckBox.GetSize().x + 5, y));
-	playButton.OnClick([&](wi::gui::EventArgs args) {
+	backwardsButton.Create("Backwards");
+	backwardsButton.SetText(ICON_PLAY);
+	backwardsButton.font.params.enableFlipHorizontally();
+	backwardsButton.SetTooltip("Play the animation backwards from the current position.");
+	backwardsButton.SetSize(XMFLOAT2(30, hei));
+	backwardsButton.SetPos(XMFLOAT2(loopTypeButton.GetPos().x + loopTypeButton.GetSize().x + padding, y));
+	backwardsButton.OnClick([this](wi::gui::EventArgs args) {
+		AnimationComponent* animation = editor->GetCurrentScene().animations.GetComponent(entity);
+		if (animation != nullptr)
+		{
+			if (animation->timer > animation->start) // Only play backwards if it is not in the start position.
+			{
+				animation->speed = -speedSlider.GetValue();
+				animation->Play();
+			}
+		}
+	});
+	AddWidget(&backwardsButton);
+
+	backwardsFromEndButton.Create("BackwardsFromEnd");
+	backwardsFromEndButton.SetText(ICON_BACKWARD);
+	backwardsFromEndButton.SetTooltip("Play the animation backwards starting from the end.");
+	backwardsFromEndButton.SetSize(backwardsButton.GetSize());
+	backwardsFromEndButton.SetPos(XMFLOAT2(backwardsButton.GetPos().x + backwardsButton.GetSize().x + padding, y));
+	backwardsFromEndButton.OnClick([this](wi::gui::EventArgs args) {
+		AnimationComponent* animation = editor->GetCurrentScene().animations.GetComponent(entity);
+		if (animation != nullptr)
+		{
+			animation->timer = animation->end;
+			animation->speed = -speedSlider.GetValue();
+			animation->Play();
+		}
+	});
+	AddWidget(&backwardsFromEndButton);
+
+	stopButton.Create("Stop");
+	stopButton.SetText(ICON_STOP);
+	stopButton.SetTooltip("Stop.");
+	stopButton.SetSize(backwardsButton.GetSize());
+	stopButton.SetPos(XMFLOAT2(backwardsButton.GetPos().x + backwardsButton.GetSize().x * 2 + padding * 2, y));
+	stopButton.OnClick([this](wi::gui::EventArgs args) {
 		AnimationComponent* animation = editor->GetCurrentScene().animations.GetComponent(entity);
 		if (animation != nullptr)
 		{
@@ -158,29 +147,51 @@ void AnimationWindow::Create(EditorComponent* _editor)
 			}
 			else
 			{
+				animation->Stop();
+			}
+		}
+	});
+	AddWidget(&stopButton);
+
+	playFromStartButton.Create("PlayFromStart");
+	playFromStartButton.SetText(ICON_FORWARD);
+	playFromStartButton.SetTooltip("Play the animation from the beginning.");
+	playFromStartButton.SetSize(backwardsButton.GetSize());
+	playFromStartButton.SetPos(XMFLOAT2(backwardsButton.GetPos().x + backwardsButton.GetSize().x * 3 + padding * 3, y));
+	playFromStartButton.OnClick([this](wi::gui::EventArgs args) {
+		AnimationComponent* animation = editor->GetCurrentScene().animations.GetComponent(entity);
+		if (animation != nullptr)
+		{
+			animation->timer = animation->start;
+			animation->speed = speedSlider.GetValue();
+			animation->Play();
+
+		}
+	});
+	AddWidget(&playFromStartButton);
+
+	playButton.Create("Play");
+	playButton.SetText(ICON_PLAY);
+	playButton.SetTooltip("Play the animation from the current position.");
+	playButton.SetSize(backwardsButton.GetSize());
+	playButton.SetPos(XMFLOAT2(backwardsButton.GetPos().x + backwardsButton.GetSize().x * 4 + padding * 4, y));
+	playButton.OnClick([this](wi::gui::EventArgs args) {
+		AnimationComponent* animation = editor->GetCurrentScene().animations.GetComponent(entity);
+		if (animation != nullptr)
+		{
+			if (animation->timer < animation->end) // Only play forward if it is not in the end position.
+			{
+				animation->speed = speedSlider.GetValue();
 				animation->Play();
 			}
 		}
 	});
 	AddWidget(&playButton);
 
-	stopButton.Create(ICON_STOP);
-	stopButton.SetTooltip("Stop");
-	stopButton.SetSize(XMFLOAT2(70, hei));
-	stopButton.SetPos(XMFLOAT2(playButton.GetPos().x + playButton.GetSize().x + 5, y));
-	stopButton.OnClick([&](wi::gui::EventArgs args) {
-		AnimationComponent* animation = editor->GetCurrentScene().animations.GetComponent(entity);
-		if (animation != nullptr)
-		{
-			animation->Stop();
-		}
-	});
-	AddWidget(&stopButton);
-
 	timerSlider.Create(0, 1, 0, 100000, "Timer: ");
 	timerSlider.SetSize(XMFLOAT2(wid, hei));
 	timerSlider.SetPos(XMFLOAT2(x, y += step));
-	timerSlider.OnSlide([&](wi::gui::EventArgs args) {
+	timerSlider.OnSlide([this](wi::gui::EventArgs args) {
 		AnimationComponent* animation = editor->GetCurrentScene().animations.GetComponent(entity);
 		if (animation != nullptr)
 		{
@@ -194,7 +205,7 @@ void AnimationWindow::Create(EditorComponent* _editor)
 	amountSlider.Create(0, 1, 1, 100000, "Amount: ");
 	amountSlider.SetSize(XMFLOAT2(wid, hei));
 	amountSlider.SetPos(XMFLOAT2(x, y += step));
-	amountSlider.OnSlide([&](wi::gui::EventArgs args) {
+	amountSlider.OnSlide([this](wi::gui::EventArgs args) {
 		AnimationComponent* animation = editor->GetCurrentScene().animations.GetComponent(entity);
 		if (animation != nullptr)
 		{
@@ -208,11 +219,13 @@ void AnimationWindow::Create(EditorComponent* _editor)
 	speedSlider.Create(0, 4, 1, 100000, "Speed: ");
 	speedSlider.SetSize(XMFLOAT2(wid, hei));
 	speedSlider.SetPos(XMFLOAT2(x, y += step));
-	speedSlider.OnSlide([&](wi::gui::EventArgs args) {
+	speedSlider.OnSlide([this](wi::gui::EventArgs args) {
 		AnimationComponent* animation = editor->GetCurrentScene().animations.GetComponent(entity);
 		if (animation != nullptr)
 		{
-			animation->speed = args.fValue;
+			// Adjusts the new animation speed based on the previous direction of animation->speed.
+			float lastDirection = std::signbit(animation->speed) ? -1.0f : 1.0f;
+			animation->speed = args.fValue * lastDirection;
 		}
 	});
 	speedSlider.SetEnabled(false);
@@ -223,7 +236,7 @@ void AnimationWindow::Create(EditorComponent* _editor)
 	startInput.SetDescription("Start time: ");
 	startInput.SetSize(XMFLOAT2(wid, hei));
 	startInput.SetPos(XMFLOAT2(x, y += step));
-	startInput.OnInputAccepted([&](wi::gui::EventArgs args) {
+	startInput.OnInputAccepted([this](wi::gui::EventArgs args) {
 		AnimationComponent* animation = editor->GetCurrentScene().animations.GetComponent(entity);
 		if (animation != nullptr)
 		{
@@ -237,7 +250,7 @@ void AnimationWindow::Create(EditorComponent* _editor)
 	endInput.SetDescription("End time: ");
 	endInput.SetSize(XMFLOAT2(wid, hei));
 	endInput.SetPos(XMFLOAT2(x, y += step));
-	endInput.OnInputAccepted([&](wi::gui::EventArgs args) {
+	endInput.OnInputAccepted([this](wi::gui::EventArgs args) {
 		AnimationComponent* animation = editor->GetCurrentScene().animations.GetComponent(entity);
 		if (animation != nullptr)
 		{
@@ -282,7 +295,7 @@ void AnimationWindow::Create(EditorComponent* _editor)
 	recordCombo.AddItem("Material [reflectance] " ICON_MATERIAL);
 	recordCombo.AddItem("Material [texmuladd] " ICON_MATERIAL);
 	recordCombo.AddItem("Close loop " ICON_LOOP, ~0ull);
-	recordCombo.OnSelect([&](wi::gui::EventArgs args) {
+	recordCombo.OnSelect([this](wi::gui::EventArgs args) {
 		wi::scene::Scene& scene = editor->GetCurrentScene();
 
 		AnimationComponent* animation = scene.animations.GetComponent(entity);
@@ -970,141 +983,85 @@ void AnimationWindow::Create(EditorComponent* _editor)
 	retargetCombo.OnSelect([=](wi::gui::EventArgs args) {
 		retargetCombo.SetSelectedWithoutCallback(-1);
 		wi::scene::Scene& scene = editor->GetCurrentScene();
-		const AnimationComponent* animation_source = scene.animations.GetComponent(entity);
-		if (animation_source == nullptr)
-			return;
-		const HumanoidComponent* humanoid_dest = scene.humanoids.GetComponent((Entity)args.userdata);
-		if (humanoid_dest == nullptr)
-			return;
 
-		bool retarget_valid = false;
-		Scene retarget_scene;
-		Entity retarget_entity = CreateEntity();
-		AnimationComponent& animation = retarget_scene.animations.Create(retarget_entity);
-		animation = *animation_source;
-		animation.channels.clear();
-		animation.samplers.clear();
-
-		NameComponent name;
-		const NameComponent* name_source = scene.names.GetComponent(entity);
-		if (name_source != nullptr)
+		Entity dst_entity = (Entity)args.userdata;
+		scene.ResetPose(dst_entity); // reset pose to be able to retarget anim to character while it's already in an animated pose
+		Entity retarget_entity = scene.RetargetAnimation(dst_entity, entity, true);
+		if (retarget_entity != INVALID_ENTITY)
 		{
-			name.name += name_source->name;
-		}
-		scene.names.Create(retarget_entity) = name;
-
-		TransformComponent transform;
-		const TransformComponent* transform_source = scene.transforms.GetComponent(entity);
-		if (transform_source != nullptr)
-		{
-			transform = *transform_source;
-		}
-		scene.transforms.Create(retarget_entity) = transform;
-
-		scene.Component_Attach(retarget_entity, (Entity)args.userdata);
-
-		for (auto& channel : animation_source->channels)
-		{
-			bool found = false;
-			for (size_t i = 0; (i < scene.humanoids.GetCount()) && !found; ++i)
+			NameComponent name;
+			const NameComponent* name_source = scene.names.GetComponent(entity);
+			if (name_source != nullptr)
 			{
-				const HumanoidComponent& humanoid_source = scene.humanoids[i];
-				for (size_t humanoidBoneIndex = 0; humanoidBoneIndex < arraysize(humanoid_source.bones); ++humanoidBoneIndex)
-				{
-					Entity bone_source = humanoid_source.bones[humanoidBoneIndex];
-					if (bone_source == channel.target)
-					{
-						retarget_valid = true;
-						found = true;
-						Entity bone_dest = humanoid_dest->bones[humanoidBoneIndex];
-
-						auto& retarget_channel = animation.channels.emplace_back();
-						retarget_channel = channel;
-						retarget_channel.target = bone_dest;
-						retarget_channel.samplerIndex = (int)animation.samplers.size();
-
-						auto& sampler = animation_source->samplers[channel.samplerIndex];
-
-						auto& retarget_sampler = animation.samplers.emplace_back();
-						retarget_sampler = sampler;
-						retarget_sampler.backwards_compatibility_data = {};
-
-						Entity retarget_animation_data_entity = CreateEntity();
-						auto& retarget_animation_data = retarget_scene.animation_datas.Create(retarget_animation_data_entity);
-						retarget_sampler.data = retarget_animation_data_entity;
-
-						auto& animation_data = scene.animation_datas.Contains(sampler.data) ? *scene.animation_datas.GetComponent(sampler.data) : sampler.backwards_compatibility_data;
-						retarget_animation_data = animation_data;
-
-						TransformComponent* transform_source = scene.transforms.GetComponent(bone_source);
-						TransformComponent* transform_dest = scene.transforms.GetComponent(bone_dest);
-						if (transform_source != nullptr && transform_dest != nullptr)
-						{
-							XMMATRIX bindMatrix = ComputeWorldMatrixRecursive(scene, bone_source, transform_source->GetLocalMatrix());
-							XMMATRIX inverseBindMatrix = XMMatrixInverse(nullptr, bindMatrix);
-							XMMATRIX targetMatrix = ComputeWorldMatrixRecursive(scene, bone_dest, transform_dest->GetLocalMatrix());
-							XMMATRIX inverseParentMatrix = ComputeInverseParentMatrixRecursive(scene, bone_dest);
-							XMVECTOR S, R, T; // matrix decompose destinations
-
-							switch (channel.path)
-							{
-							case AnimationComponent::AnimationChannel::Path::SCALE:
-								for (size_t offset = 0; offset < retarget_animation_data.keyframe_data.size(); offset += 3)
-								{
-									XMFLOAT3* data = (XMFLOAT3*)&retarget_animation_data.keyframe_data[offset];
-									TransformComponent transform = *transform_source;
-									transform.scale_local = *data;
-									XMMATRIX localMatrix = inverseBindMatrix * ComputeWorldMatrixRecursive(scene, bone_source, transform.GetLocalMatrix());
-									localMatrix = targetMatrix * localMatrix * inverseParentMatrix;
-									XMMatrixDecompose(&S, &R, &T, localMatrix);
-									XMStoreFloat3(data, S);
-								}
-								break;
-							case AnimationComponent::AnimationChannel::Path::ROTATION:
-								for (size_t offset = 0; offset < retarget_animation_data.keyframe_data.size(); offset += 4)
-								{
-									XMFLOAT4* data = (XMFLOAT4*)&retarget_animation_data.keyframe_data[offset];
-									TransformComponent transform = *transform_source;
-									transform.rotation_local = *data;
-									XMMATRIX localMatrix = inverseBindMatrix * ComputeWorldMatrixRecursive(scene, bone_source, transform.GetLocalMatrix());
-									localMatrix = targetMatrix * localMatrix * inverseParentMatrix;
-									XMMatrixDecompose(&S, &R, &T, localMatrix);
-									XMStoreFloat4(data, R);
-								}
-								break;
-							case AnimationComponent::AnimationChannel::Path::TRANSLATION:
-								for (size_t offset = 0; offset < retarget_animation_data.keyframe_data.size(); offset += 3)
-								{
-									XMFLOAT3* data = (XMFLOAT3*)&retarget_animation_data.keyframe_data[offset];
-									TransformComponent transform = *transform_source;
-									transform.translation_local = *data;
-									XMMATRIX localMatrix = inverseBindMatrix * ComputeWorldMatrixRecursive(scene, bone_source, transform.GetLocalMatrix());
-									localMatrix = targetMatrix * localMatrix * inverseParentMatrix;
-									XMMatrixDecompose(&S, &R, &T, localMatrix);
-									XMStoreFloat3(data, T);
-								}
-								break;
-							default:
-								break;
-							}
-						}
-						break;
-					}
-				}
+				name.name += name_source->name;
 			}
-		}
-		if (retarget_valid)
-		{
-			scene.Merge(retarget_scene);
-			editor->optionsWnd.RefreshEntityTree();
+			scene.names.Create(retarget_entity) = name;
+
+			editor->componentsWnd.RefreshEntityTree();
 		}
 	});
 	AddWidget(&retargetCombo);
 
+	// Root Motion Tick
+	rootMotionCheckBox.Create("RootMotion: ");
+	rootMotionCheckBox.SetTooltip("Toggle root bone animation.");
+	rootMotionCheckBox.SetSize(XMFLOAT2(hei, hei));
+	//rootMotionCheckBox.SetPos(XMFLOAT2(x, y += step));
+	rootMotionCheckBox.OnClick([this](wi::gui::EventArgs args) {
+		AnimationComponent* animation = editor->GetCurrentScene().animations.GetComponent(entity);
+		if (animation != nullptr)
+		{
+			if (args.bValue) {
+				animation->RootMotionOn();
+			}
+			else {
+				animation->RootMotionOff();
+			}
+		}
+		});
+	rootMotionCheckBox.SetCheckText(ICON_CHECK);
+	AddWidget(&rootMotionCheckBox);
+	// Root Bone selector
+	rootBoneComboBox.Create("Root Bone: ");
+	rootBoneComboBox.SetSize(XMFLOAT2(wid, hei));
+	rootBoneComboBox.SetPos(XMFLOAT2(x, y));
+	rootBoneComboBox.SetEnabled(false);
+	rootBoneComboBox.OnSelect([this](wi::gui::EventArgs args) {
+		AnimationComponent* animation = editor->GetCurrentScene().animations.GetComponent(entity);
+		if (animation != nullptr)
+		{
+			Entity ent = (Entity)args.userdata;
+			if (ent != wi::ecs::INVALID_ENTITY)
+			{
+				animation->rootMotionBone = ent;
+			}
+			else
+			{
+				animation->rootMotionBone = wi::ecs::INVALID_ENTITY;
+			}
+		}
+		});
+	rootBoneComboBox.SetTooltip("Choose the root bone to evaluate root motion from.");
+	AddWidget(&rootBoneComboBox);
 
 	SetMinimized(true);
 	SetVisible(false);
 
+}
+// Example function to check if an entity already exists in the list
+static bool EntityExistsInList(Entity entity, const wi::vector<Entity>& entityList)
+{
+	// Iterate through the list of entities
+	for (Entity e : entityList)
+	{
+		if (e == entity)
+		{
+			// Entity found in the list
+			return true;
+		}
+	}
+	// Entity not found in the list
+	return false;
 }
 
 void AnimationWindow::SetEntity(Entity entity)
@@ -1114,15 +1071,41 @@ void AnimationWindow::SetEntity(Entity entity)
 		wi::scene::Scene& scene = editor->GetCurrentScene();
 
 		AnimationComponent* animation = scene.animations.GetComponent(entity);
-		if (animation != nullptr || IsCollapsed())
+		if (animation != nullptr || (IsCollapsed() && !scene.Entity_IsDescendant(entity, this->entity)))
 		{
 			this->entity = entity;
 			RefreshKeyframesList();
+
+			rootBoneComboBox.ClearItems();
+			rootBoneComboBox.AddItem("NO ROOT BONE " ICON_DISABLED, wi::ecs::INVALID_ENTITY);
+			if (animation != nullptr)
+			{
+				// Define a list of entities
+				wi::vector<Entity> bone_list;
+				// Add items to root bone name combo box.
+				for (const AnimationComponent::AnimationChannel& channel : animation->channels)
+				{
+					if (channel.path == AnimationComponent::AnimationChannel::Path::TRANSLATION ||
+						channel.path == AnimationComponent::AnimationChannel::Path::ROTATION) {
+
+						if (!EntityExistsInList(channel.target, bone_list))
+						{
+							bone_list.push_back(channel.target);
+							const NameComponent* name = scene.names.GetComponent(channel.target);
+							if (name != nullptr)
+							{
+								rootBoneComboBox.AddItem(name->name, channel.target);
+							}
+						}
+					}
+				}
+				bone_list.clear();
+			}
 		}
 	}
 }
 
-void AnimationWindow::Update()
+void AnimationWindow::UpdateData()
 {
 	Scene& scene = editor->GetCurrentScene();
 
@@ -1140,13 +1123,29 @@ void AnimationWindow::Update()
 
 	if (animation.IsPlaying())
 	{
-		playButton.SetText(ICON_PAUSE);
-		playButton.SetTooltip("Pause");
+		stopButton.SetText(ICON_PAUSE);
+		stopButton.SetTooltip("Pause");
 	}
 	else
 	{
-		playButton.SetText(ICON_PLAY);
-		playButton.SetTooltip("Play");
+		stopButton.SetText(ICON_STOP);
+		stopButton.SetTooltip("Stop");
+	}
+
+	if (animation.IsLooped())
+	{
+		loopTypeButton.SetText(ICON_LOOP);
+		loopTypeButton.SetTooltip("Looping is enabled. The animation will repeat continuously.");
+	}
+	else if (animation.IsPingPong())
+	{
+		loopTypeButton.SetText(ICON_PINGPONG);
+		loopTypeButton.SetTooltip("Ping-Pong is enabled. The animation will play forward and then backwards repeatedly.");
+	}
+	else
+	{
+		loopTypeButton.SetText("-");
+		loopTypeButton.SetTooltip("No loop. The animation will play once.");
 	}
 
 	if(!animation.samplers.empty())
@@ -1158,12 +1157,12 @@ void AnimationWindow::Update()
 		modeComboBox.SetSelectedByUserdataWithoutCallback(AnimationComponent::AnimationSampler().mode);
 	}
 
-	loopedCheckBox.SetCheck(animation.IsLooped());
+	rootMotionCheckBox.SetCheck(animation.IsRootMotion());
+	rootBoneComboBox.SetSelectedByUserdataWithoutCallback(animation.rootMotionBone);
 
 	timerSlider.SetRange(animation.start, animation.end);
 	timerSlider.SetValue(animation.timer);
 	amountSlider.SetValue(animation.amount);
-	speedSlider.SetValue(animation.speed);
 	startInput.SetValue(animation.start);
 	endInput.SetValue(animation.end);
 }
@@ -1331,61 +1330,38 @@ void AnimationWindow::RefreshKeyframesList()
 void AnimationWindow::ResizeLayout()
 {
 	wi::gui::Window::ResizeLayout();
-	const float padding = 4;
-	const float width = GetWidgetAreaSize().x;
-	float y = padding;
-	float jump = 20;
+	layout.margin_left = 80;
 
-	const float margin_left = 80;
-	const float margin_right = 50;
+	layout.add_fullwidth(infoLabel);
+	layout.add(modeComboBox);
 
-	auto add = [&](wi::gui::Widget& widget) {
-		if (!widget.IsVisible())
-			return;
-		widget.SetPos(XMFLOAT2(margin_left, y));
-		widget.SetSize(XMFLOAT2(width - margin_left - margin_right, widget.GetScale().y));
-		y += widget.GetSize().y;
-		y += padding;
-	};
-	auto add_right = [&](wi::gui::Widget& widget) {
-		if (!widget.IsVisible())
-			return;
-		const float margin_right = 40;
-		widget.SetPos(XMFLOAT2(width - margin_right - widget.GetSize().x, y));
-		y += widget.GetSize().y;
-		y += padding;
-	};
-	auto add_fullwidth = [&](wi::gui::Widget& widget) {
-		if (!widget.IsVisible())
-			return;
-		const float margin_left = padding;
-		const float margin_right = padding;
-		widget.SetPos(XMFLOAT2(margin_left, y));
-		widget.SetSize(XMFLOAT2(width - margin_left - margin_right, widget.GetScale().y));
-		y += widget.GetSize().y;
-		y += padding;
-	};
-
-	add_fullwidth(infoLabel);
-	add(modeComboBox);
-
-	loopedCheckBox.SetPos(XMFLOAT2(margin_left, y));
-	const float l = loopedCheckBox.GetPos().x + loopedCheckBox.GetSize().x + padding;
-	const float r = width - margin_right - padding;
+	loopTypeButton.SetPos(XMFLOAT2(layout.margin_left, layout.y));
+	const float l = loopTypeButton.GetPos().x + loopTypeButton.GetSize().x + layout.padding;
+	const float r = layout.width - layout.padding - layout.padding * 4;
 	const float diff = r - l;
-	playButton.SetSize(XMFLOAT2(diff * 0.5f, playButton.GetSize().y));
-	stopButton.SetSize(playButton.GetSize());
-	playButton.SetPos(XMFLOAT2(loopedCheckBox.GetPos().x + loopedCheckBox.GetSize().x + padding, y));
-	stopButton.SetPos(XMFLOAT2(playButton.GetPos().x + playButton.GetSize().x + padding, y));
-	y += stopButton.GetSize().y;
-	y += padding;
+	backwardsButton.SetSize(XMFLOAT2(diff/5, backwardsButton.GetSize().y));
+	backwardsFromEndButton.SetSize(backwardsButton.GetSize());
+	stopButton.SetSize(backwardsButton.GetSize());
+	playFromStartButton.SetSize(backwardsButton.GetSize());
+	playButton.SetSize(backwardsButton.GetSize());
+	backwardsButton.SetPos(XMFLOAT2(loopTypeButton.GetPos().x + loopTypeButton.GetSize().x + layout.padding, layout.y));
+	backwardsFromEndButton.SetPos(XMFLOAT2(backwardsButton.GetPos().x + backwardsButton.GetSize().x + layout.padding, layout.y));
+	stopButton.SetPos(XMFLOAT2(backwardsButton.GetPos().x + backwardsButton.GetSize().x * 2 + layout.padding * 2, layout.y));
+	playFromStartButton.SetPos(XMFLOAT2(backwardsButton.GetPos().x + backwardsButton.GetSize().x * 3 + layout.padding * 3, layout.y));
+	playButton.SetPos(XMFLOAT2(backwardsButton.GetPos().x + backwardsButton.GetSize().x * 4 + layout.padding * 4, layout.y));
+	layout.y += stopButton.GetSize().y;
+	layout.y += layout.padding;
 
-	add(timerSlider);
-	add(amountSlider);
-	add(speedSlider);
-	add(startInput);
-	add(endInput);
-	add(recordCombo);
-	add(retargetCombo);
-	add_fullwidth(keyframesList);
+	layout.add(timerSlider);
+	layout.add(amountSlider);
+	layout.add(speedSlider);
+	layout.add(startInput);
+	layout.add(endInput);
+	layout.add(recordCombo);
+	layout.add(retargetCombo);
+	rootMotionCheckBox.SetPos(XMFLOAT2(layout.margin_left, layout.y));
+	layout.y += rootMotionCheckBox.GetSize().y;
+	layout.y += layout.padding;
+	layout.add(rootBoneComboBox);
+	layout.add_fullwidth(keyframesList);
 }

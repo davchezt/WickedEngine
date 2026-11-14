@@ -1,7 +1,11 @@
 #pragma once
 
 //Luna : Official C++ to Lua binder project, 5th version
-//modified to fit with Wicked Engine, removed warnings
+// modified for Wicked Engine to use custom memory allocator and removed warnings
+
+#include "wiAllocator.h"
+
+#include <string.h> // strlen
 
 #define lunamethod(class, name) {#name, &class::name}
 #define lunaproperty(class, name) {#name, &class::Get##name, &class::Set##name}
@@ -12,6 +16,8 @@ int Set##property (lua_State* L) { return property.Set(L); }
 
 template < class T > class Luna {
 public:
+
+	inline static wi::allocator::BlockAllocator<T> allocator;
 
 	struct PropertyType {
 		const char     *name;
@@ -70,7 +76,7 @@ public:
 	Registers your class with Lua.  Leave namespac "" if you want to load it into the global space.
 	*/
 	// REGISTER CLASS AS A GLOBAL TABLE 
-	static void Register(lua_State * L, const char *namespac = NULL) {
+	static void Register(lua_State * L, const char *namespac = nullptr) {
 
 		if (namespac && strlen(namespac))
 		{
@@ -124,6 +130,8 @@ public:
 			lua_pushnumber(L, i | (1 << 8));						// Add a number indexing which func it is
 			lua_settable(L, metatable);								//
 		}
+
+		lua_pop(L, 1);
 	}
 
 	/*
@@ -133,7 +141,7 @@ public:
 	*/
 	static int constructor(lua_State * L)
 	{
-		T*  ap = new T(L);
+		T*  ap = allocator.allocate(L);
 		T** a = static_cast<T**>(lua_newuserdata(L, sizeof(T *))); // Push value = userdata
 		*a = ap;
 
@@ -151,14 +159,25 @@ public:
 	Description:
 	Loads an instance of the class into the Lua stack, and provides you a pointer so you can modify it.
 	*/
-	static void push(lua_State * L, T* instance)
+	template<typename... ARG>
+	static T* push(lua_State * L, ARG&&... args)
 	{
 		T **a = (T **)lua_newuserdata(L, sizeof(T *)); // Create userdata
-		*a = instance;
+		*a = allocator.allocate(std::forward<ARG>(args)...);
 
 		luaL_getmetatable(L, T::className);
 
 		lua_setmetatable(L, -2);
+		return *a;
+	}
+
+	// Pushes an instance and registers it into a global object
+	//	example: name = T(args)
+	template<typename... ARG>
+	static void push_global(lua_State* L, const char* name, ARG&&... args)
+	{
+		push(L, std::forward<ARG>(args)...);
+		lua_setglobal(L, name);
 	}
 
 	/*
@@ -264,7 +283,7 @@ public:
 		T** obj = static_cast < T ** >(lua_touserdata(L, -1));
 
 		if (obj)
-			delete(*obj);
+			allocator.free(*obj);
 
 		return 0;
 	}

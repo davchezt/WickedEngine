@@ -1,64 +1,76 @@
 #pragma once
 #include "CommonInclude.h"
 #include "wiMath.h"
+#include "wiAllocator.h"
 
 #include <memory>
 #include <string>
 
 #ifdef SDL2
 #include <SDL2/SDL.h>
+#elif defined(SDL3)
+#include <SDL3/SDL.h>
 #endif
 
 namespace wi::audio
 {
 	void Initialize();
 
+	// Explicitly tears down the audio device/engine. Call this before shutting down the
+	// window system (e.g. before SDL_Quit() on SDL2/SDL3 platforms): audio_internal is
+	// otherwise only destroyed as a static at process exit, which on SDL3 runs after
+	// SDL_Quit() has already torn down the audio subsystem -- the platform backend's
+	// device teardown then dereferences an already-invalidated SDL3 audio device handle.
+	void Deinitialize();
+
 	// SUBMIX_TYPE specifies the playback channel of sound instances
 	//	Do not change the order as this enum can be serialized!
-	enum SUBMIX_TYPE
+	enum SUBMIX_TYPE : uint32_t
 	{
 		SUBMIX_TYPE_SOUNDEFFECT,
 		SUBMIX_TYPE_MUSIC,
 		SUBMIX_TYPE_USER0,
 		SUBMIX_TYPE_USER1,
 		SUBMIX_TYPE_COUNT,
-
-		ENUM_FORCE_UINT32 = 0xFFFFFFFF, // submix type can be serialized
 	};
 
 	// Sound is holding the sound data needed for playback, but it can't be played by itself.
 	//	Use SoundInstance for playback the sound data
 	struct Sound
 	{
-		std::shared_ptr<void> internal_state;
-		inline bool IsValid() const { return internal_state.get() != nullptr; }
+		wi::allocator::shared_ptr<void> internal_state;
+		constexpr bool IsValid() const { return internal_state.IsValid(); }
 	};
 	// SoundInstance can be used to play back a Sound with specified effects
 	struct SoundInstance
 	{
-		std::shared_ptr<void> internal_state;
-		inline bool IsValid() const { return internal_state.get() != nullptr; }
+		wi::allocator::shared_ptr<void> internal_state;
+		constexpr bool IsValid() const { return internal_state.IsValid(); }
 
+		// You can specify these params before creating the sound instance:
+		//	The sound instance will need to be recreated for changes to take effect
 		SUBMIX_TYPE type = SUBMIX_TYPE_SOUNDEFFECT;
-		float loop_begin = 0;	// loop region begin in seconds (0 = from beginning)
+		float begin = 0;		// beginning of the playback in seconds, relative to the Sound it will be created from (0 = from beginning)
+		float length = 0;		// length in seconds (0 = until end)
+		float loop_begin = 0;	// loop region begin in seconds, relative to the instance begin time (0 = from beginning)
 		float loop_length = 0;	// loop region length in seconds (0 = until the end)
 
 		enum FLAGS
 		{
 			EMPTY = 0,
 			ENABLE_REVERB = 1 << 0,
+			LOOPED = 1 << 1,
 		};
 		uint32_t _flags = EMPTY;
 
 		inline void SetEnableReverb(bool value = true) { if (value) { _flags |= ENABLE_REVERB; } else { _flags &= ~ENABLE_REVERB; } }
 		inline bool IsEnableReverb() const { return _flags & ENABLE_REVERB; }
+		inline void SetLooped(bool value = true) { if (value) { _flags |= LOOPED; } else { _flags &= ~LOOPED; } }
+		inline bool IsLooped() const { return _flags & LOOPED; }
 	};
 
 	bool CreateSound(const std::string& filename, Sound* sound);
 	bool CreateSound(const uint8_t* data, size_t size, Sound* sound);
-#ifdef SDL2
-	bool CreateSound(SDL_RWops* data, Sound* sound);
-#endif
 	bool CreateSoundInstance(const Sound* sound, SoundInstance* instance);
 
 	void Play(SoundInstance* instance);
@@ -67,6 +79,18 @@ namespace wi::audio
 	void SetVolume(float volume, SoundInstance* instance = nullptr);
 	float GetVolume(const SoundInstance* instance = nullptr);
 	void ExitLoop(SoundInstance* instance);
+	bool IsEnded(SoundInstance* instance);
+
+	struct SampleInfo
+	{
+		const short* samples = nullptr;	// array of samples in the sound
+		size_t sample_count = 0;	// number of samples in the sound
+		int sample_rate = 0;	// number of samples per second
+		uint32_t channel_count = 1;	// number of channels in the samples array (1: mono, 2:stereo, etc.)
+	};
+	SampleInfo GetSampleInfo(const Sound* sound);
+	// Returns the total number of samples that were played since the creation of the sound instance
+	uint64_t GetTotalSamplesPlayed(const SoundInstance* instance);
 
 	void SetSubmixVolume(SUBMIX_TYPE type, float volume);
 	float GetSubmixVolume(SUBMIX_TYPE type);

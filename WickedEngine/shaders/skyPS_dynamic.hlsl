@@ -1,15 +1,24 @@
-#include "objectHF.hlsli"
+#define DISABLE_SOFT_SHADOWMAP
 #include "skyHF.hlsli"
+#include "fogHF.hlsli"
 
-float4 main(float4 pos : SV_POSITION, float2 clipspace : TEXCOORD) : SV_TARGET
+struct PushData
 {
-	float4 unprojected = mul(GetCamera().inverse_view_projection, float4(clipspace, 0.0f, 1.0f));
-	unprojected.xyz /= unprojected.w;
+	uint clouds_enabled;
+};
+PUSHCONSTANT(push, PushData);
 
-	const float3 V = normalize(unprojected.xyz - GetCamera().position);
+float4 main(float4 pos : SV_Position) : SV_Target
+{
+	const float3 V = normalize(-GetCamera().screen_to_view(pos));
+	
+	bool highQuality = GetFrame().options & OPTION_BIT_REALISTIC_SKY_HIGH_QUALITY;
+	bool perPixelNoise = GetFrame().options & OPTION_BIT_TEMPORALAA_ENABLED;
+	bool receiveShadow = GetFrame().options & OPTION_BIT_REALISTIC_SKY_RECEIVE_SHADOW;
 
-	float4 color = float4(GetDynamicSkyColor(V), 1);
+	// Calculate dynamic sky
+	float4 color = float4(GetDynamicSkyColor(pos.xy, V, true, false, false, highQuality, perPixelNoise, receiveShadow, push.clouds_enabled), 1);
 
-	color = clamp(color, 0, 65000);
+	color = saturateMediump(color);
 	return color;
 }

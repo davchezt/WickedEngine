@@ -6,58 +6,65 @@
 [![Discord chat](https://img.shields.io/discord/602811659224088577?logo=discord)](https://discord.gg/CFjRYmE)
 <a href="https://twitter.com/intent/follow?screen_name=turanszkij"><img src="https://img.shields.io/twitter/follow/turanszkij.svg?style=social" alt="follow on Twitter"></a>
 <br/>
-[![Steam](https://img.shields.io/badge/-Steam-383838.svg?style=for-the-badge&logo=steam)](https://store.steampowered.com/app/1967460/Wicked_Engine/)
-[![Store](https://img.shields.io/badge/-Microsoft_Store-748FB2.svg?style=for-the-badge&logo=microsoft)](https://www.microsoft.com/store/productId/9PPMV065W9QJ)
-
+[![Steam](https://img.shields.io/badge/Steam-%23000000.svg?logo=steam&logoColor=white)](https://store.steampowered.com/app/1967460/Wicked_Engine/)
+[![Itch.io](https://img.shields.io/badge/itch.io-%23FF0B34.svg?logo=Itch.io&logoColor=white)](https://turanszkij.itch.io/wicked-engine)
 
 <br/>
-<img align="right" src="https://turanszkij.files.wordpress.com/2019/02/emitterskinned2.gif" width="256px"/>
-Wicked Engine is an open-source C++ engine focusing on modern rendering techniques and performance. Use this as a framework for your graphics projects, or learning. Some programming skills are required for the best experience, but some simple tools like an Editor are also included. It is free to be used for anything good.<br/>
-This project is hosted on <a href="https://github.com/turanszkij/WickedEngine/">GitHub</a>.
+<img align="right" src="https://github.com/turanszkij/wickedengine-gifs/raw/main/girl_pose.png" width="240px"/>
+Wicked Engine is an open-source 3D engine with modern graphics. Use this as a C++ framework for your graphics projects, a standalone 3D editor, LUA scripting or just for learning.<br/>
 
-- [Documentation](Content/Documentation/WickedEngine-Documentation.md)<br/>
-- [Scripting API Documentation](Content/Documentation/ScriptingAPI-Documentation.md)<br/>
+- [Website](https://wickedengine.net/)<br/>
 - [Features](features.txt)<br/>
-- [Devblog](https://wickedengine.net/)<br/>
+- [Editor Manual](Content/Documentation/WickedEditor-Manual.pdf)<br/>
+- [C++ Documentation](Content/Documentation/WickedEngine-Documentation.md)<br/>
+- [Lua Documentation](Content/Documentation/ScriptingAPI-Documentation.md)<br/>
 - [Videos](https://www.youtube.com/playlist?list=PLLN-1FTGyLU_HJoC5zx6hJkB3D2XLiaxS)<br/>
 
-You can download the source code by using Git and cloning the repository, or downloading it as zip. You can also choose to download a pre-built version of the Editor or Tests applications, which will allow you to try out features, load content and execute LUA scripts.<br/>
-Tip: try loading models or scripts from the Content folder using the Editor app to see how everything works.
+You can get the full source code by using Git version control and cloning https://github.com/turanszkij/WickedEngine.git, or downloading it as zip. You can also download nightly packaged builds of the Editor here (requires Github sign in): [![Github Build Status](https://github.com/turanszkij/WickedEngine/workflows/Build/badge.svg)](https://github.com/turanszkij/WickedEngine/actions)
+
 <br/>
 
-
-<img align="right" src="https://turanszkij.files.wordpress.com/2018/11/physics.gif" width="256px"/>
+<img align="left" src="https://github.com/turanszkij/wickedengine-gifs/raw/main/guy_pose.png" width="240px"/>
 
 ### Platforms:
-- Windows 10 or newer
+- Windows
 - Linux
-- UWP
+- Mac OS
+- iOS
+- Xbox Series X|S
+- PlayStation 5
 
 ### How to build: 
 
+<img align="right" src="https://github.com/turanszkij/wickedengine-gifs/raw/main/videoprojectors.gif" width="320px"/>
+
 #### Windows
-To build Wicked Engine for Windows 10, use Visual Studio and the provided `WickedEngine.sln` solution file. There are a couple of projects that you can run up front: Editor, Tests and Template. You just have to set either as startup project and press F5 in Visual Studio to build and run. For optimal performance, choose `Release` mode, for the best debugging experience, choose `Debug` mode.
+To build Wicked Engine for Windows, open the `WickedEngine.sln` solution file with the latest Visual Studio. When it's opened, press F5, then Wicked Engine and the Editor application will be built and then start. You can check out other sample projects in the solution too.
 
-<img align="right" src="https://turanszkij.files.wordpress.com/2020/08/fighting_game_small-1.gif" width="256px"/>
+If you want to develop a C++ application that uses Wicked Engine, you can build the WickedEngine_Windows static library project and link against it. Including the `"WickedEngine.h"` header will attempt to link the binaries for the appropriate platform, but search directories should be set up beforehand. For example, you can set additional library directories to `$(SolutionDir)BUILD\$(Platform)\$(Configuration)` by default. For examples, see the `Samples/Template_Windows`, `Samples/Tests`, and `Editor_Windows` projects. 
 
-If you want to develop an application that uses Wicked Engine, you can build the WickedEngine static library project for the appropriate platform, such as `WickedEngine_Windows` and link against it. Including the `"WickedEngine.h"` header will attempt to link the binaries for the appropriate platform, but search directories should be set up beforehand. For example, you can set additional library directories to `$(SolutionDir)BUILD\$(Platform)\$(Configuration)` by default. For examples, see the `Template`, `Tests`, and `Editor` projects. 
+You can also use cmake to build on windows with these commands:
+```
+cmake -B build
+cmake --build build --config Release
+```
 
-You can also dowload prebuilt and packaged versions of the Editor and Tests here: [![Github Build Status](https://github.com/turanszkij/WickedEngine/workflows/Build/badge.svg)](https://github.com/turanszkij/WickedEngine/actions)
-
-If you have questions or stuck, please use the `windows` communication channel on Discord: [![Discord chat](https://img.shields.io/discord/602811659224088577?logo=discord)](https://discord.gg/CFjRYmE)
-
-Note: Building 32-bit and ARM versions should be possible, but no longer provided by default. You will need to configure the solution for these platforms yourself if you want this. For ARM platform, also use the `-DBT_USE_DOUBLE_PRECISION=1` definition when compiling.
-
-Cmake: It is possible to build the windows version with Cmake, but the recommended way is to use the provided WickedEngine.sln file with Visual Studio.
+<img align="right" src="https://github.com/turanszkij/wickedengine-gifs/raw/main/fps.gif" width="320px"/>
 
 #### Linux
-To build the engine for Linux, use Cmake. You can find a sample build script for Ubuntu 20.04 [here](.github/workflows/build.yml) (in the linux section). You might need to install some dependencies, such as Cmake (3.7 or newer), g++ compiler (C++ 17 compliant version) and SDL2. For Ubuntu 20.04, you can use the following commands to install dependencies:
+To build the engine for Linux, use Cmake. You can find a sample build script for Ubuntu [here](.github/workflows/build.yml) (in the linux section). 
+
+On Linux you will need to ensure some additional dependencies are installed, such as Cmake (3.7 or newer), g++ compiler (C++ 17 compliant version) and SDL2. You can use the following commands to install dependencies:
+
+<img align="right" src="https://github.com/turanszkij/wickedengine-gifs/raw/main/fighting_game.gif" width="320px"/>
+
 ```bash
 sudo apt update
 sudo apt install libsdl2-dev
 sudo apt install build-essential
 ```
-To build the engine, editor and tests, use `cmake` and then `make`:
+
+Example commands to build the engine with cmake in Release mode:
 ```bash
 mkdir build
 cd build
@@ -65,18 +72,24 @@ cmake .. -DCMAKE_BUILD_TYPE=Release
 make
 ```
 
-If you want to develop an application that uses Wicked Engine, you will have to link to libWickedEngine.a and `#include "WickedEngine.h"` into the source code. For examples, look at the Cmake files, or the Tests and the Editor applications.
+<img align="right" src="https://github.com/turanszkij/wickedengine-gifs/raw/main/character_grass.gif" width="320px"/>
 
-You can also dowload prebuilt and packaged versions of the Editor and Tests here: [![Github Build Status](https://github.com/turanszkij/WickedEngine/workflows/Build/badge.svg)](https://github.com/turanszkij/WickedEngine/actions)
+#### Mac OS and iOS
+To build  the engine for Mac OS and iOS, use the provided .xcodeproj files with the Xcode development environment, for example:
+- WickedEngine/WickedEngine.xcodeproj to build static library
+- Editor/Editor.xcodeproj to build the Wicked Editor
+- Samples/Template_MacOS/Template_MacOS.xcodeproj to build a minimal template application for MacOS that you can use as a base for your application
+- Samples/Template_iOS/Template_iOS.xcodeproj to build a minimal template application for iOS that you can use as a base for your application
 
-If you have questions or stuck, please use the `linux` communication channel on Discord: [![Discord chat](https://img.shields.io/discord/602811659224088577?logo=discord)](https://discord.gg/CFjRYmE)
+#### Xbox Series X|S and PlayStation 5
+Console specific extension files required for building are currently private.
 
 
 ### Examples:
 
 #### Initialization (C++):
 
-<img align="right" src="https://turanszkij.files.wordpress.com/2018/05/sphinit.gif" width="256px"/>
+<img align="right" src="https://github.com/turanszkij/wickedengine-gifs/raw/main/clouds.gif" width="320px"/>
 
 ```cpp
 // Include engine headers:
@@ -96,8 +109,10 @@ while(true) {
 
 #### Basics (C++):
 ```cpp
+application.Initialize(); // application will start initializing at this point (asynchronously). If you start calling engine functionality immediately before application.Run() gets called, then you must first initialize the application yourself.
+
 wi::RenderPath3D myGame; // Declare a game screen component, aka "RenderPath" (you could also override its Update(), Render() etc. functions). 
-application.ActivatePath(&myGame); // Register your game to the application. It will call Start(), Update(), Render(), etc. from now on...
+application.ActivatePath(&myGame); // Register your game to the application. It will call Start() once, then Update(), Render(), etc. from now on every frame...
 
 wi::scene::LoadModel("myModel.wiscene"); // Simply load a model into the current global scene
 wi::scene::GetScene(); // Get the current global scene
@@ -109,7 +124,7 @@ wi::scene::GetScene().Merge(scene2); // Combine separate scene with global scene
 myGame.setFXAAEnabled(true); // You can enable post process effects this way...
 
 wi::RenderPath2D myMenuScreen; // This is an other render path, but now a simple 2D one. It can only render 2D graphics by default (like a menu for example)
-application.ActivatePath(&myMenuScreen); // activate the menu, the previous path (myGame) will be stopped
+application.ActivatePath(&myMenuScreen, 0.8f); // activate the menu after a 0.8 second fade out, the previous path (myGame) will be stopped
 
 wi::Sprite mySprite("image.png"); // There are many utilities, such as a "sprite" helper class
 myMenuScreen.AddSprite(&mySprite); // The 2D render path is ready to handle sprite and font rendering for you
@@ -168,31 +183,39 @@ if(input.Press(KEYBOARD_BUTTON_LEFT)) then
    audio.Play(soundinstance); -- this will play the sound if you press the left arrow on the keyboard
 end
 ```
+
+<img align="right" src="https://github.com/turanszkij/wickedengine-gifs/raw/main/inverse_kinematics.gif" width="320px"/>
+
 <i>(You can enter lua scripts into the backlog (HOME button), or the startup.lua script which is always executed on application startup if it is found near the app, or load a script via dofile("script.lua") command)</i>
 
 For more code samples and advanced use cases, please see the example projects, like the Template_Windows, Tests, or Editor project. There are also sample models and scripts included with Wicked Engine in the Content/models and Content/scripts folders. Check them out to learn about more features.
 
 ### Scripting API:
 
-<img align="right" src="https://turanszkij.files.wordpress.com/2018/11/hairparticle2.gif" width="256px"/>
+<img align="right" src="https://github.com/turanszkij/wickedengine-gifs/raw/main/grass.gif" width="320px"/>
 
-You can use a great number of engine features through the Lua scripting api, which can even be used real time while the program is running. The included applications, like the Editor,
-contain a scripting input method toggled by the "Home" key. A blue screen will be presented where the user can type in LUA commands. It is very minimal in regards to input methods.
-For further details, please check the scripting API documentation: [Wicked Engine Scripting API](Content/Documentation/ScriptingAPI-Documentation.md)
-
+You can use a lot of of engine features through Lua scripting. The included applications, like the Editor,
+contain a scripting input method toggled by the "Home" key. A text screen will be presented where the user can type in LUA commands.
+For further details, check the scripting API documentation: [Wicked Engine Scripting API](Content/Documentation/ScriptingAPI-Documentation.md)
 
 ### Model import/export:
 The native model format is the <b>WISCENE</b> format. Any application using Wicked Engine can open this format efficiently.
 
-In addition, the Editor supports the importing of some common model formats (the list will potentially grow): 
-- <b>OBJ</b>
-- <b>GLTF 2.0</b>
-- <b>VRM</b>
+<img align="right" src="https://github.com/turanszkij/wickedengine-gifs/raw/main/character_lookat.gif" width="320px"/>
 
-The preferred workflow is to import models into the Editor, and save them as <b>WISCENE</b>, then any Wicked Engine application can open them.<br/>
+In addition, the Editor supports importing some common model formats: 
+- <b>OBJ</b>
+- <b>FBX</b>
+- <b>GLTF, GLB</b>
+- <b>VRM, VRMA</b>
+- <b>PLY</b>
+
+You can import models into the Editor, and save them as <b>WISCENE</b>, then any Wicked Engine application can open them.<br/>
+
+<img align="right" src="https://github.com/turanszkij/wickedengine-gifs/raw/main/snowstorm.gif" width="320px"/>
 
 ### Graphics API:
-The default renderer is `DirectX 12` on Windows and `Vulkan` on Linux. The `DirectX 11` renderer is no longer available starting from version 0.57.0, but it can be found on the <a href="https://github.com/turanszkij/WickedEngine/tree/dx11-backup">dx11-backup branch</a>.
+The default renderer is `DirectX 12` on Windows, `Vulkan` on Linux and `Metal` on Apple systems.
 You can specify command line arguments (without any prefix) to switch between render devices or other settings. Currently the list of options:
 <table>
   <tr>
@@ -200,20 +223,36 @@ You can specify command line arguments (without any prefix) to switch between re
 	<th>Description</th>
   </tr>
   <tr>
-	<td>dx12</td>
-	<td>Use DirectX 12 rendering device</td>
-  </tr>
-  <tr>
 	<td>vulkan</td>
-	<td>Use Vulkan rendering device</td>
+	<td>Use the Vulkan rendering device on Windows</td>
   </tr>
   <tr>
 	<td>debugdevice</td>
-	<td>Use debug layer for graphics API validation. Performance will be degraded, but graphics warnings and errors will be written to "Output" window</td>
+	<td>Use debug layer for graphics API validation. Performance will be degraded, but graphics warnings and errors will be written to the "Output" window</td>
   </tr>
   <tr>
 	<td>gpuvalidation</td>
 	<td>Use GPU Based Validation for graphics. This must be used together with the debugdevice argument. Currently DX12 only.</td>
+  </tr>
+  <tr>
+	<td>gpu_verbose</td>
+	<td>Enable verbose GPU validation mode.</td>
+  </tr>
+  <tr>
+	<td>igpu</td>
+	<td>Prefer integrated GPU selection for graphics. By default, dedicated GPU selection will be preferred.</td>
+  </tr>
+  <tr>
+	<td>amdgpu</td>
+	<td>Prefer AMD GPU selection for graphics.</td>
+  </tr>
+  <tr>
+	<td>nvidiagpu</td>
+	<td>Prefer Nvidia GPU selection for graphics.</td>
+  </tr>
+  <tr>
+	<td>intelgpu</td>
+	<td>Prefer Intel GPU selection for graphics.</td>
   </tr>
   <tr>
 	<td>alwaysactive</td>
@@ -221,13 +260,17 @@ You can specify command line arguments (without any prefix) to switch between re
   </tr>
 </table>
 
-<img align="right" src="https://turanszkij.files.wordpress.com/2018/11/soft.gif" width="256px"/>
 
+<img align="right" src="https://github.com/turanszkij/wickedengine-gifs/raw/main/talking.gif" width="320px"/>
 <br/>
 
 ### Other software using Wicked Engine
-- <a href="https://www.game-guru.com/max">Game Guru MAX</a>: Easy to use game creator software
+- <a href="https://turanszkij.itch.io/wicked-shooter">Wicked Shooter</a>: FPS sample game in Wicked Engine
+- <a href="https://turanszkij.itch.io/wicked-adventure">Wicked Adventure</a>: Adventure RPG sample game in Wicked Engine
+- <a href="https://turanszkij.itch.io/grass-zen">Grass Zen</a>: A relaxing game made with Wicked Engine where you control the wind
+- <a href="https://www.game-guru.com/max">Game Guru MAX</a>: Easy to use game creator
 - <a href="https://www.youtube.com/watch?v=0SxXmnSQ6Q4">Flytrap</a>: Demoscene production by qop
+- <a href="https://youtu.be/mbmNU5QVM8A?si=9sDMS1LrMsz03f5r">doddering</a>: Demoscene production by qop
 - Your project: add your project to this readme and open a pull request
 
 <br/>
@@ -236,79 +279,13 @@ You can specify command line arguments (without any prefix) to switch between re
 If you are having trouble getting the applications to run, make sure that you satisfy the following conditions:
 - If you built the application with Visual Studio, run it from the Visual Studio environment, where the executable working directory is set up to be the Project directory (not the build directory where the exe will be found)
 - If you want to run an application without Visual Studio, either copy the executable from the BUILD directory to the correct project directory, or set the working directory appropriately. You can also check the Working directory setting in Visual Studio to find out the right working directory of every project. 
-- If you want to build UWP application, then you will first need to build the shaders into a shader dump. For that, build and run the `offlineshadercompiler` project with the `hlsl6 shaderdump` command line arguments. If the `wiShaderDump.h` file is successfully generated, rebuilding the engine will embed all the shader files so they are not loaded separately. But embedded shaders also cannot be recompiled during runtime.
-- If you experience crashes, follow these steps to find out the problem:
+
+<img align="right" src="https://github.com/turanszkij/wickedengine-gifs/raw/main/weather.gif" width="320px"/>
+
+- If you experience crashes, you can try these to find out the problem:
 	- make sure your environment is up to date, with latest graphics drivers and operating system updates.
-	- see if there is a wiBackLog.txt in your user temp folder (for example: C:\Users\username\AppData\Local\Temp), and request help on Discord or Github issue
-	- build the engine in Debug mode and try to run it, see where it crashes, provide call stack on Discord or Github issue
+	- see if there is a log.txt in the working directory of the application (most likely near the application exe)
+	- request help on [Discord](https://discord.gg/CFjRYmE) or via a [Github issue](https://github.com/turanszkij/WickedEngine/issues)
+	- build the engine in Debug mode and try to run it, see where it crashes
 	- run the engine with the `debugdevice` command argument and post the text from your console output window when the crash happens
-
-<br/>
-
-### Screenshots:
-
-Procedural terrain generator:
-![ProceduralTerrain](https://turanszkij.files.wordpress.com/2022/04/procedural_terrain.png)
-
-Path tracing:
-![PathTracing](https://turanszkij.files.wordpress.com/2022/04/sanmiguel.png)
-
-Dynamic Diffuse Global Illumination (DDGI):
-![DDGI](https://turanszkij.files.wordpress.com/2022/04/ddgi.png)
-
-Snow storm with particle systems:
-![SnowStorm](https://turanszkij.files.wordpress.com/2022/04/snowstorm.png)
-
-Sponza scene with voxel GI enabled:
-![Sponza](https://turanszkij.files.wordpress.com/2020/08/vxgi_sponza_small.png)
-
-Damaged Helmet sample model imported from GLTF:
-![Sponza](https://turanszkij.files.wordpress.com/2019/03/damagedhelmet.png)
-
-Bokeh Depth of Field (Lain model by <a href="https://sketchfab.com/3d-models/lain-20-bf255be16da34df08d48abb5443a6706">woopoodle at Sketchfab</a>):
-![DepthOfField](https://turanszkij.files.wordpress.com/2020/08/dof_bokeh_small.png)
-
-Motion blur (fighting game sample):
-![MotionBlur](https://turanszkij.files.wordpress.com/2019/12/motionblur.png)
-
-Stochastic Screen Space Reflections:
-![ScreenSpaceReflections](https://turanszkij.files.wordpress.com/2020/08/ssr.png)
-
-Real time ray traced shadows and ambient occlusion (DXR, VK_KHR_raytracing):
-![RaytracedShadows](https://turanszkij.files.wordpress.com/2020/08/dxr_rtao_rtshadow_small.png)
-
-Bloom:
-![Bloom](https://turanszkij.files.wordpress.com/2020/08/bloom_new.png)
-
-Path tracing in the living room (model from <a href="http://casual-effects.com/data/index.html">Morgan McGuire's graphics archive</a>):
-![LivingRoom](https://turanszkij.files.wordpress.com/2019/09/livingroom.jpg)
-
-City scene with a light map (model by <a href="https://www.cgtrader.com/michaelmilesgallie">Michael Gallie at CgTrader</a>):
-![City](https://turanszkij.files.wordpress.com/2019/01/city1.png)
-
-Path tracing in the city:
-![Balcony](https://turanszkij.files.wordpress.com/2019/01/city2.png)
-
-Path traced caustics:
-![Caustics](https://turanszkij.files.wordpress.com/2019/01/trace.png)
-
-Vegetation particle system and depth of field:
-![Vegetation](https://turanszkij.files.wordpress.com/2020/08/grass.png)
-
-Bistro scene from Amazon Lumberyard (model from <a href="http://casual-effects.com/data/index.html">Morgan McGuire's graphics archive</a>):
-![Bistro_out](https://turanszkij.files.wordpress.com/2019/01/bistro_out_0.png)
-
-Bistro scene from the inside:
-![Bistro_in](https://turanszkij.files.wordpress.com/2019/01/bistro_in_2.png)
-
-Parallax occlusion mapping:
-![ParallxOcclusionMapping](https://turanszkij.files.wordpress.com/2019/01/pom.png)
-
-Large scale particle simulation on the GPU:
-![ParticleSimulation](https://turanszkij.files.wordpress.com/2020/08/particles_2.png)
-
-Tiled light culling in the Bistro:
-![TiledLightCulling](https://turanszkij.files.wordpress.com/2019/02/bistro_heatmap-1.png)
-
-GPU-based BVH builder:
-![GPU_BVH](https://turanszkij.files.wordpress.com/2019/07/bvh_livingroom.png)
+		- for very advanced users, using `gpuvalidation` with `debugdevice` will print additional graphics debug information

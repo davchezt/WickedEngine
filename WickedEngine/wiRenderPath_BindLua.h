@@ -9,7 +9,7 @@ namespace wi::lua
 	{
 	public:
 		RenderPath* component = nullptr;
-		static const char className[];
+		inline static constexpr char className[] = "RenderPath";
 		static Luna<RenderPath_BindLua>::FunctionType methods[];
 		static Luna<RenderPath_BindLua>::PropertyType properties[];
 
@@ -18,8 +18,8 @@ namespace wi::lua
 		RenderPath_BindLua(lua_State* L) {}
 		virtual ~RenderPath_BindLua() = default;
 
-		virtual int GetLayerMask(lua_State* L);
-		virtual int SetLayerMask(lua_State* L);
+		int GetLayerMask(lua_State* L);
+		int SetLayerMask(lua_State* L);
 
 		static void Bind();
 	};

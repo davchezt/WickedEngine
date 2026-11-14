@@ -1,9 +1,11 @@
 #pragma once
 #include "CommonInclude.h"
-#include "wiMath.h"
 #include "wiArchive.h"
+#include "wiRandom.h"
+#include "wiMath.h"
 
-#include <random>
+// Note: these should be implemented independently of math library optimizations to be cross platform deterministic!
+//	Otherwise the terrain generation might be different across platforms
 
 namespace wi::noise
 {
@@ -14,20 +16,15 @@ namespace wi::noise
 
 		void init(uint32_t seed)
 		{
-			std::mt19937 perlin_rand(seed);
-			std::uniform_int_distribution<int> perlin_distr(0, 255);
+			wi::random::RNG rng(seed);
 			for (int i = 0; i < arraysize(state); ++i)
 			{
-				state[i] = perlin_distr(perlin_rand);
+				state[i] = uint8_t(rng.next_uint());
 			}
 		}
 		constexpr float fade(float t) const
 		{
 			return t * t * t * (t * (t * 6 - 15) + 10);
-		}
-		constexpr float lerp(float a, float b, float t) const
-		{
-			return (a + (b - a) * t);
 		}
 		constexpr float grad(uint8_t hash, float x, float y, float z) const
 		{
@@ -121,52 +118,119 @@ namespace wi::noise
 	// Based on: https://www.shadertoy.com/view/MslGD8
 	namespace voronoi
 	{
-		inline XMVECTOR fract(XMVECTOR p)
+		constexpr float dot(XMFLOAT2 a, XMFLOAT2 b)
 		{
-			return p - XMVectorFloor(p);
+			return a.x * b.x + a.y * b.y;
 		}
-		inline XMVECTOR hash(XMVECTOR p)
+		inline XMFLOAT2 fract(XMFLOAT2 p)
 		{
-			p = XMVectorSet(
-				XMVectorGetX(XMVector2Dot(p, XMVectorSet(127.1f, 311.7f, 0, 0))),
-				XMVectorGetX(XMVector2Dot(p, XMVectorSet(269.5f, 183.3f, 0, 0))),
-				0,
-				0
+			return XMFLOAT2(
+				p.x - std::floor(p.x),
+				p.y - std::floor(p.y)
 			);
-			return fract(XMVectorSin(p) * 18.5453f);
+		}
+		inline XMFLOAT2 floor(XMFLOAT2 p)
+		{
+			return XMFLOAT2(
+				std::floor(p.x),
+				std::floor(p.y)
+			);
+		}
+
+		// Backwards compatibility implementation for XMVectorSin() without intrinsics, but strictly matching with SSE version:
+		inline float fmadd_compat(float a, float b, float c) noexcept
+		{
+			float t = a * b;
+			return t + c;
+		}
+		inline float fnmadd_compat(float a, float b, float c) noexcept
+		{
+			float t = a * b;
+			return c - t;
+		}
+		inline float modangles_compat(float angle) noexcept
+		{
+			constexpr float ReciprocalTwoPi = 0.159154943f;
+			constexpr float TwoPi = 6.283185307f;
+			float vResult = angle * ReciprocalTwoPi;
+			vResult = std::round(vResult);
+			return fnmadd_compat(vResult, TwoPi, angle);
+		}
+		inline float compute_sin(float x) noexcept
+		{
+			constexpr float Pi = 3.141592654f;
+			constexpr float HalfPi = 1.570796327f;
+			constexpr float One = 1.0f;
+			constexpr float Coeff1 = -0.16666667f;
+			constexpr float Coeff2 = 0.0083333310f;
+			constexpr float Coeff3 = -0.00019840874f;
+			constexpr float Coeff4 = 2.7525562e-06f;
+			constexpr float Coeff5 = -2.3889859e-08f;
+			x = modangles_compat(x);
+			float c = std::copysign(Pi, x);
+			float absx = std::abs(x);
+			float rflx = c - x;
+			bool comp = (absx <= HalfPi);
+			x = comp ? x : rflx;
+			float x2 = x * x;
+			float result = fmadd_compat(Coeff5, x2, Coeff4);
+			result = fmadd_compat(result, x2, Coeff3);
+			result = fmadd_compat(result, x2, Coeff2);
+			result = fmadd_compat(result, x2, Coeff1);
+			result = fmadd_compat(result, x2, One);
+			result *= x;
+			return result;
+		}
+		inline XMFLOAT2 sin(XMFLOAT2 p) noexcept
+		{
+			XMFLOAT2 ret;
+			ret.x = compute_sin(p.x);
+			ret.y = compute_sin(p.y);
+			return ret;
+		}
+
+		inline XMFLOAT2 hash(XMFLOAT2 p)
+		{
+			XMFLOAT2 ret = XMFLOAT2(
+				dot(XMFLOAT2(p.x, p.y), XMFLOAT2(127.1f, 311.7f)),
+				dot(XMFLOAT2(p.x, p.y), XMFLOAT2(269.5f, 183.3f))
+			);
+			ret = sin(ret);
+			return fract(XMFLOAT2(ret.x * 18.5453f, ret.y * 18.5453f));
 		}
 		struct Result
 		{
-			float distance;
-			float cell_id;
+			float distance = 0;
+			float cell_id = 0;
 		};
 		inline Result compute(float x, float y, float seed)
 		{
-			Result result = {};
+			Result result;
 
-			XMVECTOR p = XMVectorSet(x, y, 0, 0);
-			XMVECTOR n = XMVectorFloor(p);
-			XMVECTOR f = fract(p);
+			XMFLOAT2 p = XMFLOAT2(x, y);
+			XMFLOAT2 n = floor(p);
+			XMFLOAT2 f = fract(p);
 
-			XMVECTOR m = XMVectorSet(8, 0, 0, 0);
+			XMFLOAT3 m = XMFLOAT3(8, 0, 0);
 			for (int j = -1; j <= 1; j++)
 			{
 				for (int i = -1; i <= 1; i++)
 				{
-					XMVECTOR g = XMVectorSet(float(i), float(j), 0, 0);
-					XMVECTOR o = hash(n + g);
-					//XMVECTOR r = g - f + o;
-					XMVECTOR r = g - f + (XMVectorReplicate(0.5f) + 0.5f * XMVectorSin(seed * o));
-					float d = XMVectorGetX(XMVector2Dot(r, r));
-					if (d < XMVectorGetX(m))
+					XMFLOAT2 g = XMFLOAT2(float(i), float(j));
+					XMFLOAT2 o = hash(XMFLOAT2(n.x + g.x, n.y + g.y));
+					XMFLOAT2 r;
+					r.x = g.x - f.x + (0.5f + 0.5f * compute_sin(seed * o.x));
+					r.y = g.y - f.y + (0.5f + 0.5f * compute_sin(seed * o.y));
+					float d = dot(r, r);
+					if (d < m.x)
 					{
-						m = XMVectorSet(d, XMVectorGetX(o), XMVectorGetY(o), 0);
+						m = XMFLOAT3(d, o.x, o.y);
 					}
 				}
 			}
 
-			result.distance = XMVectorGetX(XMVectorSqrt(m));
-			result.cell_id = XMVectorGetY(m) + XMVectorGetZ(m);
+			result.distance = std::sqrt(m.x);
+			result.cell_id = m.y + m.z;
 
 			return result;
 		}

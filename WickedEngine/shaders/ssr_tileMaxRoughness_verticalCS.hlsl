@@ -7,7 +7,7 @@ PUSHCONSTANT(postprocess, PostProcess);
 
 Texture2D<float2> tile_minmax_roughness_horizontal : register(t0);
 
-RWByteAddressBuffer tile_tracing_statistics : register(u0);
+RWStructuredBuffer<PostprocessTileStatistics> tile_tracing_statistics : register(u0);
 RWStructuredBuffer<uint> tiles_tracing_earlyexit : register(u1);
 RWStructuredBuffer<uint> tiles_tracing_cheap : register(u2);
 RWStructuredBuffer<uint> tiles_tracing_expensive : register(u3);
@@ -38,22 +38,23 @@ void main(uint3 DTid : SV_DispatchThreadID)
 	}
 
 	const uint tile = (DTid.x & 0xFFFF) | ((DTid.y & 0xFFFF) << 16);
+	const uint tile_tracing_replicate = sqr(SSR_TILESIZE / ssr_downscalefactor / POSTPROCESS_BLOCKSIZE);
 
 	uint prevCount;
 	if (minRoughness < SSRRoughnessCheap)
 	{
-		tile_tracing_statistics.InterlockedAdd(TILE_STATISTICS_OFFSET_EXPENSIVE, 1, prevCount);
-		tiles_tracing_expensive[prevCount] = tile;
+		InterlockedAdd(tile_tracing_statistics[0].dispatch_expensive.ThreadGroupCountX, tile_tracing_replicate, prevCount);
+		tiles_tracing_expensive[prevCount / tile_tracing_replicate] = tile;
 	}
 	else if (maxRoughness > SSRRoughnessCheap && minRoughness < ssr_roughness_cutoff)
 	{
-		tile_tracing_statistics.InterlockedAdd(TILE_STATISTICS_OFFSET_CHEAP, 1, prevCount);
-		tiles_tracing_cheap[prevCount] = tile;
+		InterlockedAdd(tile_tracing_statistics[0].dispatch_cheap.ThreadGroupCountX, tile_tracing_replicate, prevCount);
+		tiles_tracing_cheap[prevCount / tile_tracing_replicate] = tile;
 	}
 	else
 	{
-		tile_tracing_statistics.InterlockedAdd(TILE_STATISTICS_OFFSET_EARLYEXIT, 1, prevCount);
-		tiles_tracing_earlyexit[prevCount] = tile;
+		InterlockedAdd(tile_tracing_statistics[0].dispatch_earlyexit.ThreadGroupCountX, tile_tracing_replicate, prevCount);
+		tiles_tracing_earlyexit[prevCount / tile_tracing_replicate] = tile;
 	}
 
 	tile_minmax_roughness[DTid.xy] = float2(minRoughness, maxRoughness);

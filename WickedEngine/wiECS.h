@@ -4,7 +4,9 @@
 #include "wiArchive.h"
 #include "wiJobSystem.h"
 #include "wiUnorderedMap.h"
+#include "wiUnorderedSet.h"
 #include "wiVector.h"
+#include "wiAllocator.h"
 
 #include <cstdint>
 #include <cassert>
@@ -18,22 +20,28 @@ namespace wi::ecs
 	// The Entity is a global unique persistent identifier within the entity-component system
 	//	It can be stored and used for the duration of the application
 	//	The entity can be a different value on a different run of the application, if it was serialized
-	//	It must be only serialized with the SerializeEntity() function. It will ensure that entities still match with their components correctly after serialization
-	using Entity = uint32_t;
-	static const Entity INVALID_ENTITY = 0;
+	//	It must be only serialized with the SerializeEntity() function if persistence is needed across different program runs,
+	//		this will ensure that entities still match with their components correctly after serialization
+	using Entity = uint64_t;
+	inline static constexpr Entity INVALID_ENTITY = 0;
 	// Runtime can create a new entity with this
 	inline Entity CreateEntity()
 	{
 		static std::atomic<Entity> next{ INVALID_ENTITY + 1 };
 		return next.fetch_add(1);
 	}
+	inline static constexpr size_t INVALID_INDEX = ~0ull;
 
+	class ComponentLibrary;
 	struct EntitySerializer
 	{
 		wi::jobsystem::context ctx; // allow components to spawn serialization subtasks
 		wi::unordered_map<uint64_t, Entity> remap;
 		bool allow_remap = true;
 		uint64_t version = 0; // The ComponentLibrary serialization will modify this by the registered component's version number
+		wi::unordered_set<std::string> resource_registration; // register for resource manager serialization
+		ComponentLibrary* componentlibrary = nullptr;
+		wi::unordered_map<std::string, uint64_t> library_versions;
 
 		~EntitySerializer()
 		{
@@ -45,6 +53,22 @@ namespace wi::ecs
 		uint64_t GetVersion() const
 		{
 			return version;
+		}
+		uint64_t GetVersion(const std::string& name) const
+		{
+			auto it = library_versions.find(name);
+			if (it != library_versions.end())
+			{
+				return it->second;
+			}
+			return 0;
+		}
+
+		void RegisterResource(const std::string& resource_name)
+		{
+			if (resource_name.empty())
+				return;
+			resource_registration.insert(resource_name);
 		}
 	};
 	// This is the safe way to serialize an entity
@@ -76,20 +100,20 @@ namespace wi::ecs
 		}
 		else
 		{
-#ifndef _WIN32
+#if defined(__GNUC__) && !defined(__SCE__) && !defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
-#endif // _WIN32
+#endif // __GNUC__ && !__SCE__ && ! __clang__
 
 			archive << entity;
 
-#ifndef _WIN32
+#if defined(__GNUC__) && !defined(__SCE__) && !defined(__clang__)
 #pragma GCC diagnostic pop
-#endif // _WIN32
+#endif // __GNUC__ && !__SCE__ && !__clang__
 		}
 	}
 
-	// This is an interface class to implement a ComponentManager, 
+	// This is an interface class to implement a ComponentManager,
 	// inherit this class if you want to work with ComponentLibrary
 	class ComponentManager_Interface
 	{
@@ -110,6 +134,13 @@ namespace wi::ecs
 		virtual const wi::vector<Entity>& GetEntityArray() const = 0;
 	};
 
+
+	template<typename Component, typename = void>
+	struct has_serialize : std::false_type {};
+
+	template<typename Component>
+	struct has_serialize<Component, std::void_t<decltype(std::declval<Component>().Serialize(std::declval<wi::Archive&>(), std::declval<EntitySerializer&>()))>> : std::true_type {};
+
 	// The ComponentManager is a container that stores components and matches them with entities
 	//	Note: final keyword is used to indicate this is a final implementation.
 	//	This allows function inlining and avoid calls, improves performance considerably
@@ -121,9 +152,13 @@ namespace wi::ecs
 		// reservedCount : how much components can be held initially before growing the container
 		ComponentManager(size_t reservedCount = 0)
 		{
-			components.reserve(reservedCount);
-			entities.reserve(reservedCount);
-			lookup.reserve(reservedCount);
+			Reserve(reservedCount);
+		}
+
+		inline void Reserve(size_t count)
+		{
+			components.reserve(count);
+			entities.reserve(count);
 		}
 
 		// Clear the whole container
@@ -137,27 +172,35 @@ namespace wi::ecs
 		// Perform deep copy of all the contents of "other" into this
 		inline void Copy(const ComponentManager<Component>& other)
 		{
-			Clear();
-			components = other.components;
-			entities = other.entities;
-			lookup = other.lookup;
-		}
-
-		// Merge in an other component manager of the same type to this. 
-		//	The other component manager MUST NOT contain any of the same entities!
-		//	The other component manager is not retained after this operation!
-		inline void Merge(ComponentManager<Component>& other)
-		{
-			components.reserve(GetCount() + other.GetCount());
-			entities.reserve(GetCount() + other.GetCount());
-			lookup.reserve(GetCount() + other.GetCount());
+			if (other.GetCount() == 0)
+				return;
+			Reserve(GetCount() + other.GetCount());
 
 			for (size_t i = 0; i < other.GetCount(); ++i)
 			{
 				Entity entity = other.entities[i];
 				assert(!Contains(entity));
 				entities.push_back(entity);
-				lookup[entity] = components.size();
+				lookup.insert(entity, components.size());
+				components.push_back(other.components[i]);
+			}
+		}
+
+		// Merge in an other component manager of the same type to this.
+		//	The other component manager MUST NOT contain any of the same entities!
+		//	The other component manager is not retained after this operation!
+		inline void Merge(ComponentManager<Component>& other)
+		{
+			if (other.GetCount() == 0)
+				return;
+			Reserve(GetCount() + other.GetCount());
+
+			for (size_t i = 0; i < other.GetCount(); ++i)
+			{
+				Entity entity = other.entities[i];
+				assert(!Contains(entity));
+				entities.push_back(entity);
+				lookup.insert(entity, components.size());
 				components.push_back(std::move(other.components[i]));
 			}
 
@@ -177,67 +220,82 @@ namespace wi::ecs
 		// Read/Write everything to an archive depending on the archive state
 		inline void Serialize(wi::Archive& archive, EntitySerializer& seri)
 		{
-			if (archive.IsReadMode())
+			if constexpr (has_serialize<Component>::value)
 			{
-				Clear(); // If we deserialize, we start from empty
-
-				size_t count;
-				archive >> count;
-
-				components.resize(count);
-				for (size_t i = 0; i < count; ++i)
+				if (archive.IsReadMode())
 				{
-					components[i].Serialize(archive, seri);
+					const size_t prev_count = components.size();
+
+					size_t count;
+					archive >> count;
+
+					components.resize(prev_count + count);
+					for (size_t i = 0; i < count; ++i)
+					{
+						components[prev_count + i].Serialize(archive, seri);
+					}
+
+					entities.resize(prev_count + count);
+					for (size_t i = 0; i < count; ++i)
+					{
+						// assign value to make GCC happy
+						Entity entity = INVALID_ENTITY;
+						SerializeEntity(archive, entity, seri);
+						entities[prev_count + i] = entity;
+						lookup.insert(entity, prev_count + i);
+					}
 				}
-
-				entities.resize(count);
-				for (size_t i = 0; i < count; ++i)
+				else
 				{
-					Entity entity;
-					SerializeEntity(archive, entity, seri);
-					entities[i] = entity;
-					lookup[entity] = i;
+					archive << components.size();
+					for (Component& component : components)
+					{
+						component.Serialize(archive, seri);
+					}
+					for (Entity entity : entities)
+					{
+						SerializeEntity(archive, entity, seri);
+					}
 				}
 			}
 			else
 			{
-				archive << components.size();
-				for (Component& component : components)
-				{
-					component.Serialize(archive, seri);
-				}
-				for (Entity entity : entities)
-				{
-					SerializeEntity(archive, entity, seri);
-				}
+				assert(0);
 			}
 		}
 
 		//Read one single component onto an archive, make sure entity are serialized first
 		inline void Component_Serialize(Entity entity, wi::Archive& archive, EntitySerializer& seri)
 		{
-			if(archive.IsReadMode())
+			if constexpr (has_serialize<Component>::value)
 			{
-				bool component_exists;
-				archive >> component_exists;
-				if (component_exists)
+				if (archive.IsReadMode())
 				{
-					auto& component = this->Create(entity);
-					component.Serialize(archive, seri);
+					bool component_exists;
+					archive >> component_exists;
+					if (component_exists)
+					{
+						auto& component = this->Create(entity);
+						component.Serialize(archive, seri);
+					}
+				}
+				else
+				{
+					auto component = this->GetComponent(entity);
+					if (component != nullptr)
+					{
+						archive << true;
+						component->Serialize(archive, seri);
+					}
+					else
+					{
+						archive << false;
+					}
 				}
 			}
 			else
 			{
-				auto component = this->GetComponent(entity);
-				if (component != nullptr)
-				{
-					archive << true;
-					component->Serialize(archive, seri);
-				}
-				else
-				{
-					archive << false;
-				}
+				assert(0);
 			}
 		}
 
@@ -248,14 +306,13 @@ namespace wi::ecs
 			assert(entity != INVALID_ENTITY);
 
 			// Only one of this component type per entity is allowed!
-			assert(lookup.find(entity) == lookup.end());
+			assert(!Contains(entity));
 
-			// Entity count must always be the same as the number of coponents!
+			// Entity count must always be the same as the number of components!
 			assert(entities.size() == components.size());
-			assert(lookup.size() == components.size());
 
 			// Update the entity lookup table:
-			lookup[entity] = components.size();
+			lookup.insert(entity, components.size());
 
 			// New components are always pushed to the end:
 			components.emplace_back();
@@ -269,13 +326,9 @@ namespace wi::ecs
 		// Remove a component of a certain entity if it exists
 		inline void Remove(Entity entity)
 		{
-			auto it = lookup.find(entity);
-			if (it != lookup.end())
+			const size_t index = GetIndex(entity);
+			if (index != INVALID_INDEX)
 			{
-				// Directly index into components and entities array:
-				const size_t index = it->second;
-				const Entity entity = entities[index];
-
 				if (index < components.size() - 1)
 				{
 					// Swap out the dead element with the last one:
@@ -283,7 +336,7 @@ namespace wi::ecs
 					entities[index] = entities.back();
 
 					// Update the lookup table:
-					lookup[entities[index]] = index;
+					lookup.insert(entities[index], index);
 				}
 
 				// Shrink the container:
@@ -296,13 +349,9 @@ namespace wi::ecs
 		// Remove a component of a certain entity if it exists while keeping the current ordering
 		inline void Remove_KeepSorted(Entity entity)
 		{
-			auto it = lookup.find(entity);
-			if (it != lookup.end())
+			const size_t index = GetIndex(entity);
+			if (index != INVALID_INDEX)
 			{
-				// Directly index into components and entities array:
-				const size_t index = it->second;
-				const Entity entity = entities[index];
-
 				if (index < components.size() - 1)
 				{
 					// Move every component left by one that is after this element:
@@ -314,7 +363,7 @@ namespace wi::ecs
 					for (size_t i = index + 1; i < entities.size(); ++i)
 					{
 						entities[i - 1] = entities[i];
-						lookup[entities[i - 1]] = i - 1;
+						lookup.insert(entities[i - 1], i - 1);
 					}
 				}
 
@@ -346,60 +395,43 @@ namespace wi::ecs
 				const size_t next = i + direction;
 				components[i] = std::move(components[next]);
 				entities[i] = entities[next];
-				lookup[entities[i]] = i;
+				lookup.insert(entities[i], i);
 			}
 
 			// Saved entity-component moved to the required position:
 			components[index_to] = std::move(component);
 			entities[index_to] = entity;
-			lookup[entity] = index_to;
+			lookup.insert(entity, index_to);
 		}
 
 		// Check if a component exists for a given entity or not
 		inline bool Contains(Entity entity) const
 		{
-			if (lookup.empty())
-				return false;
-			return lookup.find(entity) != lookup.end();
+			return GetIndex(entity) != INVALID_INDEX;
 		}
 
 		// Retrieve a [read/write] component specified by an entity (if it exists, otherwise nullptr)
 		inline Component* GetComponent(Entity entity)
 		{
-			if (lookup.empty())
+			const size_t index = GetIndex(entity);
+			if (index == INVALID_INDEX)
 				return nullptr;
-			auto it = lookup.find(entity);
-			if (it != lookup.end())
-			{
-				return &components[it->second];
-			}
-			return nullptr;
+			return &components[index];
 		}
 
 		// Retrieve a [read only] component specified by an entity (if it exists, otherwise nullptr)
 		inline const Component* GetComponent(Entity entity) const
 		{
-			if (lookup.empty())
+			const size_t index = GetIndex(entity);
+			if (index == INVALID_INDEX)
 				return nullptr;
-			const auto it = lookup.find(entity);
-			if (it != lookup.end())
-			{
-				return &components[it->second];
-			}
-			return nullptr;
+			return &components[index];
 		}
 
-		// Retrieve component index by entity handle (if not exists, returns ~0ull value)
-		inline size_t GetIndex(Entity entity) const 
+		// Retrieve component index by entity handle (if doesn't exist, returns INVALID_INDEX value)
+		inline size_t GetIndex(Entity entity) const
 		{
-			if (lookup.empty())
-				return ~0ull;
-			const auto it = lookup.find(entity);
-			if (it != lookup.end())
-			{
-				return it->second;
-			}
-			return ~0ull;
+			return lookup.get(entity);
 		}
 
 		// Retrieve the number of existing entries
@@ -423,13 +455,257 @@ namespace wi::ecs
 		// Returns the tightly packed [read only] component array
 		inline const wi::vector<Component>& GetComponentArray() const { return components; }
 
+		// Returns the raw data pointer of components:
+		inline const Component* GetData() const { return components.data(); }
+		inline Component* GetData() { return components.data(); }
+
 	private:
 		// This is a linear array of alive components
 		wi::vector<Component> components;
 		// This is a linear array of entities corresponding to each alive component
 		wi::vector<Entity> entities;
-		// This is a lookup table for entities
-		wi::unordered_map<Entity, size_t> lookup;
+
+//#define LOOKUP_STRAIGHT
+//#define LOOKUP_SPARSE
+#define LOOKUP_BUCKET_HASH
+//#define LOOKUP_HASH
+
+		// This is a lookup table for entity -> index resolving
+		struct LookupTable
+		{
+
+#ifdef LOOKUP_STRAIGHT
+			// Straight lookup with memory wasting implementation:
+			// Matches Entity to index with storing every possible Entity in memory up to the max stored entity index
+			// Fastest lookup but wastes memory storing every possible entity index that was encountered before
+			// !Use it only for performance testing of minimal lookup overhead!
+			struct Item
+			{
+				size_t index = INVALID_INDEX;
+			};
+			wi::vector<Item> table;
+
+			inline void clear()
+			{
+				table.clear();
+			}
+			inline void erase(Entity entity)
+			{
+				table[entity].index = INVALID_INDEX;
+			}
+			inline void insert(Entity entity, size_t index)
+			{
+				if (table.size() <= entity)
+					table.resize(entity + 1);
+				table[entity].index = index;
+			}
+			inline size_t get(Entity entity) const
+			{
+				if (table.size() <= entity)
+					return INVALID_INDEX;
+				return table[entity].index;
+			}
+#endif // LOOKUP_NAIVE
+
+#ifdef LOOKUP_SPARSE
+			// Straight lookup sparse memory manager:
+			// Similar to straight as it stores a direct mapping of entity -> index, but unused ranges of entities will not waste as much memory
+			// The lookup is slowed by the extra block data indirection
+			// The problem is still that entity indices just increase forever and no guarantee that the minmax range doesn't get huge
+			struct BlockData
+			{
+				struct Item
+				{
+					size_t index = INVALID_INDEX;
+				};
+				Item items[64];
+			};
+			struct BlockL1 // stores 64 contiguous entity indices
+			{
+				uint64_t status = 0; // one bit per item in block, if it's 0 then block can be freed and reused
+				BlockData* block_data = nullptr;
+			};
+			struct BlockL2
+			{
+				uint64_t status = 0; // bitmask of active L1 blocks
+				BlockL1 blocks_l1[64];
+			};
+			wi::vector<BlockL2*> blocks_l2;
+			wi::allocator::BlockAllocator<BlockData, 8> block_allocator; // block allocator manages memory per 8 blocks here (sizeof(BlockData) * 8 = 4 KB pages)
+			wi::allocator::BlockAllocator<BlockL2, 4> block_allocator_l2;
+
+			inline void clear()
+			{
+				blocks_l2.clear();
+				block_allocator = {};
+				block_allocator_l2 = {};
+			}
+			inline void erase(Entity entity)
+			{
+				const uint64_t block_index_l2 = entity >> 12ull; // entity / (64 * 64)
+				if (blocks_l2.size() <= block_index_l2)
+					return;
+
+				BlockL2* block_l2 = blocks_l2[block_index_l2];
+				if (block_l2 == nullptr)
+					return;
+
+				const uint64_t block_index_l1 = (entity >> 6ull) & 63ull; // (entity / 64) % 64
+				BlockL1& block = block_l2->blocks_l1[block_index_l1];
+				const uint64_t item_index = entity & 63ull; // entity % 64
+				block.block_data->items[item_index].index = INVALID_INDEX;
+				block.status &= ~(1ull << item_index);
+				if (block.status == 0)
+				{
+					// Free the block data for reuse:
+					block_allocator.free(block.block_data);
+					block.block_data = nullptr;
+
+					block_l2->status &= ~(1ull << block_index_l1);
+					if (block_l2->status == 0)
+					{
+						block_allocator_l2.free(block_l2);
+						blocks_l2[block_index_l2] = nullptr;
+					}
+				}
+			}
+			inline void insert(Entity entity, size_t index)
+			{
+				const uint64_t block_index_l2 = entity >> 12ull; // entity / (64 * 64)
+				if (blocks_l2.size() <= block_index_l2)
+				{
+					// Allocate new block:
+					blocks_l2.resize(block_index_l2 + 1);
+				}
+				if (blocks_l2[block_index_l2] == nullptr)
+				{
+					blocks_l2[block_index_l2] = block_allocator_l2.allocate();
+				}
+				BlockL2* block_l2 = blocks_l2[block_index_l2];
+
+				const uint64_t block_index_l1 = (entity >> 6ull) & 63ull; // (entity / 64) % 64
+				BlockL1& block = block_l2->blocks_l1[block_index_l1];
+				if (block.block_data == nullptr)
+				{
+					block.block_data = block_allocator.allocate();
+				}
+				const uint64_t item_index = entity & 63ull; // entity % 64
+				block.status |= 1ull << item_index;
+				block.block_data->items[item_index].index = index;
+
+				block_l2->status |= 1ull << block_index_l1;
+			}
+			inline size_t get(Entity entity) const
+			{
+				if (blocks_l2.empty())
+					return INVALID_INDEX;
+				const uint64_t block_index_l2 = entity >> 12ull; // entity / (64 * 64)
+				if (blocks_l2.size() > block_index_l2)
+				{
+					const BlockL2* block_l2 = blocks_l2[block_index_l2];
+					if (block_l2 != nullptr)
+					{
+						const uint64_t block_index_l1 = (entity >> 6ull) & 63ull; // (entity / 64) % 64
+						const BlockL1& block = block_l2->blocks_l1[block_index_l1];
+						if (block.status)
+						{
+							const uint64_t item_index = entity & 63ull; // entity % 64
+							return block.block_data->items[item_index].index;
+						}
+					}
+				}
+				return INVALID_INDEX;
+			}
+#endif // LOOKUP_SPARSE
+
+#ifdef LOOKUP_BUCKET_HASH
+			// Implementation with hash table:
+			// Compared to standard hashing, this one hashes per 64-item bucket, resulting in less hashed entries
+			struct Block
+			{
+				uint64_t status = 0; // one bit per item in block, if it's 0 then whole block can be freed
+				struct Item
+				{
+					size_t index = INVALID_INDEX;
+				};
+				Item items[64];
+			};
+			wi::unordered_map<uint64_t, Block> table;
+
+			inline void clear()
+			{
+				table.clear();
+			}
+			inline void erase(Entity entity)
+			{
+				const uint64_t block_index = entity >> 6ull; // entity / 64
+				auto it = table.find(block_index);
+				if (it == table.end())
+					return;
+				Block& block = it->second;
+				if (block.status)
+				{
+					const uint64_t item_index = entity & 63ull; // entity % 64
+					block.items[item_index].index = INVALID_INDEX;
+					block.status &= ~(1ull << item_index);
+					if (block.status == 0)
+					{
+						// Free the block from hash table:
+						table.erase(block_index);
+					}
+				}
+			}
+			inline void insert(Entity entity, size_t index)
+			{
+				const uint64_t block_index = entity >> 6ull; // entity / 64
+				const uint64_t item_index = entity & 63ull; // entity % 64
+				Block& block = table[block_index];
+				block.status |= 1ull << item_index;
+				block.items[item_index].index = index;
+			}
+			inline size_t get(Entity entity) const
+			{
+				if (table.empty())
+					return INVALID_INDEX;
+				const uint64_t block_index = entity >> 6ull; // entity / 64
+				const auto it = table.find(block_index);
+				if (it == table.end())
+					return INVALID_INDEX;
+				const Block& block = it->second;
+				const uint64_t item_index = entity & 63ull; // entity % 64
+				return block.items[item_index].index;
+			}
+#endif // LOOKUP_BUCKET_HASH
+
+#ifdef LOOKUP_HASH
+			// Implementation with hash table:
+			// The standard hashing method, performance depends on hashing, hash collisions
+			wi::unordered_map<Entity, size_t> table;
+
+			inline void clear()
+			{
+				table.clear();
+			}
+			inline void erase(Entity entity)
+			{
+				table.erase(entity);
+			}
+			inline void insert(Entity entity, size_t index)
+			{
+				table[entity] = index;
+			}
+			inline size_t get(Entity entity) const
+			{
+				if (table.empty())
+					return INVALID_INDEX;
+				auto it = table.find(entity);
+				if (it == table.end())
+					return INVALID_INDEX;
+				return it->second;
+			}
+#endif // LOOKUP_HASH
+
+		} lookup;
 
 		// Disallow this to be copied by mistake
 		ComponentManager(const ComponentManager&) = delete;
@@ -451,19 +727,74 @@ namespace wi::ecs
 		//	The name must be unique, it will be used in serialization
 		//	version is optional, it will be propagated to ComponentManager::Serialize() inside the EntitySerializer parameter
 		template<typename T>
-		inline ComponentManager<T>& Register(std::string name, uint64_t version = 0)
+		inline ComponentManager<T>& Register(const std::string& name, uint64_t version = 0)
 		{
 			entries[name].component_manager = std::make_unique<ComponentManager<T>>();
 			entries[name].version = version;
 			return static_cast<ComponentManager<T>&>(*entries[name].component_manager);
 		}
 
+		template<typename T>
+		inline ComponentManager<T>* Get(const std::string& name)
+		{
+			auto it = entries.find(name);
+			if (it == entries.end())
+				return nullptr;
+			return static_cast<ComponentManager<T>*>(it->second.component_manager.get());
+		}
+
+		template<typename T>
+		inline const ComponentManager<T>* Get(const std::string& name) const
+		{
+			auto it = entries.find(name);
+			if (it == entries.end())
+				return nullptr;
+			return static_cast<const ComponentManager<T>*>(it->second.component_manager.get());
+		}
+
+		inline uint64_t GetVersion(std::string name) const
+		{
+			auto it = entries.find(name);
+			if (it == entries.end())
+				return 0;
+			return it->second.version;
+		}
+
 		// Serialize all registered component managers
 		inline void Serialize(wi::Archive& archive, EntitySerializer& seri)
 		{
+			seri.componentlibrary = this;
 			if(archive.IsReadMode())
 			{
 				bool has_next = false;
+				size_t begin = archive.GetPos();
+
+				// First pass, gather component type versions and jump over all data:
+				//	This is so that we can look up other component versions within component serialization if needed
+				do
+				{
+					archive >> has_next;
+					if (has_next)
+					{
+						std::string name;
+						archive >> name;
+						uint64_t jump_pos = 0;
+						archive >> jump_pos;
+						auto it = entries.find(name);
+						if (it != entries.end())
+						{
+							archive >> seri.version;
+							seri.library_versions[name] = seri.version;
+						}
+						archive.Jump(jump_pos);
+					}
+				} while (has_next);
+
+				// Jump back to beginning of component library data
+				archive.Jump(begin);
+
+				// Second pass, read all component data:
+				//	At this point, all existing component type versions are available
 				do
 				{
 					archive >> has_next;
@@ -471,8 +802,8 @@ namespace wi::ecs
 					{
 						std::string name;
 						archive >> name;
-						uint64_t jump_size = 0;
-						archive >> jump_size;
+						uint64_t jump_pos = 0;
+						archive >> jump_pos;
 						auto it = entries.find(name);
 						if(it != entries.end())
 						{
@@ -482,7 +813,7 @@ namespace wi::ecs
 						else
 						{
 							// component manager of this name was not registered, skip serialization by jumping over the data
-							archive.Jump(jump_size);
+							archive.Jump(jump_pos);
 						}
 					}
 				}
@@ -490,6 +821,12 @@ namespace wi::ecs
 			}
 			else
 			{
+				// Save all component type versions:
+				for (auto& it : entries)
+				{
+					seri.library_versions[it.first] = it.second.version;
+				}
+				// Serialize all component data, at this point component type version lookup is also complete
 				for(auto& it : entries)
 				{
 					archive << true;
@@ -507,9 +844,37 @@ namespace wi::ecs
 		// Serialize all components for one entity
 		inline void Entity_Serialize(Entity entity, wi::Archive& archive, EntitySerializer& seri)
 		{
+			seri.componentlibrary = this;
 			if(archive.IsReadMode())
 			{
 				bool has_next = false;
+				size_t begin = archive.GetPos();
+
+				// First pass, gather component type versions and jump over all data:
+				//	This is so that we can look up other component versions within component serialization if needed
+				do
+				{
+					archive >> has_next;
+					if (has_next)
+					{
+						std::string name;
+						archive >> name;
+						uint64_t jump_pos = 0;
+						archive >> jump_pos;
+						auto it = entries.find(name);
+						if (it != entries.end())
+						{
+							archive >> seri.version;
+							seri.library_versions[name] = seri.version;
+						}
+						archive.Jump(jump_pos);
+					}
+				} while (has_next);
+
+				// Jump back to beginning of component library data
+				archive.Jump(begin);
+
+				// Second pass: read entities
 				do
 				{
 					archive >> has_next;
@@ -536,6 +901,12 @@ namespace wi::ecs
 			}
 			else
 			{
+				// Save all component type versions:
+				for (auto& it : entries)
+				{
+					seri.library_versions[it.first] = it.second.version;
+				}
+				// Serialize:
 				for(auto& it : entries)
 				{
 					archive << true;

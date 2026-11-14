@@ -10,7 +10,7 @@ namespace wi::lua
 	public:
 		wi::image::Params params;
 
-		static const char className[];
+		inline static constexpr char className[] = "ImageParams";
 		static Luna<ImageParams_BindLua>::FunctionType methods[];
 		static Luna<ImageParams_BindLua>::PropertyType properties[];
 
@@ -22,10 +22,12 @@ namespace wi::lua
 		int GetPivot(lua_State* L);
 		int GetColor(lua_State* L);
 		int GetOpacity(lua_State* L);
+		int GetSaturation(lua_State* L);
 		int GetFade(lua_State* L);
 		int GetRotation(lua_State* L);
 		int GetTexOffset(lua_State* L);
 		int GetTexOffset2(lua_State* L);
+		int GetBorderSoften(lua_State* L);
 		int GetDrawRect(lua_State* L);
 		int GetDrawRect2(lua_State* L);
 		int IsDrawRectEnabled(lua_State* L);
@@ -33,12 +35,14 @@ namespace wi::lua
 		int IsMirrorEnabled(lua_State* L);
 		int IsBackgroundBlurEnabled(lua_State* L);
 		int IsBackgroundEnabled(lua_State* L);
+		int IsDistortionMaskEnabled(lua_State* L);
 
 		int SetPos(lua_State* L);
 		int SetSize(lua_State* L);
 		int SetPivot(lua_State* L);
 		int SetColor(lua_State* L);
 		int SetOpacity(lua_State* L);
+		int SetSaturation(lua_State* L);
 		int SetFade(lua_State* L);
 		int SetStencil(lua_State* L);
 		int SetStencilRefMode(lua_State* L);
@@ -48,6 +52,7 @@ namespace wi::lua
 		int SetRotation(lua_State* L);
 		int SetTexOffset(lua_State* L);
 		int SetTexOffset2(lua_State* L);
+		int SetBorderSoften(lua_State* L);
 		int EnableDrawRect(lua_State* L);
 		int EnableDrawRect2(lua_State* L);
 		int DisableDrawRect(lua_State* L);
@@ -58,6 +63,24 @@ namespace wi::lua
 		int DisableBackgroundBlur(lua_State* L);
 		int EnableBackground(lua_State* L);
 		int DisableBackground(lua_State* L);
+		int EnableDistortionMask(lua_State* L);
+		int DisableDistortionMask(lua_State* L);
+		int SetMaskAlphaRange(lua_State* L);
+		int GetMaskAlphaRange(lua_State* L);
+
+		int SetAngularSoftnessDirection(lua_State* L);
+		int SetAngularSoftnessInnerAngle(lua_State* L);
+		int SetAngularSoftnessOuterAngle(lua_State* L);
+		int EnableAngularSoftnessDoubleSided(lua_State* L);
+		int EnableAngularSoftnessInverse(lua_State* L);
+		int DisableAngularSoftnessDoubleSided(lua_State* L);
+		int DisableAngularSoftnessInverse(lua_State* L);
+
+		int EnableCornerRounding(lua_State* L);
+		int DisableCornerRounding(lua_State* L);
+		int SetCornerRounding(lua_State* L);
+
+		int SetGradient(lua_State* L);
 
 		static void Bind();
 	};

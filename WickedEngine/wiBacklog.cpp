@@ -2,7 +2,6 @@
 #include "wiMath.h"
 #include "wiResourceManager.h"
 #include "wiTextureHelper.h"
-#include "wiSpinLock.h"
 #include "wiFont.h"
 #include "wiSpriteFont.h"
 #include "wiImage.h"
@@ -11,74 +10,289 @@
 #include "wiPlatform.h"
 #include "wiHelper.h"
 #include "wiGUI.h"
+#include "wiTimer.h"
 
 #include <mutex>
 #include <deque>
 #include <limits>
-#include <thread>
 #include <iostream>
+#include <thread>
+#include <condition_variable>
+#include <atomic>
+#include <fstream>
+#include <chrono>
 
 using namespace wi::graphics;
 
 namespace wi::backlog
 {
 	bool enabled = false;
-	struct LogEntry
-	{
-		std::string text;
-		LogLevel level = LogLevel::Default;
-	};
-	std::deque<LogEntry> entries;
-	std::deque<LogEntry> history;
+	bool was_ever_enabled = enabled;
 	const float speed = 4000.0f;
-	const size_t deletefromline = 500;
+	const size_t deleteFromLine = 500; // Only limits in-memory display buffer, not file
 	float pos = 5;
-	float scroll = 0;
 	int historyPos = 0;
 	wi::font::Params font_params;
-	wi::SpinLock logLock;
+	wi::Color backgroundColor = wi::Color(17, 30, 43, 255);
 	Texture backgroundTex;
 	bool refitscroll = false;
 	wi::gui::TextInputField inputField;
 	wi::gui::Button toggleButton;
+	wi::gui::GUI GUI;
+	wi::gui::ScrollBar scrollbar;
+	float autoscroll = 0; // automatic scroll behaviour while backlog is not really updated with a proper scrollbar (init screen, shader compile, etc) the text should still scroll
 
 	bool locked = false;
 	bool blockLuaExec = false;
 	LogLevel logLevel = LogLevel::Default;
+	LogLevel unseen = LogLevel::None;
 
-	std::string getTextWithoutLock()
+	std::deque<LogEntry> history;
+	std::mutex historyLock;
+	std::string logfile_path = "";
+
+	struct AsyncWriter
 	{
-		std::string retval;
-		for (auto& x : entries)
+		std::thread writerThread;
+		std::mutex queueMutex;
+		std::condition_variable queueEntriesCondition;
+		std::condition_variable queueEmptyCondition;
+		std::deque<std::string> writeQueue;
+		std::atomic<bool> running{ false };
+		std::atomic<bool> initialized{ false };
+		std::atomic<uint32_t> autoFlushInterval{ 1000 };
+		wi::Timer lastFlushTimer;
+		std::ofstream logFileStream;
+		std::string currentLogFilePath;
+		std::mutex flushMutex; // Synchronous flush requests
+
+		void Start(const std::string& filepath)
 		{
-			retval += x.text;
+			if (initialized.exchange(true))
+			{
+				return;
+			}
+
+			currentLogFilePath = filepath;
+			running = true;
+			lastFlushTimer.record();
+
+			logFileStream.open(filepath, std::ios::binary | std::ios::trunc);
+			if (!logFileStream.is_open())
+			{
+				wi::helper::DebugOut("Failed to open log file: " + filepath + "\n", wi::helper::DebugLevel::Error);
+			}
+
+			writerThread = std::thread([this]() {
+				WriterLoop();
+			});
 		}
-		return retval;
-	}
-	void write_logfile()
+
+		void Stop()
+		{
+			if (!initialized.load())
+			{
+				return;
+			}
+
+			running = false;
+			queueEntriesCondition.notify_all();
+
+			if (writerThread.joinable())
+			{
+				writerThread.join();
+			}
+
+			// Final flush of any remaining entries
+			FlushQueue();
+
+			if (logFileStream.is_open())
+			{
+				logFileStream.flush();
+				logFileStream.close();
+			}
+
+			initialized = false;
+		}
+
+		void WriterLoop()
+		{
+			while (running.load())
+			{
+				std::unique_lock lock(queueMutex);
+
+				// Wait for new entries or timeout for periodic flush
+				auto timeout = std::chrono::milliseconds(100);
+				queueEntriesCondition.wait_for(lock, timeout, [this]() {
+					return !writeQueue.empty() || !running.load();
+				});
+
+				if (!running.load() && writeQueue.empty())
+					break;
+
+				// Process all queued entries
+				static std::deque<std::string> localQueue;
+				std::swap(localQueue, writeQueue);
+				lock.unlock();
+
+				// Notify waiters that queue is now empty after swap
+				queueEmptyCondition.notify_all();
+
+				WriteEntries(localQueue);
+				localQueue.clear();
+
+				// Check for auto-flush interval
+				const auto interval = autoFlushInterval.load();
+				if (interval > 0 && lastFlushTimer.elapsed_milliseconds() >= interval)
+				{
+					if (logFileStream.is_open())
+					{
+						logFileStream.flush();
+					}
+					lastFlushTimer.record();
+				}
+			}
+		}
+
+		void WriteEntries(const std::deque<std::string>& entries)
+		{
+			if (!logFileStream.is_open())
+			{
+				return;
+			}
+
+			for (const auto& entry : entries)
+			{
+				logFileStream.write(entry.c_str(), entry.length());
+			}
+		}
+
+		void FlushQueue()
+		{
+			std::unique_lock lock(queueMutex);
+			static thread_local std::deque<std::string> localQueue;
+			std::swap(localQueue, writeQueue);
+			lock.unlock();
+
+			WriteEntries(localQueue);
+			localQueue.clear();
+
+			if (logFileStream.is_open())
+			{
+				logFileStream.flush();
+			}
+			lastFlushTimer.record();
+		}
+
+		void Enqueue(const std::string& text)
+		{
+			{
+				std::scoped_lock lock(queueMutex);
+				writeQueue.push_back(text);
+			}
+			queueEntriesCondition.notify_one();
+		}
+
+		void FlushSync()
+		{
+			std::scoped_lock lock(flushMutex);
+			if (!initialized.load())
+			{
+				return;
+			}
+
+			// Signal and wait for queue to be processed
+			std::unique_lock queueLock(queueMutex);
+			if (!writeQueue.empty())
+			{
+				queueEntriesCondition.notify_one();
+				queueEmptyCondition.wait(queueLock, [this] { return writeQueue.empty(); });
+			}
+			queueLock.unlock();
+
+			// Force file flush
+			if (logFileStream.is_open())
+			{
+				logFileStream.flush();
+			}
+		}
+
+		void SetAutoFlushInterval(uint32_t ms)
+		{
+			autoFlushInterval = ms;
+		}
+
+		void UpdateLogFilePath(const std::string& newPath)
+		{
+			std::scoped_lock lock(flushMutex);
+
+			// Flush and close current file
+			FlushQueue();
+			if (logFileStream.is_open())
+			{
+				logFileStream.close();
+			}
+
+			// Open new file
+			currentLogFilePath = newPath;
+			logFileStream.open(newPath, std::ios::binary | std::ios::trunc);
+		}
+	};
+
+	static AsyncWriter asyncWriter;
+
+	struct InternalState
 	{
-		std::string filename = wi::helper::GetTempDirectoryPath() + "wiBacklog.txt";
-		std::string text = getText(); // will lock mutex
-		wi::helper::FileWrite(filename, (const uint8_t*)text.c_str(), text.length());
+		// These must have common lifetime and destruction order, so keep them together in a struct:
+		std::deque<LogEntry> entries;
+		std::mutex entriesLock;
+
+		InternalState() = default;
+		~InternalState()
+		{
+			asyncWriter.Stop();
+		}
+
+		InternalState(const InternalState&) = delete;
+		InternalState& operator=(const InternalState&) = delete;
+		InternalState(InternalState&&) = delete;
+		InternalState& operator=(InternalState&&) = delete;
+
+		std::string getText()
+		{
+			std::scoped_lock lck(entriesLock);
+			std::string retval;
+			_forEachLogEntry_unsafe([&](auto&& entry) {retval += entry.text;});
+			return retval;
+		}
+		void _forEachLogEntry_unsafe(const std::function<void(const LogEntry&)>& cb) const
+		{
+			for (auto& entry : entries)
+			{
+				cb(entry);
+			}
+		}
+	} internal_state;
+
+	void Flush()
+	{
+		asyncWriter.FlushSync();
 	}
 
-	// The logwriter object will automatically write out the backlog to the temp folder when it's destroyed
-	//	Should happen on application exit
-	struct LogWriter
+	void SetAutoFlushInterval(uint32_t milliseconds)
 	{
-		~LogWriter()
-		{
-			write_logfile();
-		}
-	} logwriter;
+		asyncWriter.SetAutoFlushInterval(milliseconds);
+	}
 
 	void Toggle()
 	{
 		enabled = !enabled;
+		was_ever_enabled = true;
 	}
-	void Scroll(float dir)
+	void Scroll(float direction)
 	{
-		scroll += dir;
+		scrollbar.Scroll(direction);
+		autoscroll += direction;
 	}
 	void Update(const wi::Canvas& canvas, float dt)
 	{
@@ -91,6 +305,7 @@ namespace wi::backlog
 
 			if (isActive())
 			{
+
 				if (wi::input::Press(wi::input::KEYBOARD_BUTTON_UP))
 				{
 					historyPrev();
@@ -115,16 +330,20 @@ namespace wi::backlog
 				{
 					created = true;
 					inputField.Create("");
-					inputField.OnInputAccepted([](wi::gui::EventArgs args) {
+					inputField.SetCancelInputEnabled(false);
+					inputField.OnInputAccepted([](const wi::gui::EventArgs& args) {
 						historyPos = 0;
 						post(args.sValue);
 						LogEntry entry;
 						entry.text = args.sValue;
 						entry.level = LogLevel::Default;
-						history.push_back(entry);
-						if (history.size() > deletefromline)
 						{
-							history.pop_front();
+							std::scoped_lock lock(historyLock);
+							history.push_back(entry);
+							if (history.size() > deleteFromLine)
+							{
+								history.pop_front();
+							}
 						}
 						if (!blockLuaExec)
 						{
@@ -136,18 +355,18 @@ namespace wi::backlog
 						}
 						inputField.SetText("");
 					});
-					wi::Color theme_color_idle = wi::Color(30, 40, 60, 200);
-					wi::Color theme_color_focus = wi::Color(70, 150, 170, 220);
-					wi::Color theme_color_active = wi::Color::White();
-					wi::Color theme_color_deactivating = wi::Color::lerp(theme_color_focus, wi::Color::White(), 0.5f);
+					const wi::Color theme_color_idle = wi::Color(30, 40, 60, 200);
+					const wi::Color theme_color_focus = wi::Color(70, 150, 170, 220);
+					const wi::Color theme_color_active = wi::Color::White();
+					const wi::Color theme_color_deactivating = wi::Color::lerp(theme_color_focus, wi::Color::White(), 0.5f);
+					const wi::Color shadow_color = wi::Color(80, 140, 180, 100);
+					const wi::Color font_color = wi::Color(160, 240, 250, 255);
 					inputField.SetColor(theme_color_idle); // all states the same, it's gonna be always active anyway
-					inputField.SetShadowRadius(5);
-					inputField.SetShadowColor(wi::Color(80, 140, 180, 100));
 					inputField.font.params.color = wi::Color(160, 240, 250, 255);
 					inputField.font.params.shadowColor = wi::Color::Transparent();
 
 					toggleButton.Create("V");
-					toggleButton.OnClick([](wi::gui::EventArgs args) {
+					toggleButton.OnClick([](const wi::gui::EventArgs& args) {
 						Toggle();
 						});
 					toggleButton.SetColor(theme_color_idle, wi::gui::IDLE);
@@ -155,8 +374,8 @@ namespace wi::backlog
 					toggleButton.SetColor(theme_color_active, wi::gui::ACTIVE);
 					toggleButton.SetColor(theme_color_deactivating, wi::gui::DEACTIVATING);
 					toggleButton.SetShadowRadius(5);
-					toggleButton.SetShadowColor(wi::Color(80, 140, 180, 100));
-					toggleButton.font.params.color = wi::Color(160, 240, 250, 255);
+					toggleButton.SetShadowColor(shadow_color);
+					toggleButton.font.params.color = font_color;
 					toggleButton.font.params.rotation = XM_PI;
 					toggleButton.font.params.size = 24;
 					toggleButton.font.params.scaling = 3;
@@ -166,12 +385,43 @@ namespace wi::backlog
 						toggleButton.sprites[i].params.enableCornerRounding();
 						toggleButton.sprites[i].params.corners_rounding[2].radius = 50;
 					}
+
+					scrollbar.SetVertical(true);
+					scrollbar.SetColor(theme_color_idle, wi::gui::IDLE);
+					scrollbar.SetColor(theme_color_focus, wi::gui::FOCUS);
+					scrollbar.SetColor(theme_color_active, wi::gui::ACTIVE);
+					scrollbar.SetColor(theme_color_deactivating, wi::gui::DEACTIVATING);
+					scrollbar.SetColor(theme_color_focus, wi::gui::WIDGET_ID_SCROLLBAR_KNOB_INACTIVE);
+					scrollbar.SetColor(font_color, wi::gui::WIDGET_ID_SCROLLBAR_KNOB_HOVER);
+					scrollbar.SetColor(theme_color_active, wi::gui::WIDGET_ID_SCROLLBAR_KNOB_GRABBED);
+					scrollbar.SetColor(theme_color_active, wi::gui::WIDGET_ID_SCROLLBAR_KNOB_GRABBED);
+					scrollbar.SetShadowRadius(5);
+					scrollbar.SetShadowColor(shadow_color);
+					for (int i = 0; i < arraysize(scrollbar.sprites); ++i)
+					{
+						scrollbar.sprites[i].params.enableCornerRounding();
+						scrollbar.sprites[i].params.corners_rounding[0].radius = 8;
+						scrollbar.sprites[i].params.corners_rounding[1].radius = 8;
+						scrollbar.sprites[i].params.corners_rounding[2].radius = 8;
+						scrollbar.sprites[i].params.corners_rounding[3].radius = 8;
+					}
+					for (int i = 0; i < arraysize(scrollbar.sprites_knob); ++i)
+					{
+						scrollbar.sprites_knob[i].params.enableCornerRounding();
+						scrollbar.sprites_knob[i].params.corners_rounding[0].radius = 8;
+						scrollbar.sprites_knob[i].params.corners_rounding[1].radius = 8;
+						scrollbar.sprites_knob[i].params.corners_rounding[2].radius = 8;
+						scrollbar.sprites_knob[i].params.corners_rounding[3].radius = 8;
+					}
 				}
 				if (inputField.GetState() != wi::gui::ACTIVE)
 				{
 					inputField.SetAsActive();
 				}
 
+				const float textheight = wi::font::TextHeight(getText(), font_params); // only call when it's active, this allocates
+				scrollbar.SetListLength(std::max(textheight, canvas.GetLogicalHeight()));
+				autoscroll = 0; // when scrollbar active then no autoscroll
 			}
 			else
 			{
@@ -189,13 +439,17 @@ namespace wi::backlog
 		}
 		pos = wi::math::Clamp(pos, -canvas.GetLogicalHeight(), 0);
 
-		inputField.SetSize(XMFLOAT2(canvas.GetLogicalWidth() - 20, 20));
-		inputField.SetPos(XMFLOAT2(10, canvas.GetLogicalHeight() - 30 + pos));
+		inputField.SetSize(XMFLOAT2(canvas.GetLogicalWidth() - 40, 20));
+		inputField.SetPos(XMFLOAT2(20, canvas.GetLogicalHeight() - 40 + pos));
 		inputField.Update(canvas, dt);
 
 		toggleButton.SetSize(XMFLOAT2(100, 100));
 		toggleButton.SetPos(XMFLOAT2(canvas.GetLogicalWidth() - toggleButton.GetSize().x - 20, 20 + pos));
 		toggleButton.Update(canvas, dt);
+
+		scrollbar.SetSize(XMFLOAT2(20, canvas.GetLogicalHeight() - 20 - toggleButton.GetSize().y - toggleButton.GetShadowRadius() * 2 - 70));
+		scrollbar.SetPos(XMFLOAT2(canvas.GetLogicalWidth() - scrollbar.GetSize().x - 20, toggleButton.GetSize().y + toggleButton.GetShadowRadius() * 2 + 30 + pos));
+		scrollbar.Update(canvas, dt);
 	}
 	void Draw(
 		const wi::Canvas& canvas,
@@ -203,52 +457,75 @@ namespace wi::backlog
 		ColorSpace colorspace
 	)
 	{
-		if (pos > -canvas.GetLogicalHeight())
+		if (!was_ever_enabled || pos <= -canvas.GetLogicalHeight())
 		{
-			if (!backgroundTex.IsValid())
-			{
-				const uint8_t colorData[] = { 0, 0, 43, 200, 43, 31, 141, 223 };
-				wi::texturehelper::CreateTexture(backgroundTex, colorData, 1, 2);
-			}
-
-			wi::image::Params fx = wi::image::Params((float)canvas.GetLogicalWidth(), (float)canvas.GetLogicalHeight());
-			fx.pos = XMFLOAT3(0, pos, 0);
-			fx.opacity = wi::math::Lerp(1, 0, -pos / canvas.GetLogicalHeight());
-			if (colorspace != ColorSpace::SRGB)
-			{
-				fx.enableLinearOutputMapping(9);
-			}
-			wi::image::Draw(&backgroundTex, fx, cmd);
-
-			if (colorspace != ColorSpace::SRGB)
-			{
-				inputField.sprites[inputField.GetState()].params.enableLinearOutputMapping(9);
-				inputField.font.params.enableLinearOutputMapping(9);
-				toggleButton.sprites[inputField.GetState()].params.enableLinearOutputMapping(9);
-				toggleButton.font.params.enableLinearOutputMapping(9);
-			}
-			inputField.Render(canvas, cmd);
-
-			Rect rect;
-			rect.left = 0;
-			rect.right = (int32_t)canvas.GetPhysicalWidth();
-			rect.top = 0;
-			rect.bottom = (int32_t)canvas.GetPhysicalHeight();
-			wi::graphics::GetDevice()->BindScissorRects(1, &rect, cmd);
-
-			toggleButton.Render(canvas, cmd);
-
-			rect.bottom = int32_t(canvas.LogicalToPhysical(inputField.GetPos().y - 15));
-			wi::graphics::GetDevice()->BindScissorRects(1, &rect, cmd);
-
-			DrawOutputText(canvas, cmd, colorspace);
-
-			rect.left = 0;
-			rect.right = std::numeric_limits<int>::max();
-			rect.top = 0;
-			rect.bottom = std::numeric_limits<int>::max();
-			wi::graphics::GetDevice()->BindScissorRects(1, &rect, cmd);
+			return;
 		}
+
+		GraphicsDevice* device = GetDevice();
+		device->EventBegin("Backlog", cmd);
+
+		wi::image::Params fx = wi::image::Params((float)canvas.GetLogicalWidth(), (float)canvas.GetLogicalHeight());
+		fx.pos = XMFLOAT3(0, pos, 0);
+		fx.opacity = wi::math::Lerp(0.9f, 0, saturate(-pos / canvas.GetLogicalHeight()));
+		if (colorspace != ColorSpace::SRGB)
+		{
+			fx.enableLinearOutputMapping(9);
+		}
+		fx.color = backgroundColor;
+		wi::image::Draw(backgroundTex.IsValid() ? &backgroundTex : nullptr, fx, cmd);
+
+		wi::image::Params inputbg;
+		inputbg.color = wi::Color(80, 140, 180, 200);
+		inputbg.pos = inputField.translation;
+		inputbg.pos.x -= 8;
+		inputbg.pos.y -= 8;
+		inputbg.siz = inputField.GetSize();
+		inputbg.siz.x += 16;
+		inputbg.siz.y += 16;
+		inputbg.enableCornerRounding();
+		inputbg.corners_rounding[0].radius = 10;
+		inputbg.corners_rounding[1].radius = 10;
+		inputbg.corners_rounding[2].radius = 10;
+		inputbg.corners_rounding[3].radius = 10;
+		if (colorspace != ColorSpace::SRGB)
+		{
+			inputbg.enableLinearOutputMapping(9);
+		}
+		wi::image::Draw(nullptr, inputbg, cmd);
+
+		if (colorspace != ColorSpace::SRGB)
+		{
+			inputField.sprites[inputField.GetState()].params.enableLinearOutputMapping(9);
+			inputField.font.params.enableLinearOutputMapping(9);
+			toggleButton.sprites[toggleButton.GetState()].params.enableLinearOutputMapping(9);
+			toggleButton.font.params.enableLinearOutputMapping(9);
+			scrollbar.sprites[scrollbar.GetState()].params.enableLinearOutputMapping(9);
+		}
+		inputField.Render(canvas, cmd);
+
+		wi::graphics::Rect rect;
+		rect.left = 0;
+		rect.right = (int32_t)canvas.GetPhysicalWidth();
+		rect.top = 0;
+		rect.bottom = (int32_t)canvas.GetPhysicalHeight();
+		device->BindScissorRects(1, &rect, cmd);
+
+		scrollbar.Render(canvas, cmd);
+
+		toggleButton.Render(canvas, cmd);
+
+		rect.bottom = int32_t(canvas.LogicalToPhysical(inputField.GetPos().y - 15));
+		device->BindScissorRects(1, &rect, cmd);
+
+		DrawOutputText(canvas, cmd, colorspace);
+
+		rect.left = 0;
+		rect.right = std::numeric_limits<int>::max();
+		rect.top = 0;
+		rect.bottom = std::numeric_limits<int>::max();
+		device->BindScissorRects(1, &rect, cmd);
+		device->EventEnd(cmd);
 	}
 
 	void DrawOutputText(
@@ -257,122 +534,155 @@ namespace wi::backlog
 		ColorSpace colorspace
 	)
 	{
-		std::scoped_lock lock(logLock);
 		wi::font::SetCanvas(canvas); // always set here as it can be called from outside...
-		font_params.cursor = {};
+		wi::font::Params params = font_params;
+		params.cursor = {};
 		if (refitscroll)
 		{
-			float textheight = wi::font::TextHeight(getTextWithoutLock(), font_params);
-			float limit = canvas.GetLogicalHeight() - 35;
-			if (scroll + textheight > limit)
+			const float textheight = wi::font::TextHeight(getText(), font_params);
+			const float limit = canvas.GetLogicalHeight() - 50;
+			if (scrollbar.GetOffset() + textheight > limit)
 			{
-				scroll = limit - textheight;
+				scrollbar.SetOffset(limit - scrollbar.GetOffset() + textheight);
+			}
+			if (autoscroll + textheight > limit)
+			{
+				autoscroll = limit - textheight;
 			}
 			refitscroll = false;
 		}
-		font_params.posX = 5;
-		font_params.posY = pos + scroll;
-		font_params.h_wrap = canvas.GetLogicalWidth() - font_params.posX;
+		params.posX = 5;
+		params.posY = pos + scrollbar.GetOffset() + autoscroll;
+		params.h_wrap = canvas.GetLogicalWidth() - params.posX;
 		if (colorspace != ColorSpace::SRGB)
 		{
-			font_params.enableLinearOutputMapping(9);
+			params.enableLinearOutputMapping(9);
 		}
-		for (auto& x : entries)
+
+		static std::deque<LogEntry> entriesCopy;
+
+		internal_state.entriesLock.lock();
+		// Force copy because drawing text while locking is not safe because an error inside might try to lock again!
+		entriesCopy = internal_state.entries;
+		internal_state.entriesLock.unlock();
+
+		for (auto& x : entriesCopy)
 		{
 			switch (x.level)
 			{
 			case LogLevel::Warning:
-				font_params.color = wi::Color::Warning();
+				params.color = wi::Color::Warning();
 				break;
 			case LogLevel::Error:
-				font_params.color = wi::Color::Error();
+				params.color = wi::Color::Error();
+				break;
+			case LogLevel::Success:
+				params.color = wi::Color::Success();
 				break;
 			default:
-				font_params.color = wi::Color::White();
+				params.color = font_params.color;
 				break;
 			}
-			font_params.cursor = wi::font::Draw(x.text, font_params, cmd);
+			params.cursor = wi::font::Draw(x.text, params, cmd);
 		}
+
+		unseen = LogLevel::None;
 	}
 
 	std::string getText()
 	{
-		std::scoped_lock lock(logLock);
-		return getTextWithoutLock();
+		return internal_state.getText();
+	}
+	// You generally don't want to use this. See notes in header
+	void _forEachLogEntry_unsafe(const std::function<void(const LogEntry&)>& cb)
+	{
+		internal_state._forEachLogEntry_unsafe(cb);
 	}
 	void clear()
 	{
-		std::scoped_lock lock(logLock);
-		entries.clear();
-		scroll = 0;
+		std::scoped_lock lck(internal_state.entriesLock);
+		internal_state.entries.clear();
+		scrollbar.SetOffset(0);
 	}
-	void post(const std::string& input, LogLevel level)
+	void post(const char* input, LogLevel level)
 	{
 		if (logLevel > level)
 		{
 			return;
 		}
 
-		// This is explicitly scoped for scoped_lock!
+		// Initialize async writer on first log
+		if (!asyncWriter.initialized.load())
 		{
-			std::scoped_lock lock(logLock);
-
-			std::string str;
-			switch (level)
-			{
-			default:
-			case LogLevel::Default:
-				str = "";
-				break;
-			case LogLevel::Warning:
-				str = "[Warning] ";
-				break;
-			case LogLevel::Error:
-				str = "[Error] ";
-				break;
-			}
-			str += input;
-			str += '\n';
-			LogEntry entry;
-			entry.text = str;
-			entry.level = level;
-			entries.push_back(entry);
-			if (entries.size() > deletefromline)
-			{
-				entries.pop_front();
-			}
-			refitscroll = true;
-
-#ifdef _WIN32
-			OutputDebugStringA(str.c_str());
-#endif // _WIN32
-
-			switch (level)
-			{
-			default:
-			case LogLevel::Default:
-				std::cout << str;
-				break;
-			case LogLevel::Warning:
-				std::clog << str;
-				break;
-			case LogLevel::Error:
-				std::cerr << str;
-				break;
-			}
-
-			// lock released on block end
+			asyncWriter.Start(GetLogFile());
 		}
 
+		std::string str;
+		switch (level)
+		{
+		default:
+		case LogLevel::Default:
+			str = "";
+			break;
+		case LogLevel::Warning:
+			str = "[Warning] ";
+			break;
+		case LogLevel::Error:
+			str = "[Error] ";
+			break;
+		}
+		str += input;
+		str += '\n';
+		LogEntry entry;
+		entry.text = str;
+		entry.level = level;
+
+		// Add to in-memory display buffer
+		internal_state.entriesLock.lock();
+		internal_state.entries.push_back(entry);
+		if (internal_state.entries.size() > deleteFromLine)
+		{
+			internal_state.entries.pop_front();
+		}
+		internal_state.entriesLock.unlock();
+
+		// Enqueue for async file writing
+		asyncWriter.Enqueue(str);
+
+		refitscroll = true;
+
+		switch (level)
+		{
+		default:
+		case LogLevel::Default:
+			wi::helper::DebugOut(str, wi::helper::DebugLevel::Normal);
+			break;
+		case LogLevel::Warning:
+			wi::helper::DebugOut(str, wi::helper::DebugLevel::Warning);
+			break;
+		case LogLevel::Error:
+			wi::helper::DebugOut(str, wi::helper::DebugLevel::Error);
+			break;
+		}
+
+		unseen = std::max(unseen, level);
+
+		// Force an immediate flush on errors to prevent potential data loss
+		//	in case the application is about to crash
 		if (level >= LogLevel::Error)
 		{
-			write_logfile(); // will lock mutex
+			asyncWriter.FlushSync();
 		}
+	}
+
+	void post(const std::string& input, LogLevel level)
+	{
+		post(input.c_str(), level);
 	}
 
 	void historyPrev()
 	{
-		std::scoped_lock lock(logLock);
+		std::scoped_lock lock(historyLock);
 		if (!history.empty())
 		{
 			inputField.SetText(history[history.size() - 1 - historyPos].text);
@@ -385,7 +695,7 @@ namespace wi::backlog
 	}
 	void historyNext()
 	{
-		std::scoped_lock lock(logLock);
+		std::scoped_lock lock(historyLock);
 		if (!history.empty())
 		{
 			if (historyPos > 0)
@@ -401,6 +711,10 @@ namespace wi::backlog
 	{
 		backgroundTex = *texture;
 	}
+	void setBackgroundColor(wi::Color color)
+	{
+		backgroundColor = color;
+	}
 	void setFontSize(int value)
 	{
 		font_params.size = value;
@@ -408,6 +722,10 @@ namespace wi::backlog
 	void setFontRowspacing(float value)
 	{
 		font_params.spacingY = value;
+	}
+	void setFontColor(wi::Color color)
+	{
+		font_params.color = color;
 	}
 
 	bool isActive() { return enabled; }
@@ -434,5 +752,36 @@ namespace wi::backlog
 	void SetLogLevel(LogLevel newLevel)
 	{
 		logLevel = newLevel;
+	}
+
+	LogLevel GetUnseenLogLevelMax()
+	{
+		return unseen;
+	}
+
+	void SetLogFile(const std::string& path)
+	{
+		logfile_path = path;
+		if (asyncWriter.initialized.load())
+		{
+			asyncWriter.UpdateLogFilePath(GetLogFile());
+		}
+	}
+
+	void GetLogFile(std::string& path)
+	{
+		if (!logfile_path.empty())
+		{
+			path = logfile_path;
+		}
+	}
+
+	std::string GetLogFile()
+	{
+		if (logfile_path.empty() || !wi::helper::DirectoryExists(wi::helper::GetDirectoryFromPath(logfile_path)))
+		{
+			return wi::helper::GetCurrentPath() + "/log.txt";
+		}
+		return logfile_path;
 	}
 }

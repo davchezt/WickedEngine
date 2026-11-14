@@ -3,6 +3,8 @@
 #define SURFACE_LOAD_MIPCONE
 #define SVT_FEEDBACK
 #define TEXTURE_SLOT_NONUNIFORM
+#define DISABLE_HALF_PRECISION
+#define WATER
 #include "globals.hlsli"
 #include "raytracingHF.hlsli"
 #include "lightingHF.hlsli"
@@ -14,15 +16,16 @@ static const uint ANYTHIT_CUTOFF_AFTER_BOUNCE_COUNT = 1;
 RWTexture2D<float4> output : register(u0);
 RWTexture2D<float4> output_albedo : register(u1);
 RWTexture2D<float4> output_normal : register(u2);
+RWTexture2D<float> output_depth : register(u3);
+RWTexture2D<uint> output_stencil : register(u4);
+RWTexture2D<uint> output_primitiveID : register(u5);
 
-[numthreads(RAYTRACING_LAUNCH_BLOCKSIZE, RAYTRACING_LAUNCH_BLOCKSIZE, 1)]
+[numthreads(8, 4, 1)]
 void main(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
 {
 	uint2 pixel = DTid.xy;
 	if (pixel.x >= xTraceResolution.x || pixel.y >= xTraceResolution.y)
-	{
 		return;
-	}
 	float3 result = 0;
 	float3 energy = 1;
 
@@ -33,11 +36,11 @@ void main(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
 	float3 primary_albedo = 0;
 	float3 primary_normal = 0;
 
-	// Compute screen coordinates:
-	float2 uv = (pixel + xTracePixelOffset) * xTraceResolution_rcp.xy;
+	// for primID post effect:
+	uint primary_primitiveID = 0;
 
 	// Create starting ray:
-	RayDesc ray = CreateCameraRay(uv_to_clipspace(uv));
+	RayDesc ray = CreateCameraRay(pixel, xTracePixelOffset);
 
 	// Depth of field setup:
 	float3 focal_point = ray.Origin + ray.Direction * GetCamera().focal_length;
@@ -50,7 +53,16 @@ void main(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
 	ray.Origin = ray.Origin + coc;
 	ray.Direction = focal_point - ray.Origin; // will be normalized before tracing!
 
+	ray_clip_plane(ray, GetCamera().clip_plane);
+
 	RayCone raycone = pixel_ray_cone_from_image_height(xTraceResolution.y);
+
+	float4 water_opacity = 0;
+	float water_depth = -1;
+	float3 extinction = 1;
+	
+	float depth = 0;
+	uint stencil = 0;
 
 	const uint bounces = xTraceUserData.x;
 	for (uint bounce = 0; bounce < bounces; ++bounce)
@@ -58,13 +70,20 @@ void main(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
 		ray.Direction = normalize(ray.Direction);
 
 		float4 additive_dist = float4(0, 0, 0, FLT_MAX);
-
+		
 #ifdef RTAPI
-		RayQuery<
-			RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES
-		> q;
+		wiRayQuery q;
+#else
+		RayHit hit;
+#endif // RTAPI
 
-		uint flags = 0;
+		bool exit_sky = GetScene().instanceCount == 0;
+
+		if(!exit_sky)
+		{
+#ifdef RTAPI
+
+		uint flags = RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES;
 #ifdef RAY_BACKFACE_CULLING
 		flags |= RAY_FLAG_CULL_BACK_FACING_TRIANGLES;
 #endif // RAY_BACKFACE_CULLING
@@ -82,6 +101,7 @@ void main(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
 		while (q.Proceed())
 		{
 			PrimitiveID prim;
+			prim.init();
 			prim.primitiveIndex = q.CandidatePrimitiveIndex();
 			prim.instanceIndex = q.CandidateInstanceID();
 			prim.subsetIndex = q.CandidateGeometryIndex();
@@ -94,7 +114,7 @@ void main(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
 			if (!surface.load(prim, q.CandidateTriangleBarycentrics()))
 				break;
 
-			if (surface.material.options & SHADERMATERIAL_OPTION_BIT_ADDITIVE)
+			if (surface.material.IsAdditive())
 			{
 				additive_dist.xyz += energy * surface.emissiveColor;
 				additive_dist.w = min(additive_dist.w, q.CandidateTriangleRayT());
@@ -110,24 +130,27 @@ void main(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
 			result += max(0, energy * additive_dist.xyz);
 		}
 
-		if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT)
+		exit_sky = q.CommittedStatus() != COMMITTED_TRIANGLE_HIT;
 #else
-		RayHit hit = TraceRay_Closest(ray, xTraceUserData.y, rng, groupIndex);
+		hit = TraceRay_Closest(ray, xTraceUserData.y, rng, groupIndex);
 
-		if (hit.distance >= FLT_MAX - 1)
+		exit_sky = hit.distance >= FLT_MAX - 1;
 #endif // RTAPI
+		}
 
+		if (exit_sky)
 		{
 			float3 envColor;
+			bool clouds_enabled = bounce > 0;
 			[branch]
 			if (IsStaticSky())
 			{
 				// We have envmap information in a texture:
-				envColor = texture_globalenvmap.SampleLevel(sampler_linear_clamp, ray.Direction, 0).rgb;
+				envColor = GetStaticSkyColor(ray.Direction, clouds_enabled);
 			}
 			else
 			{
-				envColor = GetDynamicSkyColor(ray.Direction);
+				envColor = GetDynamicSkyColor(ray.Direction, true, false, false, false, false, false, clouds_enabled);
 			}
 			result += max(0, energy * envColor);
 			break;
@@ -143,31 +166,32 @@ void main(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
 		ray.Origin = q.WorldRayOrigin() + q.WorldRayDirection() * q.CommittedRayT();
 
 		PrimitiveID prim;
+		prim.init();
 		prim.primitiveIndex = q.CommittedPrimitiveIndex();
 		prim.instanceIndex = q.CommittedInstanceID();
 		prim.subsetIndex = q.CommittedGeometryIndex();
 
-		if (!q.CommittedTriangleFrontFace())
-		{
-			surface.flags |= SURFACE_FLAG_BACKFACE;
-		}
+		surface.SetBackface(!q.CommittedTriangleFrontFace());
 
 		surface.hit_depth = q.CommittedRayT();
 		if (!surface.load(prim, q.CommittedTriangleBarycentrics()))
 			return;
+			
+		if (primary_primitiveID == 0)
+			primary_primitiveID = prim.pack();
 
 #else
 		// ray origin updated for next bounce:
 		ray.Origin = ray.Origin + ray.Direction * hit.distance;
 
-		if (hit.is_backface)
-		{
-			surface.flags |= SURFACE_FLAG_BACKFACE;
-		}
+		surface.SetBackface(hit.is_backface);
 
 		surface.hit_depth = hit.distance;
 		if (!surface.load(hit.primitiveID, hit.bary))
 			return;
+
+		if (primary_primitiveID == 0)
+			primary_primitiveID = hit.primitiveID.pack();
 
 #endif // RTAPI
 
@@ -175,14 +199,32 @@ void main(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
 		surface.V = -ray.Direction;
 		surface.update();
 
+		if (water_depth >= 0)
+		{
+			water_depth += surface.hit_depth;
+			float waterfog = saturate(exp(-water_depth * water_opacity));
+			float3 transmittance = saturate(exp(-water_depth * extinction * water_opacity));
+			energy *= transmittance;
+		}
+
 		result += energy * surface.emissiveColor;
 
-		raycone = raycone.propagate(surface.roughnessBRDF, surface.hit_depth);
+		float roughnessBRDF = sqr(clamp(surface.roughness, min_roughness, 1));
+		raycone = raycone.propagate(roughnessBRDF, surface.hit_depth);
 
 		if (bounce == 0)
 		{
 			primary_albedo = surface.albedo;
 			primary_normal = surface.N;
+			stencil = surface.material.GetStencilRef();
+			uint userStencilRefOverride = surface.inst.GetUserStencilRef();
+			if (userStencilRefOverride > 0)
+			{
+				stencil = (userStencilRefOverride << 4u) | (stencil & 0xF);
+			}
+			float4 tmp = mul(GetCamera().view_projection, float4(surface.P, 1));
+			tmp.xyz /= max(0.0001, tmp.w); // max: avoid nan
+			depth = saturate(tmp.z); // saturate: avoid blown up values
 		}
 
 		if (surface.material.IsUnlit())
@@ -194,8 +236,8 @@ void main(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
 		// Light sampling:
 		if (!surface.material.IsUnlit())
 		{
-			const uint light_count = GetFrame().lightarray_count;
-			const uint light_index = GetFrame().lightarray_offset + rng.next_uint(light_count);
+			const uint light_count = lights().item_count();
+			const uint light_index = lights().first_item() + rng.next_uint(light_count);
 			ShaderEntity light = load_entity(light_index);
 
 			Lighting lighting;
@@ -213,6 +255,7 @@ void main(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
 				dist = FLT_MAX;
 
 				L = light.GetDirection().xyz;
+				L += sample_hemisphere_cos(L, rng) * light.GetRadius();
 
 				surfaceToLight.create(surface, L);
 
@@ -231,6 +274,8 @@ void main(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
 			break;
 			case ENTITY_TYPE_POINTLIGHT:
 			{
+				light.position += light.GetDirection() * (rng.next_float() - 0.5) * light.GetLength();
+				light.position += sample_hemisphere_cos(normalize(light.position - surface.P), rng) * light.GetRadius();
 				L = light.position - surface.P;
 				const float dist2 = dot(L, L);
 				const float range = light.GetRange();
@@ -240,7 +285,7 @@ void main(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
 				if (dist2 < range2)
 				{
 					dist = sqrt(dist2);
-					L /= dist;
+					L /= max(0.001, dist);
 
 					surfaceToLight.create(surface, L);
 
@@ -248,13 +293,21 @@ void main(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
 					if (any(surfaceToLight.NdotL_sss))
 					{
 						lightColor = light.GetColor().rgb;
-						lightColor *= attenuation_pointlight(dist, dist2, range, range2);
+						lightColor *= attenuation_pointlight(dist2, range, light.GetRange2Rcp());
 					}
 				}
 			}
 			break;
-			case ENTITY_TYPE_SPOTLIGHT:
+			case ENTITY_TYPE_RECTLIGHT:
 			{
+				const half4 quaternion = light.GetQuaternion();
+				const half3 right = rotate_vector(half3(1, 0, 0), quaternion);
+				const half3 up = rotate_vector(half3(0, 1, 0), quaternion);
+				const half3 forward = cross(up, right);
+				if (dot(surface.P - light.position, forward) <= 0)
+					break; // behind light
+				light.position += right * (rng.next_float() - 0.5) * light.GetLength();
+				light.position += up * (rng.next_float() - 0.5) * light.GetHeight();
 				L = light.position - surface.P;
 				const float dist2 = dot(L, L);
 				const float range = light.GetRange();
@@ -264,21 +317,47 @@ void main(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
 				if (dist2 < range2)
 				{
 					dist = sqrt(dist2);
-					L /= dist;
+					L /= max(0.001, dist);
 
 					surfaceToLight.create(surface, L);
 
 					[branch]
 					if (any(surfaceToLight.NdotL_sss))
 					{
-						const float spot_factor = dot(L, light.GetDirection());
+						lightColor = light.GetColor().rgb;
+						lightColor *= attenuation_pointlight(dist2, range, light.GetRange2Rcp());
+					}
+				}
+			}
+			break;
+			case ENTITY_TYPE_SPOTLIGHT:
+			{
+				float3 Loriginal = normalize(light.position - surface.P);
+				light.position += sample_hemisphere_cos(normalize(light.position - surface.P), rng) * light.GetRadius();
+				L = light.position - surface.P;
+				const float dist2 = dot(L, L);
+				const float range = light.GetRange();
+				const float range2 = range * range;
+
+				[branch]
+				if (dist2 < range2)
+				{
+					dist = sqrt(dist2);
+					L /= max(0.001, dist);
+
+					surfaceToLight.create(surface, L);
+
+					[branch]
+					if (any(surfaceToLight.NdotL_sss))
+					{
+						const float spot_factor = dot(Loriginal, light.GetDirection());
 						const float spot_cutoff = light.GetConeAngleCos();
 
 						[branch]
 						if (spot_factor > spot_cutoff)
 						{
 							lightColor = light.GetColor().rgb;
-							lightColor *= attenuation_spotlight(dist, dist2, range, range2, spot_factor, light.GetAngleScale(), light.GetAngleOffset());
+							lightColor *= attenuation_spotlight(dist2, range, light.GetRange2Rcp(), spot_factor, light.GetAngleScale(), light.GetAngleOffset());
 						}
 					}
 				}
@@ -290,56 +369,61 @@ void main(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
 			{
 				float3 shadow = energy;
 
-				RayDesc newRay;
-				newRay.Origin = surface.P;
-				newRay.Direction = normalize(lerp(L, sample_hemisphere_cos(L, rng), 0.025 + max3(surface.sss)));
-				newRay.TMin = 0.001;
-				newRay.TMax = dist;
+				if(light.IsCastingShadow() && surface.IsReceiveShadow())
+				{
+					RayDesc newRay;
+					newRay.Origin = surface.P + surface.facenormal * 0.001; // NOTE: TMin was not enough on AMD to avoid self intersection!!!
+					newRay.TMin = 0.001;
+					newRay.TMax = dist;
+					newRay.Direction = normalize(L + max3(surface.sss));
 
 #ifdef RTAPI
 
-				uint flags = RAY_FLAG_CULL_FRONT_FACING_TRIANGLES;
-				if (bounce > ANYTHIT_CUTOFF_AFTER_BOUNCE_COUNT)
-				{
-					flags |= RAY_FLAG_FORCE_OPAQUE;
-				}
-
-				q.TraceRayInline(
-					scene_acceleration_structure,	// RaytracingAccelerationStructure AccelerationStructure
-					flags,							// uint RayFlags
-					0xFF,							// uint InstanceInclusionMask
-					newRay							// RayDesc Ray
-				);
-				while (q.Proceed())
-				{
-					PrimitiveID prim;
-					prim.primitiveIndex = q.CandidatePrimitiveIndex();
-					prim.instanceIndex = q.CandidateInstanceID();
-					prim.subsetIndex = q.CandidateGeometryIndex();
-
-					Surface surface;
-					surface.init();
-					surface.hit_depth = q.CandidateTriangleRayT();
-					if (!surface.load(prim, q.CandidateTriangleBarycentrics()))
-						break;
-
-					shadow *= lerp(1, surface.albedo * surface.transmission, surface.opacity);
-
-					[branch]
-					if (!any(shadow))
+					uint flags = RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES | RAY_FLAG_CULL_FRONT_FACING_TRIANGLES;
+					if (bounce > ANYTHIT_CUTOFF_AFTER_BOUNCE_COUNT)
 					{
-						q.CommitNonOpaqueTriangleHit();
+						flags |= RAY_FLAG_FORCE_OPAQUE;
 					}
-				}
-				shadow = q.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? 0 : shadow;
+
+					q.TraceRayInline(
+						scene_acceleration_structure,	// RaytracingAccelerationStructure AccelerationStructure
+						flags,							// uint RayFlags
+						0xFF,							// uint InstanceInclusionMask
+						newRay							// RayDesc Ray
+					);
+					while (q.Proceed())
+					{
+						PrimitiveID prim;
+						prim.init();
+						prim.primitiveIndex = q.CandidatePrimitiveIndex();
+						prim.instanceIndex = q.CandidateInstanceID();
+						prim.subsetIndex = q.CandidateGeometryIndex();
+
+						Surface surface;
+						surface.init();
+						surface.hit_depth = q.CandidateTriangleRayT();
+						if (!surface.load(prim, q.CandidateTriangleBarycentrics()))
+							break;
+
+						shadow *= lerp(1, lerp(surface.albedo, 1, surface.material.GetCloak()) * surface.transmission, surface.opacity);
+
+						[branch]
+						if (!any(shadow))
+						{
+							q.CommitNonOpaqueTriangleHit();
+						}
+					}
+					shadow = q.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? 0 : shadow;
 #else
-				shadow = TraceRay_Any(newRay, xTraceUserData.y, rng, groupIndex) ? 0 : shadow;
+					shadow = TraceRay_Any(newRay, xTraceUserData.y, rng, groupIndex) ? 0 : shadow;
 #endif // RTAPI
+				}
+				
 				if (any(shadow))
 				{
 					lightColor *= shadow;
-					lighting.direct.specular = lightColor * BRDF_GetSpecular(surface, surfaceToLight);
 					lighting.direct.diffuse = lightColor * BRDF_GetDiffuse(surface, surfaceToLight);
+					lighting.direct.specular = lightColor * BRDF_GetSpecular(surface, surfaceToLight);
 					result += light_count * mad(surface.albedo / PI * (1 - surface.transmission), lighting.direct.diffuse, lighting.direct.specular) * surface.opacity;
 				}
 			}
@@ -351,16 +435,29 @@ void main(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
 		{
 			break;
 		}
-		energy /= termination_chance;
+		energy /= max(0.001, termination_chance);
 
 		// Set up next bounce:
+		const bool is_water = surface.material.GetShaderType() == SHADERTYPE_WATER;
+		if (is_water)
+		{
+			surface.transmission = 0.9; // hack the water into the transmission path somehow to still have a bit of reflection
+			extinction *= surface.material.GetSheenColor().rgb; // Note: sheen color is repurposed as extinction color for water
+			water_opacity = surface.baseColor.a;
+			water_depth = max(0, water_depth);
+		}
+		
 		if (rng.next_float() < surface.transmission)
 		{
 			// Refraction
-			const float3 R = refract(ray.Direction, surface.N, 1 - surface.material.refraction);
-			ray.Direction = lerp(R, sample_hemisphere_cos(R, rng), surface.roughnessBRDF);
-			energy *= surface.albedo / max(0.001, surface.transmission);
-
+			const float3 R = refract(ray.Direction, surface.N, 1 - lerp(surface.material.GetRefraction(), 0.1, surface.material.GetCloak()));
+			float roughnessBRDF = sqr(clamp(lerp(surface.roughness, 0.1, surface.material.GetCloak()), min_roughness, 1));
+			ray.Direction = lerp(R, sample_hemisphere_cos(R, rng), roughnessBRDF);
+			if (!is_water) // water will have depth based extinction instead of simple tint
+			{
+				energy *= lerp(surface.albedo, 1, surface.material.GetCloak()) / max(0.001, surface.transmission);
+			}
+			
 			// Add a new bounce iteration, otherwise the transparent effect can disappear:
 			bounce--;
 		}
@@ -380,24 +477,19 @@ void main(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
 				energy *= surface.albedo * (1 - surface.F) / max(0.001, 1 - specular_chance) / max(0.001, 1 - surface.transmission);
 			}
 
-			if (dot(ray.Direction, surface.facenormal) <= 0)
-			{
-				// Don't allow normal map to bend over the face normal more than 90 degrees to avoid light leaks
-				//	In this case, the ray is pushed above the surface slightly to not go below
-				ray.Origin += surface.facenormal * 0.001;
-			}
+			ray.Origin += surface.facenormal * 0.001; // NOTE: TMin was not enough on AMD to avoid self intersection!!!
 		}
 
 	}
-
-	// Pre-clear result texture for first accumulation sample:
-	if (xTraceSampleIndex == 0)
-	{
-		output[pixel] = 0;
-		output_albedo[pixel] = 0;
-		output_normal[pixel] = 0;
-	}
+	
 	output[pixel] = lerp(output[pixel], float4(result, 1), xTraceAccumulationFactor);
 	output_albedo[pixel] = lerp(output_albedo[pixel], float4(primary_albedo, 1), xTraceAccumulationFactor);
 	output_normal[pixel] = lerp(output_normal[pixel], float4(primary_normal, 1), xTraceAccumulationFactor);
+
+	if (xTraceSampleIndex == 0)
+	{
+		output_depth[pixel] = depth;
+		output_stencil[pixel] = stencil;
+		output_primitiveID[pixel] = primary_primitiveID;
+	}
 }

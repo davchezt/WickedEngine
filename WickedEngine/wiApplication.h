@@ -29,6 +29,7 @@ namespace wi
 		bool frameskip = true;
 		bool framerate_lock = false;
 		bool initialized = false;
+		bool alwaysactive = false;
 
 		wi::FadeManager fadeManager;
 
@@ -39,12 +40,12 @@ namespace wi
 		float deltatimes[20] = {};
 		int fps_avg_counter = 0;
 
-		// These are used when HDR10 color space is active:
-		//	Because we want to blend in linear color space, but HDR10 is non-linear
-		wi::graphics::Texture rendertarget;
-		wi::graphics::RenderPass renderpass;
-
 		std::string infodisplay_str;
+
+		wi::graphics::Texture rendertargetPreHDR10;
+
+		uint32_t renderWidth = 0;
+		uint32_t renderHeight = 0;
 
 	public:
 		virtual ~Application() = default;
@@ -55,12 +56,15 @@ namespace wi
 		wi::Canvas canvas;
 		wi::platform::window_type window;
 
+		wi::graphics::Texture splash_screen;
+		int splash_screen_subresource = -1;
+
 		// Runs the main engine loop
 		void Run();
 
 		// This will activate a RenderPath as the active one, so it will run its Update, FixedUpdate, Render and Compose functions
 		//	You can set a fade time and fade screen color so that switching components will happen when the screen is faded out. Then it will fade back to the new component
-		void ActivatePath(RenderPath* component, float fadeSeconds = 0, wi::Color fadeColor = wi::Color(0, 0, 0, 255));
+		void ActivatePath(RenderPath* component, float fadeSeconds = 0, wi::Color fadeColor = wi::Color(0, 0, 0, 255), FadeManager::FadeType fadetype = FadeManager::FadeType::FadeToColor);
 		inline RenderPath* GetActivePath() { return activePath; }
 
 		// Set the desired target framerate for the FixedUpdate() loop (default = 60)
@@ -75,21 +79,30 @@ namespace wi
 
 		// This is where the critical initializations happen (before any rendering or anything else)
 		virtual void Initialize();
-		// This is where application-wide updates get executed once per frame. 
+		// This is where application-wide updates get executed once per frame.
 		//  RenderPath::Update is also called from here for the active component
 		virtual void Update(float dt);
-		// This is where application-wide updates get executed in a fixed timestep based manner. 
+		// This is where application-wide updates get executed in a fixed timestep based manner.
 		//  RenderPath::FixedUpdate is also called from here for the active component
 		virtual void FixedUpdate();
-		// This is where application-wide rendering happens to offscreen buffers. 
+		// This is where application-wide rendering happens to offscreen buffers.
 		//  RenderPath::Render is also called from here for the active component
 		virtual void Render();
 		// This is where the application will render to the screen (backbuffer). It must render to the provided command list.
 		virtual void Compose(wi::graphics::CommandList cmd);
+		// This is where the application about to exit.
+		virtual void Exit();
 
 		// You need to call this before calling Run() or Initialize() if you want to render
-		void SetWindow(wi::platform::window_type);
+		void SetWindow(wi::platform::window_type window);
 
+		// Set a fixed render resolution independent of window size (for borderless fullscreen)
+		// Pass 0,0 to clear the fixed resolution and use window size
+		void SetRenderResolution(uint32_t width, uint32_t height);
+		void GetRenderResolution(uint32_t& width, uint32_t& height) const;
+
+		void SetFullScreen(bool fullscreen);
+		bool IsFullScreen() const;
 
 		struct InfoDisplayer
 		{
@@ -111,16 +124,34 @@ namespace wi
 			bool heap_allocation_counter = false;
 			// display the active graphics pipeline count
 			bool pipeline_count = false;
+			// display the pipeline creation info
+			bool pipeline_creation = true;
 			// display video memory usage and budget
 			bool vram_usage = false;
 			// text size
 			int size = 16;
 			// display default color grading helper texture in top left corner of the screen
 			bool colorgrading_helper = false;
+			// mouse position and button informations
+			bool mouse_info = false;
+			// rect to specify where to render the information
+			wi::graphics::Rect rect;
 		};
 		// display all-time engine information text
 		InfoDisplayer infoDisplay;
 
+		void Fade(float fadeSeconds = 1, wi::Color fadeColor = wi::Color(0, 0, 0, 255), FadeManager::FadeType fadetype = FadeManager::FadeType::FadeToColor)
+		{
+			fadeManager.Start(fadeSeconds, fadeColor, [] {}, fadetype);
+		}
+		void CrossFade(float fadeSeconds = 1)
+		{
+			Fade(fadeSeconds, wi::Color::Black(), wi::FadeManager::FadeType::CrossFade);
+		}
+		bool IsFaded() const { return fadeManager.IsFaded(); }
+
+		const std::string rewriteable_startup_script_text = "wicked_engine_rewriteable_startup_script_path_paddedlength_127_uniquestring                                                   ";
+		bool IsScriptReplacement() const;
 	};
 
 }

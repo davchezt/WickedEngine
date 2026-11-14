@@ -21,9 +21,7 @@ static const float varianceTemporalResponse = 0.9f;
 
 float2 CalculateReprojectionBuffer(float2 uv, float depth)
 {
-	float x = uv.x * 2 - 1;
-	float y = (1 - uv.y) * 2 - 1;
-	float2 screenPosition = float2(x, y);
+	float2 screenPosition = uv_to_clipspace(uv);
 
 	float4 thisClip = float4(screenPosition, depth, 1);
 
@@ -35,7 +33,7 @@ float2 CalculateReprojectionBuffer(float2 uv, float depth)
 	float2 screenVelocity = screenPosition - prevScreen;
 	float2 prevScreenPosition = screenPosition - screenVelocity;
 
-	return prevScreenPosition * float2(0.5, -0.5) + 0.5;
+	return clipspace_to_uv(prevScreenPosition);
 }
 
 float GetDisocclusion(float depth, float depthHistory)
@@ -143,8 +141,8 @@ void main(uint3 Gid : SV_GroupID, uint3 GTid : SV_GroupThreadID, uint3 DTid : SV
 		return;
 	}
 
-	const float depth = texture_depth[DTid.xy];
-	const float roughness = texture_roughness[DTid.xy];
+	const float depth = texture_depth[DTid.xy * ssr_downscalefactor];
+	const half roughness = texture_normal_roughness[DTid.xy * ssr_downscalefactor].b;
 
 	if (!NeedReflection(roughness, depth, ssr_roughness_cutoff))
 	{
@@ -179,7 +177,7 @@ void main(uint3 Gid : SV_GroupID, uint3 GTid : SV_GroupThreadID, uint3 DTid : SV
 	// Secondary reprojection based on ray lengths:
 	//	https://www.ea.com/seed/news/seed-dd18-presentation-slides-raytracing (Slide 45)
 
-	float2 velocity = texture_velocity[DTid.xy];
+	float2 velocity = texture_velocity[DTid.xy * ssr_downscalefactor];
 	float reprojectionDepth = texture_reprojectionDepth[DTid.xy];
 
 	float2 uv = (DTid.xy + 0.5f) * postprocess.resolution_rcp;

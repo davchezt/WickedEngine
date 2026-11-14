@@ -1,6 +1,4 @@
 #pragma once
-#include "WickedEngine.h"
-
 class EditorComponent;
 
 class ExpressionWindow : public wi::gui::Window
@@ -12,6 +10,8 @@ public:
 	wi::ecs::Entity entity = wi::ecs::INVALID_ENTITY;
 	void SetEntity(wi::ecs::Entity entity);
 
+	wi::gui::Label infoLabel;
+	wi::gui::CheckBox talkCheckBox;
 	wi::gui::Slider blinkFrequencySlider;
 	wi::gui::Slider blinkLengthSlider;
 	wi::gui::Slider blinkCountSlider;

@@ -6,6 +6,12 @@
 
 #define STB_VORBIS_HEADER_ONLY
 #include "Utility/stb_vorbis.c"
+#include "Utility/aac.h"
+
+#include <sstream>
+#include <cstring>
+
+#include "wiPlatform.h"
 
 #ifdef _WIN32
 
@@ -15,6 +21,15 @@
 #include <x3daudio.h>
 #pragma comment(lib,"xaudio2.lib")
 
+// for AAC audio decoding:
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mferror.h>
+#include <wmcodecdsp.h>
+#pragma comment(lib, "mfplat.lib")
+#pragma comment(lib, "mfuuid.lib")
+#pragma comment(lib, "wmcodecdspuuid.lib")
+
 //Little-Endian things:
 #define fourccRIFF 'FFIR'
 #define fourccDATA 'atad'
@@ -22,6 +37,9 @@
 #define fourccWAVE 'EVAW'
 #define fourccXWMA 'AMWX'
 #define fourccDPDS 'sdpd'
+
+#define xaudio_assert(cond, fname) { wilog_assert(cond, "XAudio2 error: %s failed with %s (%s:%d)", fname, wi::helper::GetPlatformErrorString(hr).c_str(), relative_path(__FILE__), __LINE__); }
+#define xaudio_check(call) [&]() { HRESULT hr = call; xaudio_assert(SUCCEEDED(hr), extract_function_name(#call).c_str()); return hr; }()
 
 namespace wi::audio
 {
@@ -69,17 +87,25 @@ namespace wi::audio
 		X3DAUDIO_HANDLE audio3D = {};
 		Microsoft::WRL::ComPtr<IUnknown> reverbEffect;
 		IXAudio2SubmixVoice* reverbSubmix = nullptr;
+		uint32_t termination_data = 0;
+		XAUDIO2_BUFFER termination_mark = {};
 
 		AudioInternal()
 		{
 			wi::Timer timer;
 
 			HRESULT hr;
-			hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
-			assert(SUCCEEDED(hr));
+			hr = xaudio_check(CoInitializeEx(NULL, COINIT_MULTITHREADED));
+			if (!SUCCEEDED(hr))
+			{
+				return;
+			}
 
-			hr = XAudio2Create(&audioEngine, 0, XAUDIO2_USE_DEFAULT_PROCESSOR);
-			assert(SUCCEEDED(hr));
+			hr = xaudio_check(XAudio2Create(&audioEngine, 0, XAUDIO2_USE_DEFAULT_PROCESSOR));
+			if (!SUCCEEDED(hr))
+			{
+				return;
+			}
 
 #ifdef _DEBUG
 			XAUDIO2_DEBUG_CONFIGURATION debugConfig = {};
@@ -88,12 +114,9 @@ namespace wi::audio
 			audioEngine->SetDebugConfiguration(&debugConfig);
 #endif // _DEBUG
 
-			hr = audioEngine->CreateMasteringVoice(&masteringVoice);
-			assert(SUCCEEDED(hr));
-
-			if (masteringVoice == nullptr)
+			hr = xaudio_check(audioEngine->CreateMasteringVoice(&masteringVoice));
+			if (!SUCCEEDED(hr))
 			{
-				wi::backlog::post("Failed to create XAudio2 mastering voice!");
 				return;
 			}
 
@@ -105,54 +128,72 @@ namespace wi::audio
 
 			for (int i = 0; i < SUBMIX_TYPE_COUNT; ++i)
 			{
-				hr = audioEngine->CreateSubmixVoice(
+				hr = xaudio_check(audioEngine->CreateSubmixVoice(
 					&submixVoices[i],
 					masteringVoiceDetails.InputChannels,
 					masteringVoiceDetails.InputSampleRate,
-					0, 0, 0, 0);
-				assert(SUCCEEDED(hr));
+					0,
+					0,
+					0,
+					0
+				));
+
+				if (!SUCCEEDED(hr))
+				{
+					return;
+				}
 			}
 
 			DWORD channelMask;
 			masteringVoice->GetChannelMask(&channelMask);
-			hr = X3DAudioInitialize(channelMask, X3DAUDIO_SPEED_OF_SOUND, audio3D);
-			assert(SUCCEEDED(hr));
+			hr = xaudio_check(X3DAudioInitialize(channelMask, X3DAUDIO_SPEED_OF_SOUND, audio3D));
+			if (!SUCCEEDED(hr))
+			{
+				return;
+			}
 
 			// Reverb setup:
 			{
-				hr = XAudio2CreateReverb(&reverbEffect);
-				assert(SUCCEEDED(hr));
+				hr = xaudio_check(XAudio2CreateReverb(&reverbEffect));
+				if (!SUCCEEDED(hr))
+				{
+					return;
+				}
 
 				XAUDIO2_EFFECT_DESCRIPTOR effects[] = { { reverbEffect.Get(), TRUE, 1 } };
 				XAUDIO2_EFFECT_CHAIN effectChain = { arraysize(effects), effects };
-				hr = audioEngine->CreateSubmixVoice(
+				hr = xaudio_check(audioEngine->CreateSubmixVoice(
 					&reverbSubmix,
 					1, // reverb is mono
 					masteringVoiceDetails.InputSampleRate,
-					0, 0, nullptr, &effectChain);
-				assert(SUCCEEDED(hr));
-
-				if (reverbSubmix != nullptr)
+					0,
+					0,
+					nullptr,
+					&effectChain
+				));
+				if (!SUCCEEDED(hr))
 				{
-					XAUDIO2FX_REVERB_PARAMETERS native;
-					ReverbConvertI3DL2ToNative(&reverbPresets[REVERB_PRESET_DEFAULT], &native);
-					HRESULT hr = reverbSubmix->SetEffectParameters(0, &native, sizeof(native));
-					assert(SUCCEEDED(hr));
+					return;
 				}
-				else
+
+				XAUDIO2FX_REVERB_PARAMETERS native;
+				ReverbConvertI3DL2ToNative(&reverbPresets[REVERB_PRESET_DEFAULT], &native);
+				HRESULT hr = xaudio_check(reverbSubmix->SetEffectParameters(0, &native, sizeof(native)));
+				if (!SUCCEEDED(hr))
 				{
-					wi::backlog::post("wi::audio [XAudio2] Reverb Submix was not created successfully!", wi::backlog::LogLevel::Warning);
+					return;
 				}
 			}
 
-			if (SUCCEEDED(hr))
-			{
-				wi::backlog::post("wi::audio Initialized [XAudio2] (" + std::to_string((int)std::round(timer.elapsed())) + " ms)");
-			}
+			termination_mark.Flags = XAUDIO2_END_OF_STREAM;
+			termination_mark.pAudioData = (const BYTE*)&termination_data;
+			termination_mark.AudioBytes = sizeof(termination_data);
+
+			success = true;
+			wilog("wi::audio Initialized [XAudio2] (%d ms)", (int)std::round(timer.elapsed()));
 		}
 		~AudioInternal()
 		{
-
 			if (reverbSubmix != nullptr)
 				reverbSubmix->DestroyVoice();
 
@@ -169,34 +210,85 @@ namespace wi::audio
 
 			CoUninitialize();
 		}
+
+		constexpr bool IsValid() const { return success; }
 	};
-	static std::shared_ptr<AudioInternal> audio_internal;
+	static wi::allocator::shared_ptr<AudioInternal> audio_internal;
 
 	void Initialize()
 	{
-		audio_internal = std::make_shared<AudioInternal>();
+		audio_internal = wi::allocator::make_shared_single<AudioInternal>();
+	}
+
+	void Deinitialize()
+	{
+		audio_internal.reset();
 	}
 
 	struct SoundInternal
 	{
-		std::shared_ptr<AudioInternal> audio;
+		wi::allocator::shared_ptr<AudioInternal> audio;
 		WAVEFORMATEX wfx = {};
 		wi::vector<uint8_t> audioData;
 	};
-	struct SoundInstanceInternal
+	struct SoundInstanceInternal final : public IXAudio2VoiceCallback
 	{
-		std::shared_ptr<AudioInternal> audio;
-		std::shared_ptr<SoundInternal> soundinternal;
+		wi::allocator::shared_ptr<AudioInternal> audio;
+		wi::allocator::shared_ptr<SoundInternal> soundinternal;
 		IXAudio2SourceVoice* sourceVoice = nullptr;
 		XAUDIO2_VOICE_DETAILS voiceDetails = {};
 		wi::vector<float> outputMatrix;
 		wi::vector<float> channelAzimuths;
 		XAUDIO2_BUFFER buffer = {};
+		bool ended = true;
 
 		~SoundInstanceInternal()
 		{
 			sourceVoice->Stop();
 			sourceVoice->DestroyVoice();
+		}
+
+		// Called just before this voice's processing pass begins.
+		STDMETHOD_(void, OnVoiceProcessingPassStart) (THIS_ UINT32 BytesRequired)
+		{
+		}
+
+		// Called just after this voice's processing pass ends.
+		STDMETHOD_(void, OnVoiceProcessingPassEnd) (THIS)
+		{
+		}
+
+		// Called when this voice has just finished playing a buffer stream
+		// (as marked with the XAUDIO2_END_OF_STREAM flag on the last buffer).
+		STDMETHOD_(void, OnStreamEnd) (THIS)
+		{
+			ended = true;
+		}
+
+		// Called when this voice is about to start processing a new buffer.
+		STDMETHOD_(void, OnBufferStart) (THIS_ void* pBufferContext)
+		{
+			ended = false;
+		}
+
+		// Called when this voice has just finished processing a buffer.
+		// The buffer can now be reused or destroyed.
+		STDMETHOD_(void, OnBufferEnd) (THIS_ void* pBufferContext)
+		{
+		}
+
+		// Called when this voice has just reached the end position of a loop.
+		STDMETHOD_(void, OnLoopEnd) (THIS_ void* pBufferContext)
+		{
+		}
+
+		// Called in the event of a critical error during voice processing,
+		// such as a failing xAPO or an error from the hardware XMA decoder.
+		// The voice may have to be destroyed and re-created to recover from
+		// the error.  The callback arguments report which buffer was being
+		// processed when the error occurred, and its HRESULT code.
+		STDMETHOD_(void, OnVoiceError) (THIS_ void* pBufferContext, HRESULT Error)
+		{
 		}
 	};
 	SoundInternal* to_internal(const Sound* param)
@@ -258,6 +350,250 @@ namespace wi::audio
 
 	}
 
+	static bool DecodeADTS(const uint8_t* data, size_t size, SoundInternal* soundinternal)
+	{
+		HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+		const bool uninit_com = SUCCEEDED(co);
+		if (FAILED(co) && co != RPC_E_CHANGED_MODE)
+			return false;
+		struct ComScope
+		{
+			bool uninit;
+			~ComScope() { if (uninit) CoUninitialize(); }
+		} com_scope{ uninit_com };
+
+		static bool mf_started = false;
+		if (!mf_started)
+		{
+			if (FAILED(MFStartup(MF_VERSION, 0)))
+				return false;
+			mf_started = true;
+		}
+
+		const aac::ADTSHeader* header = (const aac::ADTSHeader*)data;
+		uint32_t channels = header->get_channel_count();
+		const uint32_t sfi = header->get_sample_rate_index();
+		const uint32_t sample_rate = header->get_sample_rate();
+		if (sample_rate == 0)
+			return false;
+		if (channels == 0)
+			channels = 2;
+
+		Microsoft::WRL::ComPtr<IMFTransform> decoder;
+		HRESULT hr = CoCreateInstance(CLSID_CMSAACDecMFT, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&decoder));
+		if (FAILED(hr) || decoder == nullptr)
+			return false;
+
+		auto configure_input = [&](bool with_user_data) -> HRESULT
+		{
+			Microsoft::WRL::ComPtr<IMFMediaType> input;
+			HRESULT result = MFCreateMediaType(&input);
+			if (FAILED(result))
+				return result;
+			input->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+			input->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC);
+			input->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, sample_rate);
+			input->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, channels);
+			input->SetUINT32(MF_MT_AAC_PAYLOAD_TYPE, 1);
+			if (with_user_data)
+			{
+				uint8_t blob[14] = {};
+				const uint16_t payload_type = 1;
+				std::memcpy(blob, &payload_type, sizeof(payload_type));
+				blob[2] = 0xFE;
+				const uint32_t aot = ((data[2] >> 6) & 0x03) + 1;
+				blob[12] = (uint8_t)((aot << 3) | (sfi >> 1));
+				blob[13] = (uint8_t)(((sfi & 1) << 7) | ((channels & 0x0F) << 3));
+				input->SetBlob(MF_MT_USER_DATA, blob, sizeof(blob));
+			}
+			return decoder->SetInputType(0, input.Get(), 0);
+		};
+		hr = configure_input(true);
+		if (FAILED(hr))
+			hr = configure_input(false);
+		if (FAILED(hr))
+			return false;
+
+		Microsoft::WRL::ComPtr<IMFMediaType> output_type;
+		bool output_is_float = false;
+		auto select_output = [&]() -> bool
+		{
+			output_type.Reset();
+			output_is_float = false;
+			Microsoft::WRL::ComPtr<IMFMediaType> fallback;
+			for (DWORD i = 0;; ++i)
+			{
+				Microsoft::WRL::ComPtr<IMFMediaType> type;
+				if (FAILED(decoder->GetOutputAvailableType(0, i, &type)))
+					break;
+				GUID subtype = {};
+				type->GetGUID(MF_MT_SUBTYPE, &subtype);
+				UINT32 bits = 0;
+				type->GetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, &bits);
+				if (fallback == nullptr)
+					fallback = type;
+				if (subtype == MFAudioFormat_PCM && bits == 16)
+				{
+					output_type = type;
+					output_is_float = false;
+					break;
+				}
+				if (subtype == MFAudioFormat_Float)
+				{
+					output_type = type;
+					output_is_float = true;
+				}
+			}
+			if (output_type == nullptr)
+				output_type = fallback;
+			if (output_type == nullptr)
+				return false;
+			return SUCCEEDED(decoder->SetOutputType(0, output_type.Get(), 0));
+		};
+		if (!select_output())
+			return false;
+
+		decoder->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+		decoder->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+
+		wi::vector<uint8_t> pcm;
+		auto append_sample = [&](IMFSample* sample)
+		{
+			if (sample == nullptr)
+				return;
+			Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
+			if (FAILED(sample->ConvertToContiguousBuffer(&buffer)) || buffer == nullptr)
+				return;
+			BYTE* bytes = nullptr;
+			DWORD length = 0;
+			if (FAILED(buffer->Lock(&bytes, nullptr, &length)) || bytes == nullptr || length == 0)
+			{
+				if (bytes != nullptr)
+					buffer->Unlock();
+				return;
+			}
+			if (output_is_float)
+			{
+				const float* src = (const float*)bytes;
+				const DWORD count = length / sizeof(float);
+				const size_t offset = pcm.size();
+				pcm.resize(offset + count * sizeof(int16_t));
+				int16_t* dst = (int16_t*)(pcm.data() + offset);
+				for (DWORD i = 0; i < count; ++i)
+				{
+					float sample_value = src[i];
+					if (sample_value < -1.f) sample_value = -1.f;
+					if (sample_value > 1.f) sample_value = 1.f;
+					dst[i] = (int16_t)(sample_value * 32767.f);
+				}
+			}
+			else
+			{
+				pcm.insert(pcm.end(), bytes, bytes + length);
+			}
+			buffer->Unlock();
+		};
+		auto pull = [&]() -> HRESULT
+		{
+			for (;;)
+			{
+				MFT_OUTPUT_STREAM_INFO stream_info = {};
+				decoder->GetOutputStreamInfo(0, &stream_info);
+				Microsoft::WRL::ComPtr<IMFSample> provided;
+				MFT_OUTPUT_DATA_BUFFER output = {};
+				if ((stream_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) == 0)
+				{
+					const DWORD buffer_size = stream_info.cbSize != 0 ? stream_info.cbSize : 65536;
+					Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
+					if (FAILED(MFCreateSample(&provided)) || FAILED(MFCreateMemoryBuffer(buffer_size, &buffer)))
+						return E_OUTOFMEMORY;
+					provided->AddBuffer(buffer.Get());
+					output.pSample = provided.Get();
+				}
+				DWORD status = 0;
+				HRESULT result = decoder->ProcessOutput(0, 1, &output, &status);
+				if (output.pEvents != nullptr)
+				{
+					output.pEvents->Release();
+					output.pEvents = nullptr;
+				}
+				if (result == MF_E_TRANSFORM_NEED_MORE_INPUT)
+					return result;
+				if (result == MF_E_TRANSFORM_STREAM_CHANGE)
+				{
+					if (!select_output())
+						return E_FAIL;
+					continue;
+				}
+				if (FAILED(result))
+				{
+					if (output.pSample != nullptr && output.pSample != provided.Get())
+						output.pSample->Release();
+					return result;
+				}
+				IMFSample* produced = output.pSample != nullptr ? output.pSample : provided.Get();
+				append_sample(produced);
+				if (output.pSample != nullptr && output.pSample != provided.Get())
+					output.pSample->Release();
+			}
+		};
+		auto feed = [&](const uint8_t* frame, uint32_t frame_size) -> bool
+		{
+			Microsoft::WRL::ComPtr<IMFSample> sample;
+			Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
+			if (FAILED(MFCreateSample(&sample)) || FAILED(MFCreateMemoryBuffer(frame_size, &buffer)))
+				return false;
+			BYTE* dest = nullptr;
+			if (FAILED(buffer->Lock(&dest, nullptr, nullptr)) || dest == nullptr)
+				return false;
+			std::memcpy(dest, frame, frame_size);
+			buffer->Unlock();
+			buffer->SetCurrentLength(frame_size);
+			sample->AddBuffer(buffer.Get());
+			HRESULT result = decoder->ProcessInput(0, sample.Get(), 0);
+			if (result == MF_E_NOTACCEPTING)
+			{
+				pull();
+				result = decoder->ProcessInput(0, sample.Get(), 0);
+			}
+			if (FAILED(result))
+				return false;
+			return pull() == MF_E_TRANSFORM_NEED_MORE_INPUT;
+		};
+
+		size_t offset = 0;
+		while (offset + 7 <= size)
+		{
+			const uint32_t frame_length = ((data[offset + 3] & 0x03) << 11) | (data[offset + 4] << 3) | ((data[offset + 5] & 0xE0) >> 5);
+			if (frame_length < 7 || offset + frame_length > size)
+				break;
+			if (!feed(data + offset, frame_length))
+				return false;
+			offset += frame_length;
+		}
+		decoder->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+		decoder->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
+		if (pull() != MF_E_TRANSFORM_NEED_MORE_INPUT || pcm.empty())
+			return false;
+
+		UINT32 out_rate = sample_rate;
+		UINT32 out_channels = channels;
+		output_type->GetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, &out_rate);
+		output_type->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &out_channels);
+		if (out_rate == 0 || out_channels == 0)
+			return false;
+
+		soundinternal->wfx = {};
+		soundinternal->wfx.wFormatTag = WAVE_FORMAT_PCM;
+		soundinternal->wfx.nChannels = (WORD)out_channels;
+		soundinternal->wfx.nSamplesPerSec = out_rate;
+		soundinternal->wfx.wBitsPerSample = sizeof(int16_t) * 8;
+		soundinternal->wfx.nBlockAlign = (WORD)(out_channels * sizeof(int16_t));
+		soundinternal->wfx.nAvgBytesPerSec = soundinternal->wfx.nSamplesPerSec * soundinternal->wfx.nBlockAlign;
+		soundinternal->audioData = std::move(pcm);
+		return true;
+	}
+
 	bool CreateSound(const std::string& filename, Sound* sound)
 	{
 		wi::vector<uint8_t> filedata;
@@ -270,7 +606,9 @@ namespace wi::audio
 	}
 	bool CreateSound(const uint8_t* data, size_t size, Sound* sound)
 	{
-		std::shared_ptr<SoundInternal> soundinternal = std::make_shared<SoundInternal>();
+		if (audio_internal == nullptr || !audio_internal->IsValid())
+			return false;
+		auto soundinternal = wi::allocator::make_shared<SoundInternal>();
 		soundinternal->audio = audio_internal;
 		sound->internal_state = soundinternal;
 
@@ -310,6 +648,14 @@ namespace wi::audio
 			soundinternal->audioData.resize(dwChunkSize);
 			memcpy(soundinternal->audioData.data(), data + dwChunkPosition, dwChunkSize);
 		}
+		else if (aac::is_adts(data, size))
+		{
+			if (!DecodeADTS(data, size, soundinternal.get()))
+			{
+				sound->internal_state = {};
+				return false;
+			}
+		}
 		else
 		{
 			// Ogg decoder:
@@ -331,7 +677,7 @@ namespace wi::audio
 			soundinternal->wfx.nBlockAlign = (WORD)channels * sizeof(short); // is this right?
 			soundinternal->wfx.nAvgBytesPerSec = soundinternal->wfx.nSamplesPerSec * soundinternal->wfx.nBlockAlign;
 
-			size_t output_size = (size_t)samples * sizeof(short);
+			size_t output_size = size_t(samples * channels) * sizeof(short);
 			soundinternal->audioData.resize(output_size);
 			memcpy(soundinternal->audioData.data(), output, output_size);
 
@@ -342,28 +688,32 @@ namespace wi::audio
 	}
 	bool CreateSoundInstance(const Sound* sound, SoundInstance* instance)
 	{
+		if (audio_internal == nullptr || !audio_internal->IsValid())
+			return false;
+		if (sound == nullptr || !sound->IsValid())
+			return false;
 		HRESULT hr;
-		const auto& soundinternal = std::static_pointer_cast<SoundInternal>(sound->internal_state);
-		std::shared_ptr<SoundInstanceInternal> instanceinternal = std::make_shared<SoundInstanceInternal>();
+		auto soundinternal = wi::allocator::shared_ptr<SoundInternal>(sound->internal_state);
+		auto instanceinternal = wi::allocator::make_shared<SoundInstanceInternal>();
 		instance->internal_state = instanceinternal;
 
 		instanceinternal->audio = audio_internal;
 		instanceinternal->soundinternal = soundinternal;
 
-		XAUDIO2_SEND_DESCRIPTOR SFXSend[] = { 
+		XAUDIO2_SEND_DESCRIPTOR SFXSend[] = {
 			{ XAUDIO2_SEND_USEFILTER, instanceinternal->audio->submixVoices[instance->type] },
 			{ XAUDIO2_SEND_USEFILTER, instanceinternal->audio->reverbSubmix }, // this should be last to enable/disable reverb simply
 		};
-		XAUDIO2_VOICE_SENDS SFXSendList = { 
+		XAUDIO2_VOICE_SENDS SFXSendList = {
 			(instance->IsEnableReverb() && instanceinternal->audio->reverbSubmix != nullptr) ? (uint32_t)arraysize(SFXSend) : 1,
-			SFXSend 
+			SFXSend
 		};
 
-		hr = instanceinternal->audio->audioEngine->CreateSourceVoice(&instanceinternal->sourceVoice, &soundinternal->wfx,
-			0, XAUDIO2_DEFAULT_FREQ_RATIO, NULL, &SFXSendList, NULL);
+		hr = xaudio_check(instanceinternal->audio->audioEngine->CreateSourceVoice(&instanceinternal->sourceVoice, &soundinternal->wfx,
+			0, XAUDIO2_DEFAULT_FREQ_RATIO, instanceinternal.get(), &SFXSendList, NULL));
+
 		if (FAILED(hr))
 		{
-			assert(0);
 			return false;
 		}
 
@@ -376,17 +726,35 @@ namespace wi::audio
 			instanceinternal->channelAzimuths[i] = X3DAUDIO_2PI * float(i) / float(instanceinternal->channelAzimuths.size());
 		}
 
-		instanceinternal->buffer.AudioBytes = (UINT32)soundinternal->audioData.size();
+		const uint32_t bytes_per_second = soundinternal->wfx.nSamplesPerSec * soundinternal->wfx.nChannels * sizeof(short);
 		instanceinternal->buffer.pAudioData = soundinternal->audioData.data();
-		instanceinternal->buffer.Flags = XAUDIO2_END_OF_STREAM;
-		instanceinternal->buffer.LoopCount = XAUDIO2_LOOP_INFINITE;
-		instanceinternal->buffer.LoopBegin = UINT32(instance->loop_begin * instanceinternal->audio->masteringVoiceDetails.InputSampleRate);
-		instanceinternal->buffer.LoopLength = UINT32(instance->loop_length * instanceinternal->audio->masteringVoiceDetails.InputSampleRate);
+		instanceinternal->buffer.AudioBytes = (uint32_t)soundinternal->audioData.size();
+		if (instance->begin > 0)
+		{
+			const uint32_t bytes_from_beginning = align(std::min(instanceinternal->buffer.AudioBytes, uint32_t(instance->begin * bytes_per_second)), 4u);
+			instanceinternal->buffer.pAudioData += bytes_from_beginning;
+			instanceinternal->buffer.AudioBytes -= bytes_from_beginning;
+		}
+		if (instance->length > 0)
+		{
+			instanceinternal->buffer.AudioBytes = align(std::min(instanceinternal->buffer.AudioBytes, uint32_t(instance->length * bytes_per_second)), 4u);
+		}
 
-		hr = instanceinternal->sourceVoice->SubmitSourceBuffer(&instanceinternal->buffer);
+		uint32_t num_remaining_samples = instanceinternal->buffer.AudioBytes / (soundinternal->wfx.nChannels * sizeof(short));
+		if (instance->loop_begin > 0)
+		{
+			instanceinternal->buffer.LoopBegin = align(std::min(num_remaining_samples, uint32_t(instance->loop_begin * soundinternal->wfx.nSamplesPerSec)), 4u);
+			num_remaining_samples -= instanceinternal->buffer.LoopBegin;
+		}
+		instanceinternal->buffer.LoopLength = align(std::min(num_remaining_samples, uint32_t(instance->loop_length * soundinternal->wfx.nSamplesPerSec)), 4u);
+
+		instanceinternal->buffer.Flags = XAUDIO2_END_OF_STREAM;
+		instanceinternal->buffer.LoopCount = instance->IsLooped() ? XAUDIO2_LOOP_INFINITE : 0;
+
+		hr = xaudio_check(instanceinternal->sourceVoice->SubmitSourceBuffer(&instanceinternal->buffer));
+
 		if (FAILED(hr))
 		{
-			assert(0);
 			return false;
 		}
 
@@ -397,8 +765,8 @@ namespace wi::audio
 		if (instance != nullptr && instance->IsValid())
 		{
 			auto instanceinternal = to_internal(instance);
-			HRESULT hr = instanceinternal->sourceVoice->Start();
-			assert(SUCCEEDED(hr));
+			xaudio_check(instanceinternal->sourceVoice->Start());
+
 		}
 	}
 	void Pause(SoundInstance* instance)
@@ -406,8 +774,8 @@ namespace wi::audio
 		if (instance != nullptr && instance->IsValid())
 		{
 			auto instanceinternal = to_internal(instance);
-			HRESULT hr = instanceinternal->sourceVoice->Stop(); // preserves cursor position
-			assert(SUCCEEDED(hr));
+			xaudio_check(instanceinternal->sourceVoice->Stop()); // preserves cursor position
+
 		}
 	}
 	void Stop(SoundInstance* instance)
@@ -415,26 +783,31 @@ namespace wi::audio
 		if (instance != nullptr && instance->IsValid())
 		{
 			auto instanceinternal = to_internal(instance);
-			HRESULT hr = instanceinternal->sourceVoice->Stop(); // preserves cursor position
-			assert(SUCCEEDED(hr)); 
-			hr = instanceinternal->sourceVoice->FlushSourceBuffers(); // reset submitted audio buffer
-			assert(SUCCEEDED(hr)); 
-			hr = instanceinternal->sourceVoice->SubmitSourceBuffer(&instanceinternal->buffer); // resubmit
-			assert(SUCCEEDED(hr));
+			xaudio_check(instanceinternal->sourceVoice->Stop()); // preserves cursor position
+
+			xaudio_check(instanceinternal->sourceVoice->FlushSourceBuffers()); // reset submitted audio buffer
+
+			if (!instanceinternal->ended) // if already ended, don't submit end again, it can cause high pitched jerky sound
+			{
+				xaudio_check(instanceinternal->sourceVoice->SubmitSourceBuffer(&audio_internal->termination_mark)); // mark this as terminated, this resets XAUDIO2_VOICE_STATE::SamplesPlayed to zero
+
+			}
+			xaudio_check(instanceinternal->sourceVoice->SubmitSourceBuffer(&instanceinternal->buffer)); // resubmit
+
 		}
 	}
 	void SetVolume(float volume, SoundInstance* instance)
 	{
 		if (instance == nullptr || !instance->IsValid())
 		{
-			HRESULT hr = audio_internal->masteringVoice->SetVolume(volume);
-			assert(SUCCEEDED(hr));
+			if (audio_internal->masteringVoice != nullptr)
+				xaudio_check(audio_internal->masteringVoice->SetVolume(volume));
 		}
 		else
 		{
 			auto instanceinternal = to_internal(instance);
-			HRESULT hr = instanceinternal->sourceVoice->SetVolume(volume);
-			assert(SUCCEEDED(hr));
+			if (instanceinternal->sourceVoice != nullptr)
+				xaudio_check(instanceinternal->sourceVoice->SetVolume(volume));
 		}
 	}
 	float GetVolume(const SoundInstance* instance)
@@ -442,12 +815,14 @@ namespace wi::audio
 		float volume = 0;
 		if (instance == nullptr || !instance->IsValid())
 		{
-			audio_internal->masteringVoice->GetVolume(&volume);
+			if(audio_internal->masteringVoice != nullptr)
+				audio_internal->masteringVoice->GetVolume(&volume);
 		}
 		else
 		{
 			auto instanceinternal = to_internal(instance);
-			instanceinternal->sourceVoice->GetVolume(&volume);
+			if(instanceinternal->sourceVoice != nullptr)
+				instanceinternal->sourceVoice->GetVolume(&volume);
 		}
 		return volume;
 	}
@@ -456,15 +831,57 @@ namespace wi::audio
 		if (instance != nullptr && instance->IsValid())
 		{
 			auto instanceinternal = to_internal(instance);
-			HRESULT hr = instanceinternal->sourceVoice->ExitLoop();
-			assert(SUCCEEDED(hr));
+			if (instanceinternal->buffer.LoopCount == 0)
+				return;
+			xaudio_check(instanceinternal->sourceVoice->ExitLoop());
+
+			if (instanceinternal->ended)
+			{
+				instanceinternal->buffer.LoopCount = 0;
+				xaudio_check(instanceinternal->sourceVoice->SubmitSourceBuffer(&instanceinternal->buffer));
+			}
 		}
+	}
+	bool IsEnded(SoundInstance* instance)
+	{
+		if (instance != nullptr && instance->IsValid())
+		{
+			auto instanceinternal = to_internal(instance);
+			return instanceinternal->ended;
+		}
+		return false;
+	}
+
+	SampleInfo GetSampleInfo(const Sound* sound)
+	{
+		SampleInfo info = {};
+		if (sound != nullptr && sound->IsValid())
+		{
+			auto soundinternal = to_internal(sound);
+			info.channel_count = soundinternal->wfx.nChannels;
+			info.samples = (const short*)soundinternal->audioData.data();
+			info.sample_count = soundinternal->audioData.size() / (info.channel_count * sizeof(short));
+			info.sample_rate = soundinternal->wfx.nSamplesPerSec;
+		}
+		return info;
+	}
+	uint64_t GetTotalSamplesPlayed(const SoundInstance* instance)
+	{
+		if (instance != nullptr && instance->IsValid())
+		{
+			auto instanceinternal = to_internal(instance);
+			XAUDIO2_VOICE_STATE state = {};
+			if (instanceinternal->sourceVoice != nullptr)
+				instanceinternal->sourceVoice->GetState(&state, 0);
+			return state.SamplesPlayed;
+		}
+		return 0ull;
 	}
 
 	void SetSubmixVolume(SUBMIX_TYPE type, float volume)
 	{
-		HRESULT hr = audio_internal->submixVoices[type]->SetVolume(volume);
-		assert(SUCCEEDED(hr));
+		if(audio_internal->submixVoices[type] != nullptr)
+			xaudio_check(audio_internal->submixVoices[type]->SetVolume(volume));
 	}
 	float GetSubmixVolume(SUBMIX_TYPE type)
 	{
@@ -516,30 +933,27 @@ namespace wi::audio
 
 			X3DAudioCalculate(instanceinternal->audio->audio3D, &listener, &emitter, flags, &settings);
 
-			HRESULT hr;
+			xaudio_check(instanceinternal->sourceVoice->SetFrequencyRatio(settings.DopplerFactor));
 
-			hr = instanceinternal->sourceVoice->SetFrequencyRatio(settings.DopplerFactor);
-			assert(SUCCEEDED(hr));
-
-			hr = instanceinternal->sourceVoice->SetOutputMatrix(
+			xaudio_check(instanceinternal->sourceVoice->SetOutputMatrix(
 				instanceinternal->audio->submixVoices[instance->type],
-				settings.SrcChannelCount, 
-				settings.DstChannelCount, 
+				settings.SrcChannelCount,
+				settings.DstChannelCount,
 				settings.pMatrixCoefficients
-			);
-			assert(SUCCEEDED(hr));
+			));
+
 			
 			XAUDIO2_FILTER_PARAMETERS FilterParametersDirect = { LowPassFilter, 2.0f * sinf(X3DAUDIO_PI / 6.0f * settings.LPFDirectCoefficient), 1.0f };
-			hr = instanceinternal->sourceVoice->SetOutputFilterParameters(instanceinternal->audio->submixVoices[instance->type], &FilterParametersDirect);
-			assert(SUCCEEDED(hr));
+			xaudio_check(instanceinternal->sourceVoice->SetOutputFilterParameters(instanceinternal->audio->submixVoices[instance->type], &FilterParametersDirect));
+
 
 			if (instance->IsEnableReverb() && instanceinternal->audio->reverbSubmix != nullptr)
 			{
-				hr = instanceinternal->sourceVoice->SetOutputMatrix(instanceinternal->audio->reverbSubmix, settings.SrcChannelCount, 1, &settings.ReverbLevel);
-				assert(SUCCEEDED(hr));
+				xaudio_check(instanceinternal->sourceVoice->SetOutputMatrix(instanceinternal->audio->reverbSubmix, settings.SrcChannelCount, 1, &settings.ReverbLevel));
+
 				XAUDIO2_FILTER_PARAMETERS FilterParametersReverb = { LowPassFilter, 2.0f * sinf(X3DAUDIO_PI / 6.0f * settings.LPFReverbCoefficient), 1.0f };
-				hr = instanceinternal->sourceVoice->SetOutputFilterParameters(instanceinternal->audio->reverbSubmix, &FilterParametersReverb);
-				assert(SUCCEEDED(hr));
+				xaudio_check(instanceinternal->sourceVoice->SetOutputFilterParameters(instanceinternal->audio->reverbSubmix, &FilterParametersReverb));
+
 			}
 		}
 	}
@@ -548,12 +962,12 @@ namespace wi::audio
 	{
 		XAUDIO2FX_REVERB_PARAMETERS native;
 		ReverbConvertI3DL2ToNative(&reverbPresets[preset], &native);
-		HRESULT hr = audio_internal->reverbSubmix->SetEffectParameters(0, &native, sizeof(native));
-		assert(SUCCEEDED(hr));
+		xaudio_check(audio_internal->reverbSubmix->SetEffectParameters(0, &native, sizeof(native)));
+
 	}
 }
 
-#elif SDL2
+#elif defined(SDL2) || defined(SDL3)
 
 //FAudio implemetation
 #include <FAudio.h>
@@ -611,13 +1025,21 @@ namespace wi::audio
 		F3DAUDIO_HANDLE audio3D = {};
 		FAPO* reverbEffect;
 		FAudioSubmixVoice* reverbSubmix = nullptr;
+		uint32_t termination_data = 0;
+		FAudioBuffer termination_mark = {};
 
 		AudioInternal(){
 			wi::Timer timer;
 
 			uint32_t res;
 			res = FAudioCreate(&audioEngine, 0, FAUDIO_DEFAULT_PROCESSOR);
-			assert(res == 0);
+			if (res != 0)
+			{
+				std::stringstream ss("");
+				ss << "FAudioCreate returned error: " << res;
+				wi::backlog::post(ss.str(), wi::backlog::LogLevel::Error);
+				return;
+			}
 
 			res = FAudio_CreateMasteringVoice(
 				audioEngine, 
@@ -625,7 +1047,13 @@ namespace wi::audio
 				FAUDIO_DEFAULT_CHANNELS, 
 				FAUDIO_DEFAULT_SAMPLERATE, 
 				0, 0, NULL);
-			assert(res == 0);
+			if (res != 0)
+			{
+				std::stringstream ss("");
+				ss << "FAudio_CreateMasteringVoice returned error: " << res;
+				wi::backlog::post(ss.str(), wi::backlog::LogLevel::Error);
+				return;
+			}
 		
 			FAudioVoice_GetVoiceDetails(masteringVoice, &masteringVoiceDetails);
 
@@ -636,19 +1064,37 @@ namespace wi::audio
 					masteringVoiceDetails.InputChannels, 
 					masteringVoiceDetails.InputSampleRate, 
 					0, 0, NULL, NULL);
-				assert(res == 0);
+				if (res != 0)
+				{
+					std::stringstream ss("");
+					ss << "FAudio_CreateSubmixVoice returned error: " << res;
+					wi::backlog::post(ss.str(), wi::backlog::LogLevel::Error);
+					return;
+				}
 			}
 
 			uint32_t channelMask;
 			FAudioMasteringVoice_GetChannelMask(masteringVoice, &channelMask);
 
 			F3DAudioInitialize(channelMask, SPEED_OF_SOUND, audio3D);
-			success = (res == 0);
+			if (res != 0)
+			{
+				std::stringstream ss("");
+				ss << "F3DAudioInitialize returned error: " << res;
+				wi::backlog::post(ss.str(), wi::backlog::LogLevel::Error);
+				return;
+			}
 
 			// Reverb setup
 			{
 				res = FAudioCreateReverb(&reverbEffect, 0);
-				success = (res == 0);
+				if (res != 0)
+				{
+					std::stringstream ss("");
+					ss << "FAudioCreateReverb returned error: " << res;
+					wi::backlog::post(ss.str(), wi::backlog::LogLevel::Error);
+					return;
+				}
 
 				FAudioEffectDescriptor effects[] = { { reverbEffect, 1, 1 } };
 				FAudioEffectChain effectChain = { arraysize(effects), effects };
@@ -661,13 +1107,25 @@ namespace wi::audio
 					0, 
 					0, 
 					nullptr, 
-					&effectChain);
+					&effectChain
+				);
+				if (res != 0)
+				{
+					std::stringstream ss("");
+					ss << "FAudio_CreateSubmixVoice returned error: " << res;
+					wi::backlog::post(ss.str(), wi::backlog::LogLevel::Error);
+					return;
+				}
 			}
 
-			if (success)
-			{
-				wi::backlog::post("wi::audio Initialized [FAudio] (" + std::to_string((int)std::round(timer.elapsed())) + " ms)");
-			}
+			termination_mark.Flags = FAUDIO_END_OF_STREAM;
+			termination_mark.pAudioData = (const uint8_t*)&termination_data;
+			termination_mark.AudioBytes = sizeof(termination_data);
+
+			success = true;
+			wilog("wi::audio Initialized [FAudio %d.%d.%d] (%d ms)",
+				  FAUDIO_MAJOR_VERSION, FAUDIO_MINOR_VERSION, FAUDIO_PATCH_VERSION,
+				  (int)std::round(timer.elapsed()));
 		}
 		~AudioInternal(){
 			if(reverbSubmix != nullptr)
@@ -683,27 +1141,34 @@ namespace wi::audio
 
 			FAudio_StopEngine(audioEngine);
 		}
+		constexpr bool IsValid() const { return success; }
 	};
-	static std::shared_ptr<AudioInternal> audio_internal;
+	static wi::allocator::shared_ptr<AudioInternal> audio_internal;
 
 	void Initialize()
 	{
-		audio_internal = std::make_shared<AudioInternal>();
+		audio_internal = wi::allocator::make_shared_single<AudioInternal>();
+	}
+
+	void Deinitialize()
+	{
+		audio_internal.reset();
 	}
 
 	struct SoundInternal{
-		std::shared_ptr<AudioInternal> audio;
+		wi::allocator::shared_ptr<AudioInternal> audio;
 		FAudioWaveFormatEx wfx = {};
 		wi::vector<uint8_t> audioData;
 	};
 	struct SoundInstanceInternal{
-		std::shared_ptr<AudioInternal> audio;
-		std::shared_ptr<SoundInternal> soundinternal;
+		wi::allocator::shared_ptr<AudioInternal> audio;
+		wi::allocator::shared_ptr<SoundInternal> soundinternal;
 		FAudioSourceVoice* sourceVoice = nullptr;
 		FAudioVoiceDetails voiceDetails = {};
 		wi::vector<float> outputMatrix;
 		wi::vector<float> channelAzimuths;
 		FAudioBuffer buffer = {};
+		bool ended = true;
 
 		~SoundInstanceInternal(){
 			FAudioSourceVoice_Stop(sourceVoice, 0, FAUDIO_COMMIT_NOW);
@@ -779,8 +1244,11 @@ namespace wi::audio
 		}
 		return CreateSound(filedata.data(), filedata.size(), sound);
 	}
-	bool CreateSound(const uint8_t* data, size_t size, Sound* sound) {
-		std::shared_ptr<SoundInternal> soundinternal = std::make_shared<SoundInternal>();
+	bool CreateSound(const uint8_t* data, size_t size, Sound* sound)
+	{
+		if (audio_internal == nullptr || !audio_internal->IsValid())
+			return false;
+		auto soundinternal = wi::allocator::make_shared<SoundInternal>();
 		soundinternal->audio = audio_internal;
 		sound->internal_state = soundinternal;
 
@@ -820,6 +1288,12 @@ namespace wi::audio
 			soundinternal->audioData.resize(dwChunkSize);
 			memcpy(soundinternal->audioData.data(), data + dwChunkPosition, dwChunkSize);
 		}
+		else if (aac::is_adts(data, size))
+		{
+			sound->internal_state = {};
+			// TODO: Linux AAC/ADTS audio decoding
+			return false;
+		}
 		else
 		{
 			// Ogg decoder:
@@ -841,7 +1315,7 @@ namespace wi::audio
 			soundinternal->wfx.nBlockAlign = (uint16_t)channels * sizeof(short); // is this right?
 			soundinternal->wfx.nAvgBytesPerSec = soundinternal->wfx.nSamplesPerSec * soundinternal->wfx.nBlockAlign;
 
-			size_t output_size = (size_t)samples * sizeof(short);
+			size_t output_size = size_t(samples * channels) * sizeof(short);
 			soundinternal->audioData.resize(output_size);
 			memcpy(soundinternal->audioData.data(), output, output_size);
 
@@ -850,10 +1324,15 @@ namespace wi::audio
 
 		return true;
 	}
-	bool CreateSoundInstance(const Sound* sound, SoundInstance* instance) { 
+	bool CreateSoundInstance(const Sound* sound, SoundInstance* instance)
+	{
+		if (audio_internal == nullptr || !audio_internal->IsValid())
+			return false;
+		if (sound == nullptr || !sound->IsValid())
+			return false;
 		uint32_t res;
-		const auto& soundinternal = std::static_pointer_cast<SoundInternal>(sound->internal_state);
-		std::shared_ptr<SoundInstanceInternal> instanceinternal = std::make_shared<SoundInstanceInternal>();
+		auto soundinternal = wi::allocator::shared_ptr<SoundInternal>(sound->internal_state);
+		auto instanceinternal = wi::allocator::make_shared<SoundInstanceInternal>();
 		instance->internal_state = instanceinternal;
 
 		instanceinternal->audio = audio_internal;
@@ -884,12 +1363,30 @@ namespace wi::audio
 			instanceinternal->channelAzimuths[i] = F3DAUDIO_2PI * float(i) / float(instanceinternal->channelAzimuths.size());
 		}
 
-		instanceinternal->buffer.AudioBytes = (uint32_t)soundinternal->audioData.size();
+		const uint32_t bytes_per_second = soundinternal->wfx.nSamplesPerSec * soundinternal->wfx.nChannels * sizeof(short);
 		instanceinternal->buffer.pAudioData = soundinternal->audioData.data();
+		instanceinternal->buffer.AudioBytes = (uint32_t)soundinternal->audioData.size();
+		if (instance->begin > 0)
+		{
+			const uint32_t bytes_from_beginning = align(std::min(instanceinternal->buffer.AudioBytes, uint32_t(instance->begin * bytes_per_second)), 4u);
+			instanceinternal->buffer.pAudioData += bytes_from_beginning;
+			instanceinternal->buffer.AudioBytes -= bytes_from_beginning;
+		}
+		if (instance->length > 0)
+		{
+			instanceinternal->buffer.AudioBytes = align(std::min(instanceinternal->buffer.AudioBytes, uint32_t(instance->length * bytes_per_second)), 4u);
+		}
+
+		uint32_t num_remaining_samples = instanceinternal->buffer.AudioBytes / (soundinternal->wfx.nChannels * sizeof(short));
+		if (instance->loop_begin > 0)
+		{
+			instanceinternal->buffer.LoopBegin = align(std::min(num_remaining_samples, uint32_t(instance->loop_begin * soundinternal->wfx.nSamplesPerSec)), 4u);
+			num_remaining_samples -= instanceinternal->buffer.LoopBegin;
+		}
+		instanceinternal->buffer.LoopLength = align(std::min(num_remaining_samples, uint32_t(instance->loop_length * soundinternal->wfx.nSamplesPerSec)), 4u);
+
 		instanceinternal->buffer.Flags = FAUDIO_END_OF_STREAM;
-		instanceinternal->buffer.LoopCount = FAUDIO_LOOP_INFINITE;
-		instanceinternal->buffer.LoopBegin = uint32_t(instance->loop_begin * instanceinternal->audio->masteringVoiceDetails.InputSampleRate);
-		instanceinternal->buffer.LoopLength = uint32_t(instance->loop_length * instanceinternal->audio->masteringVoiceDetails.InputSampleRate);
+		instanceinternal->buffer.LoopCount = instance->IsLooped() ? FAUDIO_LOOP_INFINITE : 0;
 
 		res = FAudioSourceVoice_SubmitSourceBuffer(instanceinternal->sourceVoice, &(instanceinternal->buffer), nullptr);
 		if(res != 0){
@@ -921,6 +1418,8 @@ namespace wi::audio
 			assert(res == 0);
 			res = FAudioSourceVoice_FlushSourceBuffers(instanceinternal->sourceVoice); // reset submitted audio buffer
 			assert(res == 0);
+			res = FAudioSourceVoice_SubmitSourceBuffer(instanceinternal->sourceVoice, &audio_internal->termination_mark, nullptr); // mark this as terminated, this resets XAUDIO2_VOICE_STATE::SamplesPlayed to zero
+			assert(res == 0);
 			res = FAudioSourceVoice_SubmitSourceBuffer(instanceinternal->sourceVoice, &(instanceinternal->buffer), nullptr);
 			assert(res == 0);
 		}
@@ -950,9 +1449,51 @@ namespace wi::audio
 	void ExitLoop(SoundInstance* instance) {
 		if (instance != nullptr && instance->IsValid()){
 			auto instanceinternal = to_internal(instance);
+			if (instanceinternal->buffer.LoopCount == 0)
+				return;
 			uint32_t res = FAudioSourceVoice_ExitLoop(instanceinternal->sourceVoice, FAUDIO_COMMIT_NOW);
 			assert(res == 0);
+			if (instanceinternal->ended)
+			{
+				instanceinternal->buffer.LoopCount = 0;
+				res = FAudioSourceVoice_SubmitSourceBuffer(instanceinternal->sourceVoice, &(instanceinternal->buffer), nullptr);
+				assert(res == 0);
+			}
 		}
+	}
+	bool IsEnded(SoundInstance* instance)
+	{
+		if (instance != nullptr && instance->IsValid())
+		{
+			auto instanceinternal = to_internal(instance);
+			return instanceinternal->ended;
+		}
+		return false;
+	}
+
+	SampleInfo GetSampleInfo(const Sound* sound)
+	{
+		SampleInfo info = {};
+		if (sound != nullptr && sound->IsValid())
+		{
+			auto soundinternal = to_internal(sound);
+			info.samples = (const short*)soundinternal->audioData.data();
+			info.sample_count = soundinternal->audioData.size() / sizeof(short);
+			info.sample_rate = soundinternal->wfx.nSamplesPerSec;
+			info.channel_count = soundinternal->wfx.nChannels;
+		}
+		return info;
+	}
+	uint64_t GetTotalSamplesPlayed(const SoundInstance* instance)
+	{
+		if (instance != nullptr && instance->IsValid())
+		{
+			auto instanceinternal = to_internal(instance);
+			FAudioVoiceState state = {};
+			FAudioSourceVoice_GetState(instanceinternal->sourceVoice, &state, 0);
+			return state.SamplesPlayed;
+		}
+		return 0ull;
 	}
 
 	void SetSubmixVolume(SUBMIX_TYPE type, float volume) {
@@ -1041,10 +1582,422 @@ namespace wi::audio
 	}
 }
 
+#elif defined(__APPLE__)
+#define MA_IMPLEMENTATION
+#define MA_NO_ENCODING
+#define MA_DR_FLAC_NO_NEON
+#define MA_API static
+
+#include "Utility/miniaudio.h"
+
+// iOS miniaudio calls these directly. macOS loads them with dlopen.
+#if TARGET_OS_IOS
+__asm__(".linker_option \"-framework\", \"AVFoundation\"");
+__asm__(".linker_option \"-framework\", \"AudioToolbox\"");
+__asm__(".linker_option \"-framework\", \"CoreAudio\"");
+#endif // TARGET_OS_IOS
+#if TARGET_OS_OSX
+__asm__(".linker_option \"-framework\", \"AudioToolbox\"");
+#endif // TARGET_OS_OSX
+
+#include <AudioToolbox/AudioFile.h>
+#include <AudioToolbox/ExtendedAudioFile.h>
+
+namespace wi::audio
+{
+	struct WrappedEngine : ma_engine
+	{
+		WrappedEngine()
+		{
+			ma_result res = ma_engine_init(nullptr, this);
+			wilog_assert(res == MA_SUCCESS, "MiniAudio engine failed to initialize");
+		}
+
+		~WrappedEngine()
+		{
+			ma_engine_uninit(this);
+		}
+	};
+
+	struct WrappedSound : ma_sound
+	{
+		ma_audio_buffer* buffer = nullptr;
+		bool playing = false;
+
+		WrappedSound() {}
+
+		// Just for testing
+		WrappedSound(WrappedSound& other) = delete;
+
+		ma_result Create(ma_engine* engine, const ma_audio_buffer_config& config, ma_uint32 flags)
+		{
+			buffer = new ma_audio_buffer();
+			ma_audio_buffer_init(&config, buffer);
+			ma_result res = ma_sound_init_from_data_source(engine, buffer, flags, nullptr, this);
+			return res;
+		}
+
+		~WrappedSound()
+		{
+			ma_sound_uninit(this);
+			if (buffer != nullptr) delete buffer;
+		}
+	};
+
+	struct WrappedSampleInfo : SampleInfo
+	{
+		~WrappedSampleInfo()
+		{
+			delete samples;
+		}
+	};
+
+	static wi::allocator::shared_ptr<WrappedEngine> engine;
+
+	static WrappedSound* get_ma_sound(const SoundInstance* instance)
+	{
+		return instance == nullptr ? nullptr : (WrappedSound*)instance->internal_state.get();
+	}
+
+	void Initialize()
+	{
+		wi::Timer timer;
+		engine = wi::allocator::make_shared_single<WrappedEngine>();
+		wilog("wi::audio Initialized [miniaudio] (%d ms)", (int)std::round(timer.elapsed()));
+	}
+
+	void Deinitialize()
+	{
+		engine.reset();
+	}
+
+	static bool CreateSoundInternal(std::function<ma_result (ma_decoder_config* config, ma_uint64* frameCount, void** pcmFrames)> decoder, Sound* sound)
+	{
+		auto info = wi::allocator::make_shared<WrappedSampleInfo>();
+		ma_decoder_config config{};
+		info->channel_count = config.channels = 1;
+		info->sample_rate = config.sampleRate = ma_engine_get_sample_rate(engine.get());
+		config.format = ma_format_s16;
+		ma_uint64 count;
+		ma_result res = decoder(&config, &count, (void**)(&info->samples));
+		info->sample_count = count;
+		if (res == MA_SUCCESS)
+		{
+			sound->internal_state = info;
+			info->sample_count *= info->channel_count;
+		}
+		assert(res == MA_SUCCESS);
+		return res == MA_SUCCESS;
+
+	}
+
+	bool CreateSound(const std::string& filename, Sound* sound)
+	{
+		return CreateSoundInternal(
+			[filename](auto config, auto frameCount, auto frames) {
+				return ma_decode_file(filename.c_str(), config, frameCount, frames);
+			},
+			sound
+		);
+	}
+
+	struct ADTSMemory
+	{
+		const uint8_t* data;
+		size_t size;
+	};
+	static OSStatus ADTSRead(void* user, SInt64 position, UInt32 request, void* buffer, UInt32* actual)
+	{
+		ADTSMemory* memory = (ADTSMemory*)user;
+		if (position < 0 || (size_t)position >= memory->size)
+		{
+			*actual = 0;
+			return kAudioFileEndOfFileError;
+		}
+		const size_t available = memory->size - (size_t)position;
+		const UInt32 count = request < available ? request : (UInt32)available;
+		std::memcpy(buffer, memory->data + position, count);
+		*actual = count;
+		return noErr;
+	}
+	static SInt64 ADTSGetSize(void* user)
+	{
+		return (SInt64)((ADTSMemory*)user)->size;
+	}
+	static bool DecodeADTS(const uint8_t* data, size_t size, WrappedSampleInfo* info)
+	{
+		ADTSMemory memory = { data, size };
+		AudioFileID audio_file = nullptr;
+		OSStatus status = AudioFileOpenWithCallbacks(&memory, ADTSRead, nullptr, ADTSGetSize, nullptr, kAudioFileAAC_ADTSType, &audio_file);
+		if (status != noErr || audio_file == nullptr)
+			return false;
+		ExtAudioFileRef ext_file = nullptr;
+		status = ExtAudioFileWrapAudioFileID(audio_file, false, &ext_file);
+		if (status != noErr || ext_file == nullptr)
+		{
+			AudioFileClose(audio_file);
+			return false;
+		}
+		struct Closer
+		{
+			AudioFileID file;
+			ExtAudioFileRef ext;
+			~Closer()
+			{
+				if (ext != nullptr)
+					ExtAudioFileDispose(ext);
+				if (file != nullptr)
+					AudioFileClose(file);
+			}
+		} closer = { audio_file, ext_file };
+
+		AudioStreamBasicDescription file_format = {};
+		UInt32 property_size = sizeof(file_format);
+		status = ExtAudioFileGetProperty(ext_file, kExtAudioFileProperty_FileDataFormat, &property_size, &file_format);
+		if (status != noErr || file_format.mChannelsPerFrame == 0 || file_format.mSampleRate == 0.0)
+			return false;
+
+		AudioStreamBasicDescription client = {};
+		client.mSampleRate = file_format.mSampleRate;
+		client.mFormatID = kAudioFormatLinearPCM;
+		client.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+		client.mBitsPerChannel = 16;
+		client.mChannelsPerFrame = file_format.mChannelsPerFrame;
+		client.mFramesPerPacket = 1;
+		client.mBytesPerFrame = client.mChannelsPerFrame * sizeof(int16_t);
+		client.mBytesPerPacket = client.mBytesPerFrame;
+		status = ExtAudioFileSetProperty(ext_file, kExtAudioFileProperty_ClientDataFormat, sizeof(client), &client);
+		if (status != noErr)
+			return false;
+
+		const uint32_t channels = client.mChannelsPerFrame;
+		wi::vector<int16_t> chunk(size_t(4096) * channels);
+		wi::vector<int16_t> pcm;
+		for (;;)
+		{
+			AudioBufferList buffers = {};
+			buffers.mNumberBuffers = 1;
+			buffers.mBuffers[0].mNumberChannels = channels;
+			buffers.mBuffers[0].mDataByteSize = (UInt32)(chunk.size() * sizeof(int16_t));
+			buffers.mBuffers[0].mData = chunk.data();
+			UInt32 frames = 4096;
+			status = ExtAudioFileRead(ext_file, &frames, &buffers);
+			if (frames > 0)
+				pcm.insert(pcm.end(), chunk.data(), chunk.data() + size_t(frames) * channels);
+			if (status != noErr || frames == 0)
+				break;
+		}
+		if (pcm.empty())
+			return false;
+
+		short* samples = (short*)ma_malloc(pcm.size() * sizeof(short), nullptr);
+		if (samples == nullptr)
+			return false;
+		std::memcpy(samples, pcm.data(), pcm.size() * sizeof(short));
+		info->samples = samples;
+		info->channel_count = channels;
+		info->sample_rate = (int)client.mSampleRate;
+		info->sample_count = pcm.size();
+		return true;
+	}
+
+	bool CreateSound(const uint8_t* data, size_t size, Sound* sound)
+	{
+		if (aac::is_adts(data, size))
+		{
+			if (engine == nullptr)
+				return false;
+			auto info = wi::allocator::make_shared<WrappedSampleInfo>();
+			if (!DecodeADTS(data, size, info.get()))
+				return false;
+			sound->internal_state = info;
+			return true;
+		}
+		return CreateSoundInternal(
+			[data, size](auto config, auto frameCount, auto frames) {
+				return ma_decode_memory(data, size, config, frameCount, frames);
+			},
+			sound
+		);
+	}
+
+	bool CreateSoundInstance(const Sound* sound, SoundInstance* instance)
+	{
+		auto info = (WrappedSampleInfo*)sound->internal_state.get();
+		auto wrapped_sound = wi::allocator::make_shared<WrappedSound>();
+
+		ma_audio_buffer_config config{};
+		config.channels = info->channel_count;
+		config.format = ma_format_s16;
+		config.sampleRate = info->sample_rate;
+		config.sizeInFrames = info->sample_count / info->channel_count;
+		config.pData = info->samples;
+		ma_result res = wrapped_sound->Create(engine.get(), config, 0);
+		if (res == MA_SUCCESS)
+		{
+			instance->internal_state = wrapped_sound;
+		}
+		assert(res == MA_SUCCESS);
+		return res == MA_SUCCESS;
+	}
+
+	void Play(SoundInstance* instance)
+	{
+		auto sound = get_ma_sound(instance);
+		
+		if (sound->playing) return;
+		sound->playing = true;
+		ma_sound_set_looping(sound, instance->IsLooped());
+		if (instance->begin > 0.f)
+		{
+			ma_sound_seek_to_second(sound, instance->begin);
+		}
+		if (instance->length > 0.f)
+		{
+			ma_sound_set_stop_time_in_milliseconds(sound, ma_engine_get_time_in_milliseconds(engine.get()) + ma_uint64(instance->length * 1000.f));
+		}
+		else
+		{
+			ma_sound_set_stop_time_in_milliseconds(sound, UINT64_MAX);
+		}
+
+		ma_sound_start(sound);
+	}
+
+	void Pause(SoundInstance* instance)
+	{
+		ma_sound_stop(get_ma_sound(instance));
+		get_ma_sound(instance)->playing = false;
+	}
+
+	void Stop(SoundInstance* instance)
+	{
+		ma_sound_stop(get_ma_sound(instance));
+		ma_sound_seek_to_pcm_frame(get_ma_sound(instance), 0);
+		get_ma_sound(instance)->playing = false;
+	}
+
+	void SetVolume(float volume, SoundInstance* instance)
+	{
+		if (instance == nullptr)
+		{
+			ma_engine_set_volume(engine.get(), std::min(1.f, volume));
+		}
+		else
+		{
+			// FIXME: temporary hack because Island level has background sounds set at volume 10
+			// and XAudio doesn't seem to support amplifiying sounds
+			ma_sound_set_volume(get_ma_sound(instance), std::min(1.f, volume));
+		}
+	}
+
+	float GetVolume(const SoundInstance* instance)
+	{
+		return ma_sound_get_volume(get_ma_sound(instance));
+	}
+
+	void ExitLoop(SoundInstance* instance)
+	{
+
+	}
+	bool IsEnded(SoundInstance* instance)
+	{
+		// FIXME: Dirty hack for character_controller demo, this would be true for paused sounds as well,
+		// which is incorrect.
+		return !get_ma_sound(instance)->playing || ma_sound_at_end(get_ma_sound(instance));
+	}
+
+	SampleInfo GetSampleInfo(const Sound* sound)
+	{
+		return *(SampleInfo*)sound->internal_state.get();
+	}
+
+	uint64_t GetTotalSamplesPlayed(const SoundInstance* instance)
+	{
+		// FIXME: multiply by channels
+		return ma_sound_get_time_in_pcm_frames(get_ma_sound(instance));
+	}
+
+	void SetSubmixVolume(SUBMIX_TYPE type, float volume)
+	{
+
+	}
+
+	float GetSubmixVolume(SUBMIX_TYPE type)
+	{
+		return 0.;
+	}
+
+	void Update3D(SoundInstance* instance, const SoundInstance3D& instance3D)
+	{
+		ma_sound_set_spatialization_enabled(get_ma_sound(instance), MA_TRUE);
+		ma_sound_set_position(
+			get_ma_sound(instance),
+			instance3D.emitterPos.x,
+			instance3D.emitterPos.y,
+			-instance3D.emitterPos.z
+		);
+		ma_sound_set_direction(
+			get_ma_sound(instance),
+			instance3D.emitterFront.x,
+			instance3D.emitterFront.y,
+			-instance3D.emitterFront.z
+		);
+		// TODO: emitterUp
+		ma_sound_set_velocity(
+			get_ma_sound(instance),
+			instance3D.emitterVelocity.x,
+			instance3D.emitterVelocity.y,
+			-instance3D.emitterVelocity.z
+		);
+		ma_sound_set_max_distance(get_ma_sound(instance), instance3D.emitterRadius);
+
+		ma_engine_listener_set_position(
+			engine.get(),
+			0,
+			instance3D.listenerPos.x,
+			instance3D.listenerPos.y,
+			-instance3D.listenerPos.z
+		);
+		ma_engine_listener_set_velocity(
+			engine.get(),
+			0,
+			instance3D.listenerVelocity.x,
+			instance3D.listenerVelocity.y,
+			-instance3D.listenerVelocity.z
+		);
+		ma_engine_listener_set_world_up(
+			engine.get(),
+			0,
+			instance3D.listenerUp.x,
+			instance3D.listenerUp.y,
+			-instance3D.listenerUp.z
+		);
+		ma_engine_listener_set_direction(
+			engine.get(),
+			0,
+			instance3D.listenerFront.x,
+			instance3D.listenerFront.y,
+			-instance3D.listenerFront.z
+		);
+
+	}
+
+	void SetReverb(REVERB_PRESET preset)
+	{
+
+	}
+}
+
+#elif __SCE__
+// PS5 audio implementation in wiAudio_PS5.cpp extension file
 #else
 
 namespace wi::audio
 {
+	void Initialize() {}
+	void Deinitialize() {}
+
 	bool CreateSound(const std::string& filename, Sound* sound) { return false; }
 	bool CreateSound(const uint8_t* data, size_t size, Sound* sound) { return false; }
 	bool CreateSoundInstance(const Sound* sound, SoundInstance* instance) { return false; }
@@ -1055,6 +2008,10 @@ namespace wi::audio
 	void SetVolume(float volume, SoundInstance* instance) {}
 	float GetVolume(const SoundInstance* instance) { return 0; }
 	void ExitLoop(SoundInstance* instance) {}
+	bool IsEnded(SoundInstance* instance) { return true; }
+
+	SampleInfo GetSampleInfo(const Sound* sound) { return {}; }
+	uint64_t GetTotalSamplesPlayed(const SoundInstance* instance) { return 0; }
 
 	void SetSubmixVolume(SUBMIX_TYPE type, float volume) {}
 	float GetSubmixVolume(SUBMIX_TYPE type) { return 0; }

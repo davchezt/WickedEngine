@@ -6,9 +6,9 @@ PUSHCONSTANT(postprocess, PostProcess);
 #define float16_t2 min16float2
 #define float16_t3 min16float3
 
-Texture2D<float16_t3> normals : register(t0);
+Texture2D<float3> normals : register(t0);
 StructuredBuffer<uint> metadata : register(t1);
-Texture2D<float16_t2> input : register(t2);
+Texture2D<float2> input : register(t2);
 
 RWTexture2D<float2> history : register(u0);
 RWTexture2D<unorm float> output : register(u1);
@@ -83,7 +83,7 @@ void main(uint2 gid : SV_GroupID, uint2 gtid : SV_GroupThreadID, uint2 did : SV_
 
 		if (bWriteOutput)
 		{
-			output[did].x = pow(mean, rtao_power);
+			output[did].x = FFX_DNSR_Shadows_IsShadowReciever(did) ? pow(mean, rtao_power) : 1;
 		}
 	}
 }

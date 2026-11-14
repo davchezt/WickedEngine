@@ -219,6 +219,58 @@ namespace wi::scene
 				archive >> userdata;
 			}
 
+			if (seri.GetVersion() >= 2)
+			{
+				archive >> anisotropy_strength;
+				archive >> anisotropy_rotation;
+				archive >> textures[ANISOTROPYMAP].name;
+				archive >> textures[ANISOTROPYMAP].uvset;
+			}
+			else
+			{
+				anisotropy_strength = parallaxOcclusionMapping; // old version fix
+			}
+
+			if (seri.GetVersion() >= 3)
+			{
+				archive >> textures[TRANSPARENCYMAP].name;
+				archive >> textures[TRANSPARENCYMAP].uvset;
+			}
+			if (seri.GetVersion() >= 4)
+			{
+				archive >> blend_with_terrain_height;
+			}
+			if (seri.GetVersion() >= 5)
+			{
+				archive >> extinctionColor;
+			}
+			if (seri.GetVersion() >= 6)
+			{
+				archive >> cloak;
+			}
+			if (seri.GetVersion() >= 7)
+			{
+				archive >> chromatic_aberration;
+			}
+			if (seri.GetVersion() >= 8)
+			{
+				archive >> saturation;
+			}
+			if (seri.GetVersion() >= 9)
+			{
+				archive >> interiorMappingScale;
+				archive >> interiorMappingOffset;
+				archive >> interiorMappingRotation;
+			}
+			if (seri.GetVersion() >= 10)
+			{
+				SerializeEntity(archive, cameraSource, seri);
+			}
+			if (seri.GetVersion() >= 11)
+			{
+				archive >> mesh_blend;
+			}
+
 			for (auto& x : textures)
 			{
 				if (!x.name.empty())
@@ -233,6 +285,11 @@ namespace wi::scene
 		}
 		else
 		{
+			for (auto& x : textures)
+			{
+				seri.RegisterResource(x.name);
+			}
+
 			archive << _flags;
 			archive << (uint8_t)engineStencilRef;
 			archive << userStencilRef;
@@ -263,24 +320,19 @@ namespace wi::scene
 			archive << texAnimFrameRate;
 			archive << texAnimElapsedTime;
 
-			for (auto& x : textures)
-			{
-				wi::helper::MakePathRelative(dir, x.name);
-			}
-
-			archive << textures[BASECOLORMAP].name;
-			archive << textures[SURFACEMAP].name;
-			archive << textures[NORMALMAP].name;
-			archive << textures[DISPLACEMENTMAP].name;
+			archive << wi::helper::GetPathRelative(dir, textures[BASECOLORMAP].name);
+			archive << wi::helper::GetPathRelative(dir, textures[SURFACEMAP].name);
+			archive << wi::helper::GetPathRelative(dir, textures[NORMALMAP].name);
+			archive << wi::helper::GetPathRelative(dir, textures[DISPLACEMENTMAP].name);
 
 			if (archive.GetVersion() >= 24)
 			{
-				archive << textures[EMISSIVEMAP].name;
+				archive << wi::helper::GetPathRelative(dir, textures[EMISSIVEMAP].name);
 			}
 
 			if (archive.GetVersion() >= 28)
 			{
-				archive << textures[OCCLUSIONMAP].name;
+				archive << wi::helper::GetPathRelative(dir, textures[OCCLUSIONMAP].name);
 
 				archive << textures[BASECOLORMAP].uvset;
 				archive << textures[SURFACEMAP].uvset;
@@ -316,7 +368,7 @@ namespace wi::scene
 			if (archive.GetVersion() >= 59)
 			{
 				archive << transmission;
-				archive << textures[TRANSMISSIONMAP].name;
+				archive << wi::helper::GetPathRelative(dir, textures[TRANSMISSIONMAP].name);
 				archive << textures[TRANSMISSIONMAP].uvset;
 			}
 
@@ -324,16 +376,16 @@ namespace wi::scene
 			{
 				archive << sheenColor;
 				archive << sheenRoughness;
-				archive << textures[SHEENCOLORMAP].name;
-				archive << textures[SHEENROUGHNESSMAP].name;
+				archive << wi::helper::GetPathRelative(dir, textures[SHEENCOLORMAP].name);
+				archive << wi::helper::GetPathRelative(dir, textures[SHEENROUGHNESSMAP].name);
 				archive << textures[SHEENCOLORMAP].uvset;
 				archive << textures[SHEENROUGHNESSMAP].uvset;
 
 				archive << clearcoat;
 				archive << clearcoatRoughness;
-				archive << textures[CLEARCOATMAP].name;
-				archive << textures[CLEARCOATROUGHNESSMAP].name;
-				archive << textures[CLEARCOATNORMALMAP].name;
+				archive << wi::helper::GetPathRelative(dir, textures[CLEARCOATMAP].name);
+				archive << wi::helper::GetPathRelative(dir, textures[CLEARCOATROUGHNESSMAP].name);
+				archive << wi::helper::GetPathRelative(dir, textures[CLEARCOATNORMALMAP].name);
 				archive << textures[CLEARCOATMAP].uvset;
 				archive << textures[CLEARCOATROUGHNESSMAP].uvset;
 				archive << textures[CLEARCOATNORMALMAP].uvset;
@@ -341,7 +393,7 @@ namespace wi::scene
 
 			if (archive.GetVersion() >= 68)
 			{
-				archive << textures[SPECULARMAP].name;
+				archive << wi::helper::GetPathRelative(dir, textures[SPECULARMAP].name);
 				archive << textures[SPECULARMAP].uvset;
 			}
 
@@ -349,11 +401,58 @@ namespace wi::scene
 			{
 				archive << userdata;
 			}
+
+			if (seri.GetVersion() >= 2)
+			{
+				archive << anisotropy_strength;
+				archive << anisotropy_rotation;
+				archive << wi::helper::GetPathRelative(dir, textures[ANISOTROPYMAP].name);
+				archive << textures[ANISOTROPYMAP].uvset;
+			}
+
+			if (seri.GetVersion() >= 3)
+			{
+				archive << wi::helper::GetPathRelative(dir, textures[TRANSPARENCYMAP].name);
+				archive << textures[TRANSPARENCYMAP].uvset;
+			}
+			if (seri.GetVersion() >= 4)
+			{
+				archive << blend_with_terrain_height;
+			}
+			if (seri.GetVersion() >= 5)
+			{
+				archive << extinctionColor;
+			}
+			if (seri.GetVersion() >= 6)
+			{
+				archive << cloak;
+			}
+			if (seri.GetVersion() >= 7)
+			{
+				archive << chromatic_aberration;
+			}
+			if (seri.GetVersion() >= 8)
+			{
+				archive << saturation;
+			}
+			if (seri.GetVersion() >= 9)
+			{
+				archive << interiorMappingScale;
+				archive << interiorMappingOffset;
+				archive << interiorMappingRotation;
+			}
+			if (seri.GetVersion() >= 10)
+			{
+				SerializeEntity(archive, cameraSource, seri);
+			}
+			if (seri.GetVersion() >= 11)
+			{
+				archive << mesh_blend;
+			}
 		}
 	}
 	void MeshComponent::Serialize(wi::Archive& archive, EntitySerializer& seri)
 	{
-
 		if (archive.IsReadMode())
 		{
 			archive >> _flags;
@@ -374,6 +473,10 @@ namespace wi::scene
 				SerializeEntity(archive, subsets[i].materialID, seri);
 				archive >> subsets[i].indexOffset;
 				archive >> subsets[i].indexCount;
+				if (seri.GetVersion() >= 4)
+				{
+					archive >> subsets[i].surfaceName;
+				}
 			}
 
 			archive >> tessellationFactor;
@@ -417,7 +520,11 @@ namespace wi::scene
 					archive >> morph_targets[i].weight;
 					if (seri.GetVersion() >= 1)
 					{
-						archive >> morph_targets[i].sparse_indices;
+						archive >> morph_targets[i].sparse_indices_positions;
+					}
+					if (seri.GetVersion() >= 2)
+					{
+						archive >> morph_targets[i].sparse_indices_normals;
 					}
 			    }
 			}
@@ -427,8 +534,19 @@ namespace wi::scene
 				archive >> subsets_per_lod;
 			}
 
+			if (seri.GetVersion() >= 3)
+			{
+				archive >> vertex_boneindices2;
+				archive >> vertex_boneweights2;
+			}
+
 			wi::jobsystem::Execute(seri.ctx, [&](wi::jobsystem::JobArgs args) {
 				CreateRenderData();
+
+				if (IsBVHEnabled())
+				{
+					BuildBVH();
+				}
 			});
 		}
 		else
@@ -449,6 +567,10 @@ namespace wi::scene
 				SerializeEntity(archive, subsets[i].materialID, seri);
 				archive << subsets[i].indexOffset;
 				archive << subsets[i].indexCount;
+				if (seri.GetVersion() >= 4)
+				{
+					archive << subsets[i].surfaceName;
+				}
 			}
 
 			archive << tessellationFactor;
@@ -490,7 +612,11 @@ namespace wi::scene
 					archive << morph_targets[i].weight;
 					if (seri.GetVersion() >= 1)
 					{
-						archive << morph_targets[i].sparse_indices;
+						archive << morph_targets[i].sparse_indices_positions;
+					}
+					if (seri.GetVersion() >= 2)
+					{
+						archive << morph_targets[i].sparse_indices_normals;
 					}
 			    }
 			}
@@ -498,6 +624,12 @@ namespace wi::scene
 			if (archive.GetVersion() >= 76)
 			{
 				archive << subsets_per_lod;
+			}
+
+			if (seri.GetVersion() >= 3)
+			{
+				archive << vertex_boneindices2;
+				archive << vertex_boneweights2;
 			}
 
 		}
@@ -540,18 +672,6 @@ namespace wi::scene
 				archive >> lightmapWidth;
 				archive >> lightmapHeight;
 				archive >> lightmapTextureData;
-
-				if (!lightmapTextureData.empty())
-				{
-					const uint32_t expected_datasize = lightmapWidth * lightmapHeight * sizeof(PackedVector::XMFLOAT3PK);
-					if (expected_datasize != lightmapTextureData.size())
-					{
-						// This means it's from an old version, when lightmap data was stored in raw format, so compress it...
-						wi::jobsystem::Execute(seri.ctx, [this](wi::jobsystem::JobArgs args) {
-							CompressLightmap();
-							});
-					}
-				}
 			}
 			if (archive.GetVersion() >= 31)
 			{
@@ -563,12 +683,29 @@ namespace wi::scene
 			}
 			if (archive.GetVersion() >= 76)
 			{
-				archive >> lod_distance_multiplier;
+				archive >> lod_bias;
 			}
 			if (archive.GetVersion() >= 80)
 			{
 				archive >> draw_distance;
 			}
+			if (seri.GetVersion() >= 2)
+			{
+				archive >> sort_priority;
+			}
+			if (seri.GetVersion() >= 3)
+			{
+				archive >> vertex_ao;
+			}
+			if (seri.GetVersion() >= 4)
+			{
+				archive >> rimHighlightColor;
+				archive >> rimHighlightFalloff;
+			}
+
+			wi::jobsystem::Execute(seri.ctx, [&](wi::jobsystem::JobArgs args) {
+				CreateRenderData();
+			});
 		}
 		else
 		{
@@ -597,11 +734,24 @@ namespace wi::scene
 			}
 			if (archive.GetVersion() >= 76)
 			{
-				archive << lod_distance_multiplier;
+				archive << lod_bias;
 			}
 			if (archive.GetVersion() >= 80)
 			{
 				archive << draw_distance;
+			}
+			if (seri.GetVersion() >= 2)
+			{
+				archive << sort_priority;
+			}
+			if (seri.GetVersion() >= 3)
+			{
+				archive << vertex_ao;
+			}
+			if (seri.GetVersion() >= 4)
+			{
+				archive << rimHighlightColor;
+				archive << rimHighlightFalloff;
 			}
 		}
 	}
@@ -640,6 +790,64 @@ namespace wi::scene
 			{
 				archive >> mesh_lod;
 			}
+			if (seri.GetVersion() >= 2)
+			{
+				archive >> local_offset;
+			}
+			if (shape == CollisionShape::CYLINDER && seri.GetVersion() < 3)
+			{
+				// convert old assumption that was used in Bullet Physics:
+				capsule.height = box.halfextents.y;
+				capsule.radius = box.halfextents.x;
+			}
+			if (seri.GetVersion() >= 4)
+			{
+				archive >> buoyancy;
+			}
+
+			if (seri.GetVersion() >= 5)
+			{
+				archive >> (uint32_t&)vehicle.type;
+				archive >> (uint32_t&)vehicle.collision_mode;
+
+				archive >> vehicle.chassis_half_width;
+				archive >> vehicle.chassis_half_height;
+				archive >> vehicle.chassis_half_length;
+				archive >> vehicle.front_wheel_offset;
+				archive >> vehicle.rear_wheel_offset;
+				archive >> vehicle.wheel_radius;
+				archive >> vehicle.wheel_width;
+				archive >> vehicle.car.four_wheel_drive;
+				archive >> vehicle.max_engine_torque;
+				archive >> vehicle.clutch_strength;
+				archive >> vehicle.max_roll_angle;
+				archive >> vehicle.max_steering_angle;
+
+				archive >> vehicle.front_suspension.min_length;
+				archive >> vehicle.front_suspension.max_length;
+				archive >> vehicle.front_suspension.frequency;
+				archive >> vehicle.front_suspension.damping;
+
+				archive >> vehicle.rear_suspension.min_length;
+				archive >> vehicle.rear_suspension.max_length;
+				archive >> vehicle.rear_suspension.frequency;
+				archive >> vehicle.rear_suspension.damping;
+
+				archive >> vehicle.motorcycle.front_suspension_angle;
+				archive >> vehicle.motorcycle.front_brake_torque;
+				archive >> vehicle.motorcycle.rear_brake_torque;
+
+				SerializeEntity(archive, vehicle.wheel_entity_front_left, seri);
+				SerializeEntity(archive, vehicle.wheel_entity_front_right, seri);
+				SerializeEntity(archive, vehicle.wheel_entity_rear_left, seri);
+				SerializeEntity(archive, vehicle.wheel_entity_rear_right, seri);
+			}
+
+			if (seri.GetVersion() >= 6)
+			{
+				archive >> character.maxSlopeAngle;
+				archive >> character.gravityFactor;
+			}
 		}
 		else
 		{
@@ -667,10 +875,155 @@ namespace wi::scene
 			{
 				archive << mesh_lod;
 			}
+			if (seri.GetVersion() >= 2)
+			{
+				archive << local_offset;
+			}
+			if (seri.GetVersion() >= 4)
+			{
+				archive << buoyancy;
+			}
+
+			if (seri.GetVersion() >= 5)
+			{
+				archive << (uint32_t&)vehicle.type;
+				archive << (uint32_t&)vehicle.collision_mode;
+
+				archive << vehicle.chassis_half_width;
+				archive << vehicle.chassis_half_height;
+				archive << vehicle.chassis_half_length;
+				archive << vehicle.front_wheel_offset;
+				archive << vehicle.rear_wheel_offset;
+				archive << vehicle.wheel_radius;
+				archive << vehicle.wheel_width;
+				archive << vehicle.car.four_wheel_drive;
+				archive << vehicle.max_engine_torque;
+				archive << vehicle.clutch_strength;
+				archive << vehicle.max_roll_angle;
+				archive << vehicle.max_steering_angle;
+
+				archive << vehicle.front_suspension.min_length;
+				archive << vehicle.front_suspension.max_length;
+				archive << vehicle.front_suspension.frequency;
+				archive << vehicle.front_suspension.damping;
+
+				archive << vehicle.rear_suspension.min_length;
+				archive << vehicle.rear_suspension.max_length;
+				archive << vehicle.rear_suspension.frequency;
+				archive << vehicle.rear_suspension.damping;
+
+				archive << vehicle.motorcycle.front_suspension_angle;
+				archive << vehicle.motorcycle.front_brake_torque;
+				archive << vehicle.motorcycle.rear_brake_torque;
+
+				SerializeEntity(archive, vehicle.wheel_entity_front_left, seri);
+				SerializeEntity(archive, vehicle.wheel_entity_front_right, seri);
+				SerializeEntity(archive, vehicle.wheel_entity_rear_left, seri);
+				SerializeEntity(archive, vehicle.wheel_entity_rear_right, seri);
+			}
+
+			if (seri.GetVersion() >= 6)
+			{
+				archive << character.maxSlopeAngle;
+				archive << character.gravityFactor;
+			}
+		}
+	}
+	void PhysicsConstraintComponent::Serialize(wi::Archive& archive, EntitySerializer& seri)
+	{
+		if (archive.IsReadMode())
+		{
+			archive >> _flags;
+			archive >> (uint32_t&)type;
+			SerializeEntity(archive, bodyA, seri);
+			SerializeEntity(archive, bodyB, seri);
+			archive >> distance_constraint.min_distance;
+			archive >> distance_constraint.max_distance;
+			archive >> hinge_constraint.min_angle;
+			archive >> hinge_constraint.max_angle;
+			archive >> cone_constraint.half_cone_angle;
+			if (seri.GetVersion() >= 1)
+			{
+				archive >> six_dof.minTranslationAxes;
+				archive >> six_dof.maxTranslationAxes;
+				archive >> six_dof.minRotationAxes;
+				archive >> six_dof.maxRotationAxes;
+			}
+			if (seri.GetVersion() >= 2)
+			{
+				archive >> swing_twist.normal_half_cone_angle;
+				archive >> swing_twist.plane_half_cone_angle;
+				archive >> swing_twist.min_twist_angle;
+				archive >> swing_twist.max_twist_angle;
+			}
+			if (seri.GetVersion() >= 3)
+			{
+				archive >> hinge_constraint.target_angular_velocity;
+			}
+			if (seri.GetVersion() >= 4)
+			{
+				archive >> slider_constraint.min_limit;
+				archive >> slider_constraint.max_limit;
+			}
+			if (seri.GetVersion() >= 5)
+			{
+				archive >> slider_constraint.target_velocity;
+				archive >> slider_constraint.max_force;
+			}
+			if (seri.GetVersion() >= 6)
+			{
+				archive >> break_distance;
+			}
+		}
+		else
+		{
+			archive << _flags;
+			archive << (uint32_t&)type;
+			SerializeEntity(archive, bodyA, seri);
+			SerializeEntity(archive, bodyB, seri);
+			archive << distance_constraint.min_distance;
+			archive << distance_constraint.max_distance;
+			archive << hinge_constraint.min_angle;
+			archive << hinge_constraint.max_angle;
+			archive << cone_constraint.half_cone_angle;
+			if (seri.GetVersion() >= 1)
+			{
+				archive << six_dof.minTranslationAxes;
+				archive << six_dof.maxTranslationAxes;
+				archive << six_dof.minRotationAxes;
+				archive << six_dof.maxRotationAxes;
+			}
+			if (seri.GetVersion() >= 2)
+			{
+				archive << swing_twist.normal_half_cone_angle;
+				archive << swing_twist.plane_half_cone_angle;
+				archive << swing_twist.min_twist_angle;
+				archive << swing_twist.max_twist_angle;
+			}
+			if (seri.GetVersion() >= 3)
+			{
+				archive << hinge_constraint.target_angular_velocity;
+			}
+			if (seri.GetVersion() >= 4)
+			{
+				archive << slider_constraint.min_limit;
+				archive << slider_constraint.max_limit;
+			}
+			if (seri.GetVersion() >= 5)
+			{
+				archive << slider_constraint.target_velocity;
+				archive << slider_constraint.max_force;
+			}
+			if (seri.GetVersion() >= 6)
+			{
+				archive << break_distance;
+			}
 		}
 	}
 	void SoftBodyPhysicsComponent::Serialize(wi::Archive& archive, EntitySerializer& seri)
 	{
+		wi::vector<uint32_t> graphicsToPhysicsVertexMapping;
+
 		if (archive.IsReadMode())
 		{
 			archive >> _flags;
@@ -696,6 +1049,37 @@ namespace wi::scene
 				friction = 0.5f;
 			}
 
+			if (seri.GetVersion() >= 1)
+			{
+				archive >> vertex_radius;
+				archive >> detail;
+			}
+			else
+			{
+				SetWindEnabled(true);
+			}
+
+			if (seri.GetVersion() >= 2)
+			{
+				archive >> pressure;
+			}
+			else
+			{
+				// Convert weights from per-physics to per-graphics vertex:
+				//	Per graphics vertex is better, because regenerating soft body with different detail will keep the pinning
+				wi::vector<float> weights2(graphicsToPhysicsVertexMapping.size());
+				for (size_t i = 0; i < weights2.size(); ++i)
+				{
+					weights2[i] = weights[graphicsToPhysicsVertexMapping[i]];
+				}
+				std::swap(weights, weights2);
+			}
+
+			if (seri.GetVersion() >= 3)
+			{
+				archive >> physicsIndices;
+			}
+
 			_flags &= ~SAFE_TO_REGISTER;
 		}
 		else
@@ -711,6 +1095,21 @@ namespace wi::scene
 			{
 				archive << restitution;
 			}
+
+			if (seri.GetVersion() >= 1)
+			{
+				archive << vertex_radius;
+				archive << detail;
+			}
+			if (seri.GetVersion() >= 2)
+			{
+				archive << pressure;
+			}
+
+			if (seri.GetVersion() >= 3)
+			{
+				archive << physicsIndices;
+			}
 		}
 	}
 	void ArmatureComponent::Serialize(wi::Archive& archive, EntitySerializer& seri)
@@ -724,9 +1123,7 @@ namespace wi::scene
 			boneCollection.resize(boneCount);
 			for (size_t i = 0; i < boneCount; ++i)
 			{
-				Entity boneID;
-				SerializeEntity(archive, boneID, seri);
-				boneCollection[i] = boneID;
+				SerializeEntity(archive, boneCollection[i], seri);
 			}
 
 			archive >> inverseBindMatrices;
@@ -770,10 +1167,6 @@ namespace wi::scene
 			archive >> _flags;
 			archive >> color;
 			archive >> (uint32_t&)type;
-			if (type > SPOT)
-			{
-				type = POINT; // fallback from old area light
-			}
 			archive >> intensity;
 			archive >> range;
 			archive >> outerConeAngle;
@@ -813,6 +1206,28 @@ namespace wi::scene
 				innerConeAngle *= 0.5f;
 			}
 
+			if (seri.GetVersion() >= 1)
+			{
+				archive >> cascade_distances;
+			}
+			if (seri.GetVersion() >= 2)
+			{
+				archive >> radius;
+				archive >> length;
+			}
+			if (seri.GetVersion() >= 3)
+			{
+				archive >> volumetric_boost;
+			}
+			if (seri.GetVersion() >= 4)
+			{
+				archive >> height;
+			}
+			if (seri.GetVersion() >= 5)
+			{
+				SerializeEntity(archive, cameraSource, seri);
+			}
+
 			wi::jobsystem::Execute(seri.ctx, [&](wi::jobsystem::JobArgs args) {
 				lensFlareRimTextures.resize(lensFlareNames.size());
 				for (size_t i = 0; i < lensFlareNames.size(); ++i)
@@ -820,13 +1235,18 @@ namespace wi::scene
 					if (!lensFlareNames[i].empty())
 					{
 						lensFlareNames[i] = dir + lensFlareNames[i];
-						lensFlareRimTextures[i] = wi::resourcemanager::Load(lensFlareNames[i], wi::resourcemanager::Flags::IMPORT_RETAIN_FILEDATA);
+						lensFlareRimTextures[i] = wi::resourcemanager::Load(lensFlareNames[i]);
 					}
 				}
 			});
 		}
 		else
 		{
+			for (auto& x : lensFlareNames)
+			{
+				seri.RegisterResource(x);
+			}
+
 			archive << _flags;
 			archive << color;
 			archive << (uint32_t)type;
@@ -846,14 +1266,15 @@ namespace wi::scene
 			}
 
 			// If detecting an absolute path in textures, remove it and convert to relative:
+			wi::vector<std::string> lensFlareNamesRelative = lensFlareNames;
 			if (!dir.empty())
 			{
-				for (size_t i = 0; i < lensFlareNames.size(); ++i)
+				for (size_t i = 0; i < lensFlareNamesRelative.size(); ++i)
 				{
-					wi::helper::MakePathRelative(dir, lensFlareNames[i]);
+					wi::helper::MakePathRelative(dir, lensFlareNamesRelative[i]);
 				}
 			}
-			archive << lensFlareNames;
+			archive << lensFlareNamesRelative;
 
 			if (archive.GetVersion() >= 81)
 			{
@@ -863,6 +1284,28 @@ namespace wi::scene
 			if (archive.GetVersion() >= 82)
 			{
 				archive << innerConeAngle;
+			}
+
+			if (seri.GetVersion() >= 1)
+			{
+				archive << cascade_distances;
+			}
+			if (seri.GetVersion() >= 2)
+			{
+				archive << radius;
+				archive << length;
+			}
+			if (seri.GetVersion() >= 3)
+			{
+				archive << volumetric_boost;
+			}
+			if (seri.GetVersion() >= 4)
+			{
+				archive << height;
+			}
+			if (seri.GetVersion() >= 5)
+			{
+				SerializeEntity(archive, cameraSource, seri);
 			}
 		}
 	}
@@ -884,6 +1327,22 @@ namespace wi::scene
 				archive >> aperture_shape;
 			}
 
+			if (seri.GetVersion() >= 1)
+			{
+				archive >> ortho_vertical_size;
+			}
+
+			if (seri.GetVersion() >= 2)
+			{
+				archive >> render_to_texture.resolution;
+				archive >> render_to_texture.sample_count;
+			}
+
+			if (seri.GetVersion() >= 3)
+			{
+				archive >> render_to_texture.update_interval;
+			}
+
 			SetDirty();
 		}
 		else
@@ -901,19 +1360,81 @@ namespace wi::scene
 				archive << aperture_size;
 				archive << aperture_shape;
 			}
+
+			if (seri.GetVersion() >= 1)
+			{
+				archive << ortho_vertical_size;
+			}
+
+			if (seri.GetVersion() >= 2)
+			{
+				archive << render_to_texture.resolution;
+				archive << render_to_texture.sample_count;
+			}
+
+			if (seri.GetVersion() >= 3)
+			{
+				archive << render_to_texture.update_interval;
+			}
 		}
 	}
 	void EnvironmentProbeComponent::Serialize(wi::Archive& archive, EntitySerializer& seri)
 	{
+		const std::string& dir = archive.GetSourceDirectory();
+
 		if (archive.IsReadMode())
 		{
 			archive >> _flags;
-
 			SetDirty();
+
+			if (seri.GetVersion() >= 1)
+			{
+				archive >> resolution;
+				archive >> textureName;
+
+				if (!textureName.empty())
+				{
+					textureName = dir + textureName;
+					CreateRenderData();
+				}
+			}
+
+			if (seri.GetVersion() >= 2)
+			{
+				archive >> realtime_update_interval;
+			}
+			if (seri.GetVersion() >= 3)
+			{
+				archive >> view_distance;
+			}
+			if (seri.GetVersion() >= 4)
+			{
+				archive >> filter_samplecount;
+			}
 		}
 		else
 		{
+			seri.RegisterResource(textureName);
 			archive << _flags;
+
+			if (seri.GetVersion() >= 1)
+			{
+				archive << resolution;
+				archive << wi::helper::GetPathRelative(dir, textureName);
+			}
+
+			if (seri.GetVersion() >= 2)
+			{
+				archive << realtime_update_interval;
+			}
+			if (seri.GetVersion() >= 3)
+			{
+				archive << view_distance;
+			}
+			if (seri.GetVersion() >= 4)
+			{
+				archive << filter_samplecount;
+			}
 		}
 	}
 	void ForceFieldComponent::Serialize(wi::Archive& archive, EntitySerializer& seri)
@@ -947,10 +1468,20 @@ namespace wi::scene
 		if (archive.IsReadMode())
 		{
 			archive >> _flags;
+
+			if (seri.GetVersion() >= 1)
+			{
+				archive >> slopeBlendPower;
+			}
 		}
 		else
 		{
 			archive << _flags;
+
+			if (seri.GetVersion() >= 1)
+			{
+				archive << slopeBlendPower;
+			}
 		}
 	}
 	void AnimationComponent::Serialize(wi::Archive& archive, EntitySerializer& seri)
@@ -980,6 +1511,10 @@ namespace wi::scene
 				archive >> (uint32_t&)channels[i].path;
 				SerializeEntity(archive, channels[i].target, seri);
 				archive >> channels[i].samplerIndex;
+				if (seri.GetVersion() >= 1)
+				{
+					archive >> channels[i].retargetIndex;
+				}
 			}
 
 			size_t samplerCount;
@@ -997,6 +1532,19 @@ namespace wi::scene
 				if (archive.GetVersion() >= 46)
 				{
 					SerializeEntity(archive, samplers[i].data, seri);
+				}
+			}
+
+			if (seri.GetVersion() >= 1)
+			{
+				size_t retargetCount;
+				archive >> retargetCount;
+				retargets.resize(retargetCount);
+				for (size_t i = 0; i < retargetCount; ++i)
+				{
+					SerializeEntity(archive, retargets[i].source, seri);
+					archive >> retargets[i].dstRelativeMatrix;
+					archive >> retargets[i].srcRelativeParentMatrix;
 				}
 			}
 
@@ -1024,6 +1572,10 @@ namespace wi::scene
 				archive << (uint32_t&)channels[i].path;
 				SerializeEntity(archive, channels[i].target, seri);
 				archive << channels[i].samplerIndex;
+				if (seri.GetVersion() >= 1)
+				{
+					archive << channels[i].retargetIndex;
+				}
 			}
 
 			archive << samplers.size();
@@ -1033,6 +1585,24 @@ namespace wi::scene
 				archive << samplers[i].mode;
 				SerializeEntity(archive, samplers[i].data, seri);
 			}
+
+			if (seri.GetVersion() >= 1)
+			{
+				archive << retargets.size();
+				for (size_t i = 0; i < retargets.size(); ++i)
+				{
+					SerializeEntity(archive, retargets[i].source, seri);
+					archive << retargets[i].dstRelativeMatrix;
+					archive << retargets[i].srcRelativeParentMatrix;
+				}
+			}
+		}
+
+
+		if (seri.GetVersion() >= 2)
+		{
+			// Root Bone Name
+			SerializeEntity(archive, rootMotionBone, seri);
 		}
 	}
 	void AnimationDataComponent::Serialize(wi::Archive& archive, EntitySerializer& seri)
@@ -1063,7 +1633,11 @@ namespace wi::scene
 			archive >> zenith;
 			archive >> ambient;
 			archive >> fogStart;
-			archive >> fogEnd;
+			archive >> fogDensity;
+			if (seri.GetVersion() < 3)
+			{
+				fogDensity = (1.0f / fogDensity);
+			}
 			if (archive.GetVersion() < 86)
 			{
 				float fogHeightSky;
@@ -1109,7 +1683,7 @@ namespace wi::scene
 				if (!skyMapName.empty())
 				{
 					skyMapName = dir + skyMapName;
-					skyMap = wi::resourcemanager::Load(skyMapName, wi::resourcemanager::Flags::IMPORT_RETAIN_FILEDATA);
+					skyMap = wi::resourcemanager::Load(skyMapName);
 				}
 			}
 			if (archive.GetVersion() >= 40)
@@ -1122,7 +1696,7 @@ namespace wi::scene
 				if (!colorGradingMapName.empty())
 				{
 					colorGradingMapName = dir + colorGradingMapName;
-					colorGradingMap = wi::resourcemanager::Load(colorGradingMapName, wi::resourcemanager::Flags::IMPORT_COLORGRADINGLUT | wi::resourcemanager::Flags::IMPORT_RETAIN_FILEDATA);
+					colorGradingMap = wi::resourcemanager::Load(colorGradingMapName, wi::resourcemanager::Flags::IMPORT_COLORGRADINGLUT);
 				}
 			}
 
@@ -1150,28 +1724,28 @@ namespace wi::scene
 
 			if (archive.GetVersion() >= 70)
 			{
-				archive >> volumetricCloudParameters.Albedo;
-				archive >> volumetricCloudParameters.CloudAmbientGroundMultiplier;
-				archive >> volumetricCloudParameters.ExtinctionCoefficient;
-				archive >> volumetricCloudParameters.BeerPowder;
-				archive >> volumetricCloudParameters.BeerPowderPower;
-				archive >> volumetricCloudParameters.PhaseG;
-				archive >> volumetricCloudParameters.PhaseG2;
-				archive >> volumetricCloudParameters.PhaseBlend;
-				archive >> volumetricCloudParameters.MultiScatteringScattering;
-				archive >> volumetricCloudParameters.MultiScatteringExtinction;
-				archive >> volumetricCloudParameters.MultiScatteringEccentricity;
-				archive >> volumetricCloudParameters.ShadowStepLength;
-				archive >> volumetricCloudParameters.HorizonBlendAmount;
-				archive >> volumetricCloudParameters.HorizonBlendPower;
-				archive >> volumetricCloudParameters.WeatherDensityAmount;
-				archive >> volumetricCloudParameters.CloudStartHeight;
-				archive >> volumetricCloudParameters.CloudThickness;
-				archive >> volumetricCloudParameters.SkewAlongWindDirection;
-				archive >> volumetricCloudParameters.TotalNoiseScale;
-				archive >> volumetricCloudParameters.DetailScale;
-				archive >> volumetricCloudParameters.WeatherScale;
-				archive >> volumetricCloudParameters.CurlScale;
+				archive >> volumetricCloudParameters.layerFirst.albedo;
+				archive >> volumetricCloudParameters.ambientGroundMultiplier;
+				archive >> volumetricCloudParameters.layerFirst.extinctionCoefficient;
+				archive >> volumetricCloudParameters.beerPowder;
+				archive >> volumetricCloudParameters.beerPowderPower;
+				archive >> volumetricCloudParameters.phaseG;
+				archive >> volumetricCloudParameters.phaseG2;
+				archive >> volumetricCloudParameters.phaseBlend;
+				archive >> volumetricCloudParameters.multiScatteringScattering;
+				archive >> volumetricCloudParameters.multiScatteringExtinction;
+				archive >> volumetricCloudParameters.multiScatteringEccentricity;
+				archive >> volumetricCloudParameters.shadowStepLength;
+				archive >> volumetricCloudParameters.horizonBlendAmount;
+				archive >> volumetricCloudParameters.horizonBlendPower;
+				archive >> volumetricCloudParameters.layerFirst.rainAmount;
+				archive >> volumetricCloudParameters.cloudStartHeight;
+				archive >> volumetricCloudParameters.cloudThickness;
+				archive >> volumetricCloudParameters.layerFirst.skewAlongWindDirection;
+				archive >> volumetricCloudParameters.layerFirst.totalNoiseScale;
+				archive >> volumetricCloudParameters.layerFirst.detailScale;
+				archive >> volumetricCloudParameters.layerFirst.weatherScale;
+				archive >> volumetricCloudParameters.layerFirst.curlScale;
 				if (archive.GetVersion() < 86)
 				{
 					float ShapeNoiseHeightGradientAmount;
@@ -1183,42 +1757,47 @@ namespace wi::scene
 					archive >> ShapeNoiseMinMax;
 					archive >> ShapeNoisePower;
 				}
-				archive >> volumetricCloudParameters.DetailNoiseModifier;
-				archive >> volumetricCloudParameters.DetailNoiseHeightFraction;
-				archive >> volumetricCloudParameters.CurlNoiseModifier;
-				archive >> volumetricCloudParameters.CoverageAmount;
-				archive >> volumetricCloudParameters.CoverageMinimum;
-				archive >> volumetricCloudParameters.TypeAmount;
-				archive >> volumetricCloudParameters.TypeMinimum;
-				archive >> volumetricCloudParameters.AnvilAmount;
-				archive >> volumetricCloudParameters.AnvilOverhangHeight;
-				archive >> volumetricCloudParameters.AnimationMultiplier;
-				archive >> volumetricCloudParameters.WindSpeed;
-				archive >> volumetricCloudParameters.WindAngle;
-				archive >> volumetricCloudParameters.WindUpAmount;
-				archive >> volumetricCloudParameters.CoverageWindSpeed;
-				archive >> volumetricCloudParameters.CoverageWindAngle;
-				archive >> volumetricCloudParameters.CloudGradientSmall;
-				archive >> volumetricCloudParameters.CloudGradientMedium;
-				archive >> volumetricCloudParameters.CloudGradientLarge;
-				archive >> volumetricCloudParameters.MaxStepCount;
-				archive >> volumetricCloudParameters.MaxMarchingDistance;
-				archive >> volumetricCloudParameters.InverseDistanceStepCount;
-				archive >> volumetricCloudParameters.RenderDistance;
+				archive >> volumetricCloudParameters.layerFirst.detailNoiseModifier;
+				archive >> volumetricCloudParameters.layerFirst.detailNoiseHeightFraction;
+				archive >> volumetricCloudParameters.layerFirst.curlNoiseModifier;
+				archive >> volumetricCloudParameters.layerFirst.coverageAmount;
+				archive >> volumetricCloudParameters.layerFirst.coverageMinimum;
+				archive >> volumetricCloudParameters.layerFirst.typeAmount;
+				archive >> volumetricCloudParameters.layerFirst.typeMinimum;
+				if (archive.GetVersion() < 88)
+				{
+					float AnvilAmount;
+					float AnvilOverhangHeight;
+					archive >> AnvilAmount;
+					archive >> AnvilOverhangHeight;
+				}
+				archive >> volumetricCloudParameters.animationMultiplier;
+				archive >> volumetricCloudParameters.layerFirst.windSpeed;
+				archive >> volumetricCloudParameters.layerFirst.windAngle;
+				archive >> volumetricCloudParameters.layerFirst.windUpAmount;
+				archive >> volumetricCloudParameters.layerFirst.coverageWindSpeed;
+				archive >> volumetricCloudParameters.layerFirst.coverageWindAngle;
+				archive >> volumetricCloudParameters.layerFirst.gradientSmall;
+				archive >> volumetricCloudParameters.layerFirst.gradientMedium;
+				archive >> volumetricCloudParameters.layerFirst.gradientLarge;
+				archive >> volumetricCloudParameters.maxStepCount;
+				archive >> volumetricCloudParameters.maxMarchingDistance;
+				archive >> volumetricCloudParameters.inverseDistanceStepCount;
+				archive >> volumetricCloudParameters.renderDistance;
 				archive >> volumetricCloudParameters.LODDistance;
 				archive >> volumetricCloudParameters.LODMin;
-				archive >> volumetricCloudParameters.BigStepMarch;
-				archive >> volumetricCloudParameters.TransmittanceThreshold;
-				archive >> volumetricCloudParameters.ShadowSampleCount;
-				archive >> volumetricCloudParameters.GroundContributionSampleCount;
+				archive >> volumetricCloudParameters.bigStepMarch;
+				archive >> volumetricCloudParameters.transmittanceThreshold;
+				archive >> volumetricCloudParameters.shadowSampleCount;
+				archive >> volumetricCloudParameters.groundContributionSampleCount;
 
 				if (archive.GetVersion() < 86)
 				{
-					volumetricCloudParameters.HorizonBlendAmount *= 0.00001f;
-					volumetricCloudParameters.TotalNoiseScale *= 0.0004f;
-					volumetricCloudParameters.WeatherScale *= 0.0004f;
-					volumetricCloudParameters.CoverageAmount /= 2.0f;
-					volumetricCloudParameters.CoverageMinimum = std::max(0.0f, volumetricCloudParameters.CoverageMinimum - 1.0f);
+					volumetricCloudParameters.horizonBlendAmount *= 0.00001f;
+					volumetricCloudParameters.layerFirst.totalNoiseScale *= 0.0004f;
+					volumetricCloudParameters.layerFirst.weatherScale *= 0.0004f;
+					volumetricCloudParameters.layerFirst.coverageAmount /= 2.0f;
+					volumetricCloudParameters.layerFirst.coverageMinimum = std::max(0.0f, volumetricCloudParameters.layerFirst.coverageMinimum - 1.0f);
 				}
 			}
 
@@ -1245,21 +1824,97 @@ namespace wi::scene
 
 			if (archive.GetVersion() >= 86)
 			{
-				archive >> volumetricCloudsWeatherMapName;
-				if (!volumetricCloudsWeatherMapName.empty())
+				archive >> volumetricCloudsWeatherMapFirstName;
+				if (!volumetricCloudsWeatherMapFirstName.empty())
 				{
-					volumetricCloudsWeatherMapName = dir + volumetricCloudsWeatherMapName;
-					volumetricCloudsWeatherMap = wi::resourcemanager::Load(volumetricCloudsWeatherMapName, wi::resourcemanager::Flags::IMPORT_RETAIN_FILEDATA);
+					volumetricCloudsWeatherMapFirstName = dir + volumetricCloudsWeatherMapFirstName;
+					volumetricCloudsWeatherMapFirst = wi::resourcemanager::Load(volumetricCloudsWeatherMapFirstName);
 				}
+			}
+
+			if (archive.GetVersion() >= 88)
+			{
+				archive >> volumetricCloudsWeatherMapSecondName;
+				if (!volumetricCloudsWeatherMapSecondName.empty())
+				{
+					volumetricCloudsWeatherMapSecondName = dir + volumetricCloudsWeatherMapSecondName;
+					volumetricCloudsWeatherMapSecond = wi::resourcemanager::Load(volumetricCloudsWeatherMapSecondName);
+				}
+
+				archive >> volumetricCloudParameters.layerFirst.curlNoiseHeightFraction;
+				archive >> volumetricCloudParameters.layerFirst.skewAlongCoverageWindDirection;
+				archive >> volumetricCloudParameters.layerFirst.rainMinimum;
+				archive >> volumetricCloudParameters.layerFirst.anvilDeformationSmall;
+				archive >> volumetricCloudParameters.layerFirst.anvilDeformationMedium;
+				archive >> volumetricCloudParameters.layerFirst.anvilDeformationLarge;
+
+				archive >> volumetricCloudParameters.layerSecond.albedo;
+				archive >> volumetricCloudParameters.layerSecond.extinctionCoefficient;
+				archive >> volumetricCloudParameters.layerSecond.skewAlongWindDirection;
+				archive >> volumetricCloudParameters.layerSecond.totalNoiseScale;
+				archive >> volumetricCloudParameters.layerSecond.curlScale;
+				archive >> volumetricCloudParameters.layerSecond.curlNoiseHeightFraction;
+				archive >> volumetricCloudParameters.layerSecond.curlNoiseModifier;
+				archive >> volumetricCloudParameters.layerSecond.detailScale;
+				archive >> volumetricCloudParameters.layerSecond.detailNoiseHeightFraction;
+				archive >> volumetricCloudParameters.layerSecond.detailNoiseModifier;
+				archive >> volumetricCloudParameters.layerSecond.skewAlongCoverageWindDirection;
+				archive >> volumetricCloudParameters.layerSecond.weatherScale;
+				archive >> volumetricCloudParameters.layerSecond.coverageAmount;
+				archive >> volumetricCloudParameters.layerSecond.coverageMinimum;
+				archive >> volumetricCloudParameters.layerSecond.typeAmount;
+				archive >> volumetricCloudParameters.layerSecond.typeMinimum;
+				archive >> volumetricCloudParameters.layerSecond.rainAmount;
+				archive >> volumetricCloudParameters.layerSecond.rainMinimum;
+				archive >> volumetricCloudParameters.layerSecond.gradientSmall;
+				archive >> volumetricCloudParameters.layerSecond.gradientMedium;
+				archive >> volumetricCloudParameters.layerSecond.gradientLarge;
+				archive >> volumetricCloudParameters.layerSecond.anvilDeformationSmall;
+				archive >> volumetricCloudParameters.layerSecond.anvilDeformationMedium;
+				archive >> volumetricCloudParameters.layerSecond.anvilDeformationLarge;
+				archive >> volumetricCloudParameters.layerSecond.windSpeed;
+				archive >> volumetricCloudParameters.layerSecond.windAngle;
+				archive >> volumetricCloudParameters.layerSecond.windUpAmount;
+				archive >> volumetricCloudParameters.layerSecond.coverageWindSpeed;
+				archive >> volumetricCloudParameters.layerSecond.coverageWindAngle;
 			}
 
 			if (seri.GetVersion() >= 1)
 			{
 				archive >> gravity;
 			}
+
+			if (seri.GetVersion() >= 2)
+			{
+				archive >> atmosphereParameters.rayMarchMinMaxSPP;
+				archive >> atmosphereParameters.distanceSPPMaxInv;
+				archive >> atmosphereParameters.aerialPerspectiveScale;
+			}
+			if (seri.GetVersion() >= 4)
+			{
+				archive >> sky_rotation;
+			}
+			if (seri.GetVersion() >= 5)
+			{
+				archive >> rain_amount;
+				archive >> rain_length;
+				archive >> rain_speed;
+				archive >> rain_scale;
+				archive >> rain_splash_scale;
+				archive >> rain_color;
+			}
+			if (seri.GetVersion() >= 6)
+			{
+				archive >> oceanParameters.extinctionColor;
+			}
 		}
 		else
 		{
+			seri.RegisterResource(skyMapName);
+			seri.RegisterResource(colorGradingMapName);
+			seri.RegisterResource(volumetricCloudsWeatherMapFirstName);
+			seri.RegisterResource(volumetricCloudsWeatherMapSecondName);
+
 			archive << _flags;
 			archive << sunDirection;
 			archive << sunColor;
@@ -1267,7 +1922,7 @@ namespace wi::scene
 			archive << zenith;
 			archive << ambient;
 			archive << fogStart;
-			archive << fogEnd;
+			archive << fogDensity;
 			archive << windDirection;
 			archive << windRandomness;
 			archive << windWaveSize;
@@ -1285,13 +1940,9 @@ namespace wi::scene
 			archive << oceanParameters.surfaceDetail;
 			archive << oceanParameters.surfaceDisplacementTolerance;
 
-			wi::helper::MakePathRelative(dir, skyMapName);
-			wi::helper::MakePathRelative(dir, colorGradingMapName);
-			wi::helper::MakePathRelative(dir, volumetricCloudsWeatherMapName);
-
 			if (archive.GetVersion() >= 32)
 			{
-				archive << skyMapName;
+				archive << wi::helper::GetPathRelative(dir, skyMapName);
 			}
 			if (archive.GetVersion() >= 40)
 			{
@@ -1299,7 +1950,7 @@ namespace wi::scene
 			}
 			if (archive.GetVersion() >= 62)
 			{
-				archive << colorGradingMapName;
+				archive << wi::helper::GetPathRelative(dir, colorGradingMapName);
 			}
 
 			if (archive.GetVersion() >= 66)
@@ -1326,67 +1977,72 @@ namespace wi::scene
 
 			if (archive.GetVersion() >= 70)
 			{
-				archive << volumetricCloudParameters.Albedo;
-				archive << volumetricCloudParameters.CloudAmbientGroundMultiplier;
-				archive << volumetricCloudParameters.ExtinctionCoefficient;
-				archive << volumetricCloudParameters.BeerPowder;
-				archive << volumetricCloudParameters.BeerPowderPower;
-				archive << volumetricCloudParameters.PhaseG;
-				archive << volumetricCloudParameters.PhaseG2;
-				archive << volumetricCloudParameters.PhaseBlend;
-				archive << volumetricCloudParameters.MultiScatteringScattering;
-				archive << volumetricCloudParameters.MultiScatteringExtinction;
-				archive << volumetricCloudParameters.MultiScatteringEccentricity;
-				archive << volumetricCloudParameters.ShadowStepLength;
-				archive << volumetricCloudParameters.HorizonBlendAmount;
-				archive << volumetricCloudParameters.HorizonBlendPower;
-				archive << volumetricCloudParameters.WeatherDensityAmount;
-				archive << volumetricCloudParameters.CloudStartHeight;
-				archive << volumetricCloudParameters.CloudThickness;
-				archive << volumetricCloudParameters.SkewAlongWindDirection;
-				archive << volumetricCloudParameters.TotalNoiseScale;
-				archive << volumetricCloudParameters.DetailScale;
-				archive << volumetricCloudParameters.WeatherScale;
-				archive << volumetricCloudParameters.CurlScale;
+				archive << volumetricCloudParameters.layerFirst.albedo;
+				archive << volumetricCloudParameters.ambientGroundMultiplier;
+				archive << volumetricCloudParameters.layerFirst.extinctionCoefficient;
+				archive << volumetricCloudParameters.beerPowder;
+				archive << volumetricCloudParameters.beerPowderPower;
+				archive << volumetricCloudParameters.phaseG;
+				archive << volumetricCloudParameters.phaseG2;
+				archive << volumetricCloudParameters.phaseBlend;
+				archive << volumetricCloudParameters.multiScatteringScattering;
+				archive << volumetricCloudParameters.multiScatteringExtinction;
+				archive << volumetricCloudParameters.multiScatteringEccentricity;
+				archive << volumetricCloudParameters.shadowStepLength;
+				archive << volumetricCloudParameters.horizonBlendAmount;
+				archive << volumetricCloudParameters.horizonBlendPower;
+				archive << volumetricCloudParameters.layerFirst.rainAmount;
+				archive << volumetricCloudParameters.cloudStartHeight;
+				archive << volumetricCloudParameters.cloudThickness;
+				archive << volumetricCloudParameters.layerFirst.skewAlongWindDirection;
+				archive << volumetricCloudParameters.layerFirst.totalNoiseScale;
+				archive << volumetricCloudParameters.layerFirst.detailScale;
+				archive << volumetricCloudParameters.layerFirst.weatherScale;
+				archive << volumetricCloudParameters.layerFirst.curlScale;
 				if (archive.GetVersion() < 86)
 				{
-					float ShapeNoiseHeightGradientAmount = 0;
-					float ShapeNoiseMultiplier = 0;
-					XMFLOAT2 ShapeNoiseMinMax = XMFLOAT2(0, 0);
-					float ShapeNoisePower = 0;
+					float ShapeNoiseHeightGradientAmount = 0.0f;
+					float ShapeNoiseMultiplier = 0.0f;
+					XMFLOAT2 ShapeNoiseMinMax = XMFLOAT2(0.0f, 0.0f);
+					float ShapeNoisePower = 0.0f;
 					archive << ShapeNoiseHeightGradientAmount;
 					archive << ShapeNoiseMultiplier;
 					archive << ShapeNoiseMinMax;
 					archive << ShapeNoisePower;
 				}
-				archive << volumetricCloudParameters.DetailNoiseModifier;
-				archive << volumetricCloudParameters.DetailNoiseHeightFraction;
-				archive << volumetricCloudParameters.CurlNoiseModifier;
-				archive << volumetricCloudParameters.CoverageAmount;
-				archive << volumetricCloudParameters.CoverageMinimum;
-				archive << volumetricCloudParameters.TypeAmount;
-				archive << volumetricCloudParameters.TypeMinimum;
-				archive << volumetricCloudParameters.AnvilAmount;
-				archive << volumetricCloudParameters.AnvilOverhangHeight;
-				archive << volumetricCloudParameters.AnimationMultiplier;
-				archive << volumetricCloudParameters.WindSpeed;
-				archive << volumetricCloudParameters.WindAngle;
-				archive << volumetricCloudParameters.WindUpAmount;
-				archive << volumetricCloudParameters.CoverageWindSpeed;
-				archive << volumetricCloudParameters.CoverageWindAngle;
-				archive << volumetricCloudParameters.CloudGradientSmall;
-				archive << volumetricCloudParameters.CloudGradientMedium;
-				archive << volumetricCloudParameters.CloudGradientLarge;
-				archive << volumetricCloudParameters.MaxStepCount;
-				archive << volumetricCloudParameters.MaxMarchingDistance;
-				archive << volumetricCloudParameters.InverseDistanceStepCount;
-				archive << volumetricCloudParameters.RenderDistance;
+				archive << volumetricCloudParameters.layerFirst.detailNoiseModifier;
+				archive << volumetricCloudParameters.layerFirst.detailNoiseHeightFraction;
+				archive << volumetricCloudParameters.layerFirst.curlNoiseModifier;
+				archive << volumetricCloudParameters.layerFirst.coverageAmount;
+				archive << volumetricCloudParameters.layerFirst.coverageMinimum;
+				archive << volumetricCloudParameters.layerFirst.typeAmount;
+				archive << volumetricCloudParameters.layerFirst.typeMinimum;
+				if (archive.GetVersion() < 88)
+				{
+					float AnvilAmount = 0.0f;
+					float AnvilOverhangHeight = 0.0f;
+					archive << AnvilAmount;
+					archive << AnvilOverhangHeight;
+				}
+				archive << volumetricCloudParameters.animationMultiplier;
+				archive << volumetricCloudParameters.layerFirst.windSpeed;
+				archive << volumetricCloudParameters.layerFirst.windAngle;
+				archive << volumetricCloudParameters.layerFirst.windUpAmount;
+				archive << volumetricCloudParameters.layerFirst.coverageWindSpeed;
+				archive << volumetricCloudParameters.layerFirst.coverageWindAngle;
+				archive << volumetricCloudParameters.layerFirst.gradientSmall;
+				archive << volumetricCloudParameters.layerFirst.gradientMedium;
+				archive << volumetricCloudParameters.layerFirst.gradientLarge;
+				archive << volumetricCloudParameters.maxStepCount;
+				archive << volumetricCloudParameters.maxMarchingDistance;
+				archive << volumetricCloudParameters.inverseDistanceStepCount;
+				archive << volumetricCloudParameters.renderDistance;
 				archive << volumetricCloudParameters.LODDistance;
 				archive << volumetricCloudParameters.LODMin;
-				archive << volumetricCloudParameters.BigStepMarch;
-				archive << volumetricCloudParameters.TransmittanceThreshold;
-				archive << volumetricCloudParameters.ShadowSampleCount;
-				archive << volumetricCloudParameters.GroundContributionSampleCount;
+				archive << volumetricCloudParameters.bigStepMarch;
+				archive << volumetricCloudParameters.transmittanceThreshold;
+				archive << volumetricCloudParameters.shadowSampleCount;
+				archive << volumetricCloudParameters.groundContributionSampleCount;
 			}
 
 			if (archive.GetVersion() >= 71)
@@ -1402,12 +2058,78 @@ namespace wi::scene
 
 			if (archive.GetVersion() >= 86)
 			{
-				archive << volumetricCloudsWeatherMapName;
+				archive << wi::helper::GetPathRelative(dir, volumetricCloudsWeatherMapFirstName);
+			}
+
+			if (archive.GetVersion() >= 88)
+			{
+				archive << wi::helper::GetPathRelative(dir, volumetricCloudsWeatherMapSecondName);
+
+				archive << volumetricCloudParameters.layerFirst.curlNoiseHeightFraction;
+				archive << volumetricCloudParameters.layerFirst.skewAlongCoverageWindDirection;
+				archive << volumetricCloudParameters.layerFirst.rainMinimum;
+				archive << volumetricCloudParameters.layerFirst.anvilDeformationSmall;
+				archive << volumetricCloudParameters.layerFirst.anvilDeformationMedium;
+				archive << volumetricCloudParameters.layerFirst.anvilDeformationLarge;
+
+				archive << volumetricCloudParameters.layerSecond.albedo;
+				archive << volumetricCloudParameters.layerSecond.extinctionCoefficient;
+				archive << volumetricCloudParameters.layerSecond.skewAlongWindDirection;
+				archive << volumetricCloudParameters.layerSecond.totalNoiseScale;
+				archive << volumetricCloudParameters.layerSecond.curlScale;
+				archive << volumetricCloudParameters.layerSecond.curlNoiseHeightFraction;
+				archive << volumetricCloudParameters.layerSecond.curlNoiseModifier;
+				archive << volumetricCloudParameters.layerSecond.detailScale;
+				archive << volumetricCloudParameters.layerSecond.detailNoiseHeightFraction;
+				archive << volumetricCloudParameters.layerSecond.detailNoiseModifier;
+				archive << volumetricCloudParameters.layerSecond.skewAlongCoverageWindDirection;
+				archive << volumetricCloudParameters.layerSecond.weatherScale;
+				archive << volumetricCloudParameters.layerSecond.coverageAmount;
+				archive << volumetricCloudParameters.layerSecond.coverageMinimum;
+				archive << volumetricCloudParameters.layerSecond.typeAmount;
+				archive << volumetricCloudParameters.layerSecond.typeMinimum;
+				archive << volumetricCloudParameters.layerSecond.rainAmount;
+				archive << volumetricCloudParameters.layerSecond.rainMinimum;
+				archive << volumetricCloudParameters.layerSecond.gradientSmall;
+				archive << volumetricCloudParameters.layerSecond.gradientMedium;
+				archive << volumetricCloudParameters.layerSecond.gradientLarge;
+				archive << volumetricCloudParameters.layerSecond.anvilDeformationSmall;
+				archive << volumetricCloudParameters.layerSecond.anvilDeformationMedium;
+				archive << volumetricCloudParameters.layerSecond.anvilDeformationLarge;
+				archive << volumetricCloudParameters.layerSecond.windSpeed;
+				archive << volumetricCloudParameters.layerSecond.windAngle;
+				archive << volumetricCloudParameters.layerSecond.windUpAmount;
+				archive << volumetricCloudParameters.layerSecond.coverageWindSpeed;
+				archive << volumetricCloudParameters.layerSecond.coverageWindAngle;
 			}
 
 			if (seri.GetVersion() >= 1)
 			{
 				archive << gravity;
+			}
+
+			if (seri.GetVersion() >= 2)
+			{
+				archive << atmosphereParameters.rayMarchMinMaxSPP;
+				archive << atmosphereParameters.distanceSPPMaxInv;
+				archive << atmosphereParameters.aerialPerspectiveScale;
+			}
+			if (seri.GetVersion() >= 4)
+			{
+				archive << sky_rotation;
+			}
+			if (seri.GetVersion() >= 5)
+			{
+				archive << rain_amount;
+				archive << rain_length;
+				archive << rain_speed;
+				archive << rain_scale;
+				archive << rain_splash_scale;
+				archive << rain_color;
+			}
+			if (seri.GetVersion() >= 6)
+			{
+				archive << oceanParameters.extinctionColor;
 			}
 		}
 	}
@@ -1422,23 +2144,90 @@ namespace wi::scene
 			archive >> volume;
 			archive >> (uint32_t&)soundinstance.type;
 
+			if (seri.GetVersion() >= 1)
+			{
+				archive >> soundinstance.begin;
+				archive >> soundinstance.length;
+				archive >> soundinstance.loop_begin;
+				archive >> soundinstance.loop_length;
+			}
+
 			wi::jobsystem::Execute(seri.ctx, [&](wi::jobsystem::JobArgs args) {
 				if (!filename.empty())
 				{
 					filename = dir + filename;
-					soundResource = wi::resourcemanager::Load(filename, wi::resourcemanager::Flags::IMPORT_RETAIN_FILEDATA);
-					wi::audio::CreateSoundInstance(&soundResource.GetSound(), &soundinstance);
+					soundResource = wi::resourcemanager::Load(filename);
+					// Note: sound instance can't be created yet, as soundResource is not necessarily ready at this point
+					//	Consider when multiple threads are loading the same sound, one thread will be loading the data,
+					//	the others return early with the resource that will be containing the data once it has been loaded.
 				}
 			});
 		}
 		else
 		{
-			wi::helper::MakePathRelative(dir, filename);
+			seri.RegisterResource(filename);
 
 			archive << _flags;
-			archive << filename;
+			archive << wi::helper::GetPathRelative(dir, filename);
 			archive << volume;
 			archive << soundinstance.type;
+
+			if (seri.GetVersion() >= 1)
+			{
+				archive << soundinstance.begin;
+				archive << soundinstance.length;
+				archive << soundinstance.loop_begin;
+				archive << soundinstance.loop_length;
+			}
+		}
+	}
+	void VideoComponent::Serialize(wi::Archive& archive, EntitySerializer& seri)
+	{
+		const std::string& dir = archive.GetSourceDirectory();
+
+		if (archive.IsReadMode())
+		{
+			archive >> _flags;
+			archive >> filename;
+
+			if (seri.GetVersion() >= 1)
+			{
+				archive >> currentTimer;
+			}
+
+			if (seri.GetVersion() >= 2)
+			{
+				archive >> volume;
+			}
+
+			wi::jobsystem::Execute(seri.ctx, [&](wi::jobsystem::JobArgs args) {
+				if (!filename.empty())
+				{
+					filename = dir + filename;
+					videoResource = wi::resourcemanager::Load(filename);
+					// Note: video instance can't be created yet, as videoResource is not necessarily ready at this point
+					//	Consider when multiple threads are loading the same sound, one thread will be loading the data,
+					//	the others return early with the resource that will be containing the data once it has been loaded.
+				}
+			});
+		}
+		else
+		{
+			seri.RegisterResource(filename);
+
+			archive << _flags;
+			archive << wi::helper::GetPathRelative(dir, filename);
+
+			if (seri.GetVersion() >= 1)
+			{
+				archive << currentTimer;
+			}
+
+			if (seri.GetVersion() >= 2)
+			{
+				archive << volume;
+			}
+
 		}
 	}
 	void InverseKinematicsComponent::Serialize(wi::Archive& archive, EntitySerializer& seri)
@@ -1543,14 +2332,10 @@ namespace wi::scene
 		}
 		else
 		{
-			std::string relative_filename = filename; // don't modify actual filename, because script_file() and script_dir() can rely on it
-			if (!dir.empty())
-			{
-				wi::helper::MakePathRelative(dir, relative_filename);
-			}
+			seri.RegisterResource(filename);
 
 			archive << _flags;
-			archive << relative_filename;
+			archive << wi::helper::GetPathRelative(dir, filename);
 		}
 	}
 	void ExpressionComponent::Serialize(wi::Archive& archive, EntitySerializer& seri)
@@ -1575,6 +2360,12 @@ namespace wi::scene
 			{
 				Expression& expression = expressions[expression_index];
 				archive >> expression.name;
+				if (expression.preset == ExpressionComponent::Preset::Count && expression.name.compare("Surprised") == 0)
+				{
+					// Vroid was not exporting Suprised expression properly and it was not handled at import for some models:
+					expression.preset = ExpressionComponent::Preset::Surprised;
+					presets[size_t(ExpressionComponent::Preset::Surprised)] = int(expression_index);
+				}
 				archive >> expression.weight;
 
 				uint32_t value = 0;
@@ -1638,6 +2429,7 @@ namespace wi::scene
 	}
 	void HumanoidComponent::Serialize(wi::Archive& archive, EntitySerializer& seri)
 	{
+		XMFLOAT3 default_look_direction = XMFLOAT3(0, 0, 1);
 		if (archive.IsReadMode())
 		{
 			archive >> _flags;
@@ -1650,6 +2442,23 @@ namespace wi::scene
 			for (auto& entity : bones)
 			{
 				SerializeEntity(archive, entity, seri);
+			}
+
+			if (seri.GetVersion() >= 1)
+			{
+				archive >> ragdoll_fatness;
+				archive >> ragdoll_headsize;
+			}
+
+			if (seri.GetVersion() >= 2)
+			{
+				SerializeEntity(archive, lookAtEntity, seri);
+			}
+
+			if (seri.GetVersion() >= 3)
+			{
+				archive >> arm_spacing;
+				archive >> leg_spacing;
 			}
 		}
 		else
@@ -1664,6 +2473,196 @@ namespace wi::scene
 			for (auto& entity : bones)
 			{
 				SerializeEntity(archive, entity, seri);
+			}
+
+			if (seri.GetVersion() >= 1)
+			{
+				archive << ragdoll_fatness;
+				archive << ragdoll_headsize;
+			}
+
+			if (seri.GetVersion() >= 2)
+			{
+				SerializeEntity(archive, lookAtEntity, seri);
+			}
+
+			if (seri.GetVersion() >= 3)
+			{
+				archive << arm_spacing;
+				archive << leg_spacing;
+			}
+		}
+	}
+	void MetadataComponent::Serialize(wi::Archive& archive, EntitySerializer& seri)
+	{
+		if (archive.IsReadMode())
+		{
+			archive >> _flags;
+
+			int intpreset = 0;
+			archive >> intpreset;
+			preset = (Preset)intpreset;
+
+			size_t count = 0;
+
+			archive >> count;
+			bool_values.reserve(count);
+			for (size_t i = 0; i < count; ++i)
+			{
+				std::string name;
+				archive >> name;
+				bool value;
+				archive >> value;
+				bool_values.set(name, value);
+			}
+
+			archive >> count;
+			int_values.reserve(count);
+			for (size_t i = 0; i < count; ++i)
+			{
+				std::string name;
+				archive >> name;
+				int value;
+				archive >> value;
+				int_values.set(name, value);
+			}
+
+			archive >> count;
+			float_values.reserve(count);
+			for (size_t i = 0; i < count; ++i)
+			{
+				std::string name;
+				archive >> name;
+				float value;
+				archive >> value;
+				float_values.set(name, value);
+			}
+
+			archive >> count;
+			string_values.reserve(count);
+			for (size_t i = 0; i < count; ++i)
+			{
+				std::string name;
+				archive >> name;
+				std::string value;
+				archive >> value;
+				string_values.set(name, value);
+			}
+		}
+		else
+		{
+			archive << _flags;
+
+			archive << (int)preset;
+
+			archive << bool_values.lookup.size();
+			for (auto& x : bool_values.lookup)
+			{
+				archive << x.first;
+				archive << bool_values.get(x.first);
+			}
+
+			archive << int_values.lookup.size();
+			for (auto& x : int_values.lookup)
+			{
+				archive << x.first;
+				archive << int_values.get(x.first);
+			}
+
+			archive << float_values.lookup.size();
+			for (auto& x : float_values.lookup)
+			{
+				archive << x.first;
+				archive << float_values.get(x.first);
+			}
+
+			archive << string_values.lookup.size();
+			for (auto& x : string_values.lookup)
+			{
+				archive << x.first;
+				archive << string_values.get(x.first);
+			}
+		}
+	}
+	void CharacterComponent::Serialize(wi::Archive& archive, EntitySerializer& seri)
+	{
+		if (archive.IsReadMode())
+		{
+			archive >> _flags;
+
+			archive >> health;
+			archive >> width;
+			archive >> height;
+			archive >> scale;
+		}
+		else
+		{
+			archive << _flags;
+
+			archive << health;
+			archive << width;
+			archive << height;
+			archive << scale;
+		}
+	}
+	void SplineComponent::Serialize(wi::Archive& archive, EntitySerializer& seri)
+	{
+		if (archive.IsReadMode())
+		{
+			archive >> _flags;
+			archive >> width;
+			archive >> rotation;
+			archive >> mesh_generation_vertical_subdivision;
+			archive >> mesh_generation_subdivision;
+
+			size_t node_count = 0;
+			archive >> node_count;
+			spline_node_entities.resize(node_count);
+			for (size_t i = 0; i < node_count; ++i)
+			{
+				SerializeEntity(archive, spline_node_entities[i], seri);
+			}
+
+			if (seri.GetVersion() >= 1)
+			{
+				archive >> terrain_modifier_amount;
+			}
+			if (seri.GetVersion() >= 2)
+			{
+				archive >> terrain_pushdown;
+				archive >> terrain_texture_falloff;
+			}
+			if (seri.GetVersion() >= 4)
+			{
+				archive >> (uint32_t&)fill_normals_mode;
+			}
+		}
+		else
+		{
+			archive << _flags;
+			archive << width;
+			archive << rotation;
+			archive << mesh_generation_vertical_subdivision;
+			archive << mesh_generation_subdivision;
+
+			archive << spline_node_entities.size();
+			for (size_t i = 0; i < spline_node_entities.size(); ++i)
+			{
+				SerializeEntity(archive, spline_node_entities[i], seri);
+			}
+
+			if (seri.GetVersion() >= 1)
+			{
+				archive << terrain_modifier_amount;
+			}
+			if (seri.GetVersion() >= 2)
+			{
+				archive << terrain_pushdown;
+				archive << terrain_texture_falloff;
+			}
+			if (seri.GetVersion() >= 4)
+			{
+				archive << (uint32_t)fill_normals_mode;
 			}
 		}
 	}
@@ -1683,15 +2682,41 @@ namespace wi::scene
 			archive << reserved;
 		}
 
+		// Manage jump position to jump to resource serialization WRITE area:
+		size_t jump_before = 0;
+		size_t jump_after = 0;
+		size_t original_pos = 0;
+		if (archive.GetVersion() >= 90)
+		{
+			if (archive.IsReadMode())
+			{
+				archive >> jump_before;
+				archive >> jump_after;
+				original_pos = archive.GetPos();
+				archive.Jump(jump_before); // jump before resourcemanager::Serialize_WRITE
+			}
+			else
+			{
+				jump_before = archive.WriteUnknownJumpPosition();
+				jump_after = archive.WriteUnknownJumpPosition();
+			}
+		}
+
 		// Keeping this alive to keep serialized resources alive until entity serialization ends:
 		wi::resourcemanager::ResourceSerializer resource_seri;
-		if (archive.GetVersion() >= 63)
+		if (archive.IsReadMode() && archive.GetVersion() >= 63)
 		{
-			wi::resourcemanager::Serialize(archive, resource_seri);
+			wi::resourcemanager::Serialize_READ(archive, resource_seri);
+			if (archive.GetVersion() >= 90)
+			{
+				// After resource serialization, jump back to entity serialization area:
+				archive.Jump(original_pos);
+			}
 		}
 
 		// With this we will ensure that serialized entities are unique and persistent across the scene:
 		EntitySerializer seri;
+		seri.ctx.priority = wi::jobsystem::Priority::Low; // serialization tasks will be low priority to not block rendering if scene loading is asynchronous
 
 		if(archive.GetVersion() >= 84)
 		{
@@ -1777,7 +2802,44 @@ namespace wi::scene
 			ddgi.Serialize(archive);
 		}
 
-		wi::backlog::post("Scene serialize took " + std::to_string(timer.elapsed_seconds()) + " sec");
+#ifdef _DEBUG
+		FixupNans();
+#endif // _DEBUG
+
+		wi::jobsystem::Wait(seri.ctx); // This is needed before emitter material fixup that is below, because material CreateRenderDatas might be pending!
+
+		// Fixup old emittedparticle distortion basecolor slot -> normalmap slot
+		if (archive.GetVersion() < 89)
+		{
+			for (size_t i = 0; i < emitters.GetCount(); ++i)
+			{
+				if (emitters[i].shaderType != EmittedParticleSystem::PARTICLESHADERTYPE::SOFT_DISTORTION)
+					continue;
+				Entity entity = emitters.GetEntity(i);
+				MaterialComponent* material = materials.GetComponent(entity);
+				if (material != nullptr)
+				{
+					material->textures[NORMALMAP] = std::move(material->textures[BASECOLORMAP]);
+					material->CreateRenderData(true);
+				}
+			}
+		}
+
+		if (archive.GetVersion() >= 90)
+		{
+			if (archive.IsReadMode())
+			{
+				archive.Jump(jump_after); // jump after resourcemanager::Serialize_WRITE
+			}
+			else
+			{
+				archive.PatchUnknownJumpPosition(jump_before);
+				wi::resourcemanager::Serialize_WRITE(archive, seri.resource_registration);
+				archive.PatchUnknownJumpPosition(jump_after);
+			}
+		}
+
+		wilog("Scene::Serialize took %.2f seconds", timer.elapsed_seconds());
 	}
 
 	void Scene::DDGI::Serialize(wi::Archive& archive)
@@ -1801,21 +2863,18 @@ namespace wi::scene
 
 			// color texture:
 			archive >> data;
-			if(!data.empty())
+			if (!data.empty() && archive.GetVersion() >= 93)
 			{
+				const uint32_t probe_count = grid_dimensions.x * grid_dimensions.y * grid_dimensions.z;
 
-				TextureDesc desc;
-				desc.width = DDGI_COLOR_TEXELS * grid_dimensions.x * grid_dimensions.y;
-				desc.height = DDGI_COLOR_TEXELS * grid_dimensions.z;
-				desc.format = Format::R16G16B16A16_FLOAT;
-				desc.bind_flags = BindFlag::UNORDERED_ACCESS | BindFlag::SHADER_RESOURCE;
-
-				SubresourceData initdata;
-				initdata.data_ptr = data.data();
-				initdata.row_pitch = desc.width * GetFormatStride(desc.format);
-
-				device->CreateTexture(&desc, &initdata, &color_texture[0]);
-				device->SetName(&color_texture[0], "ddgi.color_texture[serialized]");
+				GPUBufferDesc buf;
+				buf.stride = sizeof(DDGIProbe);
+				buf.size = buf.stride * probe_count;
+				buf.bind_flags = BindFlag::SHADER_RESOURCE;
+				buf.misc_flags = ResourceMiscFlag::BUFFER_STRUCTURED;
+				buf.format = Format::UNKNOWN;
+				device->CreateBuffer(&buf, data.data(), &probe_buffer);
+				device->SetName(&probe_buffer, "ddgi.probe_buffer[serialized]");
 			}
 
 			// depth texture:
@@ -1826,27 +2885,27 @@ namespace wi::scene
 				desc.width = DDGI_DEPTH_TEXELS * grid_dimensions.x * grid_dimensions.y;
 				desc.height = DDGI_DEPTH_TEXELS * grid_dimensions.z;
 				desc.format = Format::R16G16_FLOAT;
-				desc.bind_flags = BindFlag::UNORDERED_ACCESS | BindFlag::SHADER_RESOURCE;
+				desc.bind_flags = BindFlag::SHADER_RESOURCE;
 
 				SubresourceData initdata;
 				initdata.data_ptr = data.data();
 				initdata.row_pitch = desc.width * GetFormatStride(desc.format);
 
-				device->CreateTexture(&desc, &initdata, &depth_texture[0]);
-				device->SetName(&depth_texture[0], "ddgi.depth_texture[seriaized]");
+				device->CreateTexture(&desc, &initdata, &depth_texture);
+				device->SetName(&depth_texture, "ddgi.depth_texture[serialized]");
 			}
 
-			// offset buffer:
-			archive >> data;
-			if(!data.empty())
+			if (archive.GetVersion() < 93)
 			{
-				GPUBufferDesc desc;
-				desc.stride = sizeof(DDGIProbeOffset);
-				desc.size = desc.stride * grid_dimensions.x * grid_dimensions.y * grid_dimensions.z;
-				desc.bind_flags = BindFlag::UNORDERED_ACCESS | BindFlag::SHADER_RESOURCE;
-				desc.misc_flags = ResourceMiscFlag::BUFFER_RAW;
-				device->CreateBuffer(&desc, data.data(), &offset_buffer);
-				device->SetName(&offset_buffer, "ddgi.offset_buffer[serialized]");
+				// offset texture:
+				archive >> data;
+
+				if (!data.empty())
+				{
+					wi::backlog::post("Found older DDGI data in the scene which is now incompatible. Please recompute the DDGI if you need it.", wi::backlog::LogLevel::Warning);
+					depth_texture = {};
+					probe_buffer = {};
+				}
 			}
 		}
 		else
@@ -1862,78 +2921,36 @@ namespace wi::scene
 			}
 
 			wi::vector<uint8_t> data;
-			if (color_texture[0].IsValid())
+
+			// Save probe buffer:
+			if (probe_buffer.IsValid())
 			{
-				bool success = wi::helper::saveTextureToMemory(color_texture[0], data);
-				assert(success);
+				wi::helper::saveBufferToMemory(probe_buffer, data);
 			}
 			archive << data;
 
 			data.clear();
-			if (depth_texture[0].IsValid())
+			if (depth_texture.IsValid())
 			{
-				bool success = wi::helper::saveTextureToMemory(depth_texture[0], data);
+				bool success = wi::helper::saveTextureToMemory(depth_texture, data);
 				assert(success);
 			}
 			archive << data;
-
-			// Download and serialize offset buffer:
-			if(offset_buffer.IsValid())
-			{
-				GPUBufferDesc desc = offset_buffer.desc;
-				desc.usage = wi::graphics::Usage::READBACK;
-				desc.bind_flags = {};
-				desc.misc_flags = {};
-				GPUBuffer staging;
-				bool success = device->CreateBuffer(&desc, nullptr, &staging);
-				assert(success);
-
-				CommandList cmd = device->BeginCommandList();
-
-				{
-					GPUBarrier barriers[] = {
-						GPUBarrier::Buffer(&offset_buffer,ResourceState::SHADER_RESOURCE,ResourceState::COPY_SRC),
-					};
-					device->Barrier(barriers, arraysize(barriers), cmd);
-				}
-
-				device->CopyResource(&staging, &offset_buffer, cmd);
-
-				{
-					GPUBarrier barriers[] = {
-						GPUBarrier::Buffer(&offset_buffer,ResourceState::COPY_SRC,ResourceState::SHADER_RESOURCE),
-					};
-					device->Barrier(barriers, arraysize(barriers), cmd);
-				}
-
-				device->SubmitCommandLists();
-				device->WaitForGPU();
-
-				// serialize like vector<uint8_t>:
-				archive << staging.mapped_size;
-				for (size_t i = 0; i < staging.mapped_size; ++i)
-				{
-					archive << ((uint8_t*)staging.mapped_data)[i];
-				}
-			}
-			else
-			{
-				archive << size_t(0);
-			}
 		}
 	}
 
-	Entity Scene::Entity_Serialize(
+	Entity Entity_Serialize_Internal(
+		Scene& scene,
 		wi::Archive& archive,
 		EntitySerializer& seri,
 		Entity entity,
-		EntitySerializeFlags flags
+		Scene::EntitySerializeFlags flags
 	)
 	{
 		SerializeEntity(archive, entity, seri);
 
 		bool restore_remap = seri.allow_remap;
-		if (has_flag(flags, EntitySerializeFlags::KEEP_INTERNAL_ENTITY_REFERENCES))
+		if (has_flag(flags, Scene::EntitySerializeFlags::KEEP_INTERNAL_ENTITY_REFERENCES))
 		{
 			seri.allow_remap = false;
 		}
@@ -1941,7 +2958,7 @@ namespace wi::scene
 		if (archive.GetVersion() >= 84)
 		{
 			// New entity serialization path with component library:
-			componentLibrary.Entity_Serialize(entity, archive, seri);
+			scene.componentLibrary.Entity_Serialize(entity, archive, seri);
 
 			if (archive.IsReadMode())
 			{
@@ -1950,7 +2967,7 @@ namespace wi::scene
 				//	The pointers must not be invalidated while serialization jobs are not finished
 				wi::jobsystem::Wait(seri.ctx);
 
-				if (archive.GetVersion() >= 72 && has_flag(flags, EntitySerializeFlags::RECURSIVE))
+				if (archive.GetVersion() >= 72 && has_flag(flags, Scene::EntitySerializeFlags::RECURSIVE))
 				{
 					// serialize children:
 					seri.allow_remap = restore_remap;
@@ -1958,10 +2975,10 @@ namespace wi::scene
 					archive >> childCount;
 					for (size_t i = 0; i < childCount; ++i)
 					{
-						Entity child = Entity_Serialize(archive, seri, INVALID_ENTITY, flags);
+						Entity child = Entity_Serialize_Internal(scene, archive, seri, INVALID_ENTITY, flags);
 						if (child != INVALID_ENTITY)
 						{
-							HierarchyComponent* hier = hierarchy.GetComponent(child);
+							HierarchyComponent* hier = scene.hierarchy.GetComponent(child);
 							if (hier != nullptr)
 							{
 								hier->parentID = entity;
@@ -1977,24 +2994,24 @@ namespace wi::scene
 				//	The pointers must not be invalidated while serialization jobs are not finished
 				wi::jobsystem::Wait(seri.ctx);
 
-				if (archive.GetVersion() >= 72 && has_flag(flags, EntitySerializeFlags::RECURSIVE))
+				if (archive.GetVersion() >= 72 && has_flag(flags, Scene::EntitySerializeFlags::RECURSIVE))
 				{
 					// Recursive serialization for all children:
 					seri.allow_remap = restore_remap;
 					wi::vector<Entity> children;
-					for (size_t i = 0; i < hierarchy.GetCount(); ++i)
+					for (size_t i = 0; i < scene.hierarchy.GetCount(); ++i)
 					{
-						const HierarchyComponent& hier = hierarchy[i];
+						const HierarchyComponent& hier = scene.hierarchy[i];
 						if (hier.parentID == entity)
 						{
-							Entity child = hierarchy.GetEntity(i);
+							Entity child = scene.hierarchy.GetEntity(i);
 							children.push_back(child);
 						}
 					}
 					archive << children.size();
 					for (Entity child : children)
 					{
-						Entity_Serialize(archive, seri, child, flags);
+						Entity_Serialize_Internal(scene, archive, seri, child, flags);
 					}
 				}
 			}
@@ -2011,7 +3028,7 @@ namespace wi::scene
 					archive >> component_exists;
 					if (component_exists)
 					{
-						auto& component = names.Create(entity);
+						auto& component = scene.names.Create(entity);
 						component.Serialize(archive, seri);
 					}
 				}
@@ -2020,7 +3037,7 @@ namespace wi::scene
 					archive >> component_exists;
 					if (component_exists)
 					{
-						auto& component = layers.Create(entity);
+						auto& component = scene.layers.Create(entity);
 						component.Serialize(archive, seri);
 					}
 				}
@@ -2029,7 +3046,7 @@ namespace wi::scene
 					archive >> component_exists;
 					if (component_exists)
 					{
-						auto& component = transforms.Create(entity);
+						auto& component = scene.transforms.Create(entity);
 						component.Serialize(archive, seri);
 					}
 				}
@@ -2049,7 +3066,7 @@ namespace wi::scene
 					archive >> component_exists;
 					if (component_exists)
 					{
-						auto& component = hierarchy.Create(entity);
+						auto& component = scene.hierarchy.Create(entity);
 						component.Serialize(archive, seri);
 					}
 				}
@@ -2058,7 +3075,7 @@ namespace wi::scene
 					archive >> component_exists;
 					if (component_exists)
 					{
-						auto& component = materials.Create(entity);
+						auto& component = scene.materials.Create(entity);
 						component.Serialize(archive, seri);
 					}
 				}
@@ -2067,7 +3084,7 @@ namespace wi::scene
 					archive >> component_exists;
 					if (component_exists)
 					{
-						auto& component = meshes.Create(entity);
+						auto& component = scene.meshes.Create(entity);
 						component.Serialize(archive, seri);
 					}
 				}
@@ -2076,7 +3093,7 @@ namespace wi::scene
 					archive >> component_exists;
 					if (component_exists)
 					{
-						auto& component = impostors.Create(entity);
+						auto& component = scene.impostors.Create(entity);
 						component.Serialize(archive, seri);
 					}
 				}
@@ -2085,52 +3102,7 @@ namespace wi::scene
 					archive >> component_exists;
 					if (component_exists)
 					{
-						auto& component = objects.Create(entity);
-						component.Serialize(archive, seri);
-					}
-				}
-				{
-					bool component_exists;
-					archive >> component_exists;
-					if (component_exists)
-					{
-						auto component = wi::primitive::AABB(); // no longer needed to be serialized
-						component.Serialize(archive, seri);
-					}
-				}
-				{
-					bool component_exists;
-					archive >> component_exists;
-					if (component_exists)
-					{
-						auto& component = rigidbodies.Create(entity);
-						component.Serialize(archive, seri);
-					}
-				}
-				{
-					bool component_exists;
-					archive >> component_exists;
-					if (component_exists)
-					{
-						auto& component = softbodies.Create(entity);
-						component.Serialize(archive, seri);
-					}
-				}
-				{
-					bool component_exists;
-					archive >> component_exists;
-					if (component_exists)
-					{
-						auto& component = armatures.Create(entity);
-						component.Serialize(archive, seri);
-					}
-				}
-				{
-					bool component_exists;
-					archive >> component_exists;
-					if (component_exists)
-					{
-						auto& component = lights.Create(entity);
+						auto& component = scene.objects.Create(entity);
 						component.Serialize(archive, seri);
 					}
 				}
@@ -2148,7 +3120,7 @@ namespace wi::scene
 					archive >> component_exists;
 					if (component_exists)
 					{
-						auto& component = cameras.Create(entity);
+						auto& component = scene.rigidbodies.Create(entity);
 						component.Serialize(archive, seri);
 					}
 				}
@@ -2157,7 +3129,7 @@ namespace wi::scene
 					archive >> component_exists;
 					if (component_exists)
 					{
-						auto& component = probes.Create(entity);
+						auto& component = scene.softbodies.Create(entity);
 						component.Serialize(archive, seri);
 					}
 				}
@@ -2166,7 +3138,7 @@ namespace wi::scene
 					archive >> component_exists;
 					if (component_exists)
 					{
-						auto component = wi::primitive::AABB(); // no longer needed to be serialized
+						auto& component = scene.armatures.Create(entity);
 						component.Serialize(archive, seri);
 					}
 				}
@@ -2175,16 +3147,7 @@ namespace wi::scene
 					archive >> component_exists;
 					if (component_exists)
 					{
-						auto& component = forces.Create(entity);
-						component.Serialize(archive, seri);
-					}
-				}
-				{
-					bool component_exists;
-					archive >> component_exists;
-					if (component_exists)
-					{
-						auto& component = decals.Create(entity);
+						auto& component = scene.lights.Create(entity);
 						component.Serialize(archive, seri);
 					}
 				}
@@ -2202,7 +3165,7 @@ namespace wi::scene
 					archive >> component_exists;
 					if (component_exists)
 					{
-						auto& component = animations.Create(entity);
+						auto& component = scene.cameras.Create(entity);
 						component.Serialize(archive, seri);
 					}
 				}
@@ -2211,7 +3174,7 @@ namespace wi::scene
 					archive >> component_exists;
 					if (component_exists)
 					{
-						auto& component = emitters.Create(entity);
+						auto& component = scene.probes.Create(entity);
 						component.Serialize(archive, seri);
 					}
 				}
@@ -2220,7 +3183,7 @@ namespace wi::scene
 					archive >> component_exists;
 					if (component_exists)
 					{
-						auto& component = hairs.Create(entity);
+						auto component = wi::primitive::AABB(); // no longer needed to be serialized
 						component.Serialize(archive, seri);
 					}
 				}
@@ -2229,7 +3192,61 @@ namespace wi::scene
 					archive >> component_exists;
 					if (component_exists)
 					{
-						auto& component = weathers.Create(entity);
+						auto& component = scene.forces.Create(entity);
+						component.Serialize(archive, seri);
+					}
+				}
+				{
+					bool component_exists;
+					archive >> component_exists;
+					if (component_exists)
+					{
+						auto& component = scene.decals.Create(entity);
+						component.Serialize(archive, seri);
+					}
+				}
+				{
+					bool component_exists;
+					archive >> component_exists;
+					if (component_exists)
+					{
+						auto component = wi::primitive::AABB(); // no longer needed to be serialized
+						component.Serialize(archive, seri);
+					}
+				}
+				{
+					bool component_exists;
+					archive >> component_exists;
+					if (component_exists)
+					{
+						auto& component = scene.animations.Create(entity);
+						component.Serialize(archive, seri);
+					}
+				}
+				{
+					bool component_exists;
+					archive >> component_exists;
+					if (component_exists)
+					{
+						auto& component = scene.emitters.Create(entity);
+						component.Serialize(archive, seri);
+					}
+				}
+				{
+					bool component_exists;
+					archive >> component_exists;
+					if (component_exists)
+					{
+						auto& component = scene.hairs.Create(entity);
+						component.Serialize(archive, seri);
+					}
+				}
+				{
+					bool component_exists;
+					archive >> component_exists;
+					if (component_exists)
+					{
+						auto& component = scene.weathers.Create(entity);
 						component.Serialize(archive, seri);
 					}
 				}
@@ -2239,7 +3256,7 @@ namespace wi::scene
 					archive >> component_exists;
 					if (component_exists)
 					{
-						auto& component = sounds.Create(entity);
+						auto& component = scene.sounds.Create(entity);
 						component.Serialize(archive, seri);
 					}
 				}
@@ -2249,7 +3266,7 @@ namespace wi::scene
 					archive >> component_exists;
 					if (component_exists)
 					{
-						auto& component = inverse_kinematics.Create(entity);
+						auto& component = scene.inverse_kinematics.Create(entity);
 						component.Serialize(archive, seri);
 					}
 				}
@@ -2259,7 +3276,7 @@ namespace wi::scene
 					archive >> component_exists;
 					if (component_exists)
 					{
-						auto& component = springs.Create(entity);
+						auto& component = scene.springs.Create(entity);
 						component.Serialize(archive, seri);
 					}
 				}
@@ -2269,7 +3286,7 @@ namespace wi::scene
 					archive >> component_exists;
 					if (component_exists)
 					{
-						auto& component = animation_datas.Create(entity);
+						auto& component = scene.animation_datas.Create(entity);
 						component.Serialize(archive, seri);
 					}
 				}
@@ -2279,7 +3296,7 @@ namespace wi::scene
 				//	The pointers must not be invalidated while serialization jobs are not finished
 				wi::jobsystem::Wait(seri.ctx);
 
-				if (archive.GetVersion() >= 72 && has_flag(flags, EntitySerializeFlags::RECURSIVE))
+				if (archive.GetVersion() >= 72 && has_flag(flags, Scene::EntitySerializeFlags::RECURSIVE))
 				{
 					// serialize children:
 					seri.allow_remap = restore_remap;
@@ -2287,10 +3304,10 @@ namespace wi::scene
 					archive >> childCount;
 					for (size_t i = 0; i < childCount; ++i)
 					{
-						Entity child = Entity_Serialize(archive, seri, INVALID_ENTITY, flags);
+						Entity child = Entity_Serialize_Internal(scene, archive, seri, INVALID_ENTITY, flags);
 						if (child != INVALID_ENTITY)
 						{
-							HierarchyComponent* hier = hierarchy.GetComponent(child);
+							HierarchyComponent* hier = scene.hierarchy.GetComponent(child);
 							if (hier != nullptr)
 							{
 								hier->parentID = entity;
@@ -2303,7 +3320,7 @@ namespace wi::scene
 			{
 				// Find existing components one-by-one and WRITE them out:
 				{
-					auto component = names.GetComponent(entity);
+					auto component = scene.names.GetComponent(entity);
 					if (component != nullptr)
 					{
 						archive << true;
@@ -2315,7 +3332,7 @@ namespace wi::scene
 					}
 				}
 				{
-					auto component = layers.GetComponent(entity);
+					auto component = scene.layers.GetComponent(entity);
 					if (component != nullptr)
 					{
 						archive << true;
@@ -2327,7 +3344,7 @@ namespace wi::scene
 					}
 				}
 				{
-					auto component = transforms.GetComponent(entity);
+					auto component = scene.transforms.GetComponent(entity);
 					if (component != nullptr)
 					{
 						archive << true;
@@ -2339,7 +3356,7 @@ namespace wi::scene
 					}
 				}
 				{
-					auto component = hierarchy.GetComponent(entity);
+					auto component = scene.hierarchy.GetComponent(entity);
 					if (component != nullptr)
 					{
 						archive << true;
@@ -2351,7 +3368,7 @@ namespace wi::scene
 					}
 				}
 				{
-					auto component = materials.GetComponent(entity);
+					auto component = scene.materials.GetComponent(entity);
 					if (component != nullptr)
 					{
 						archive << true;
@@ -2363,7 +3380,7 @@ namespace wi::scene
 					}
 				}
 				{
-					auto component = meshes.GetComponent(entity);
+					auto component = scene.meshes.GetComponent(entity);
 					if (component != nullptr)
 					{
 						archive << true;
@@ -2375,7 +3392,7 @@ namespace wi::scene
 					}
 				}
 				{
-					auto component = impostors.GetComponent(entity);
+					auto component = scene.impostors.GetComponent(entity);
 					if (component != nullptr)
 					{
 						archive << true;
@@ -2387,58 +3404,7 @@ namespace wi::scene
 					}
 				}
 				{
-					auto component = objects.GetComponent(entity);
-					if (component != nullptr)
-					{
-						archive << true;
-						component->Serialize(archive, seri);
-					}
-					else
-					{
-						archive << false;
-					}
-				}
-				{
-					archive << false; // aabb no longer needed to be serialized
-				}
-				{
-					auto component = rigidbodies.GetComponent(entity);
-					if (component != nullptr)
-					{
-						archive << true;
-						component->Serialize(archive, seri);
-					}
-					else
-					{
-						archive << false;
-					}
-				}
-				{
-					auto component = softbodies.GetComponent(entity);
-					if (component != nullptr)
-					{
-						archive << true;
-						component->Serialize(archive, seri);
-					}
-					else
-					{
-						archive << false;
-					}
-				}
-				{
-					auto component = armatures.GetComponent(entity);
-					if (component != nullptr)
-					{
-						archive << true;
-						component->Serialize(archive, seri);
-					}
-					else
-					{
-						archive << false;
-					}
-				}
-				{
-					auto component = lights.GetComponent(entity);
+					auto component = scene.objects.GetComponent(entity);
 					if (component != nullptr)
 					{
 						archive << true;
@@ -2453,7 +3419,7 @@ namespace wi::scene
 					archive << false; // aabb no longer needed to be serialized
 				}
 				{
-					auto component = cameras.GetComponent(entity);
+					auto component = scene.rigidbodies.GetComponent(entity);
 					if (component != nullptr)
 					{
 						archive << true;
@@ -2465,7 +3431,31 @@ namespace wi::scene
 					}
 				}
 				{
-					auto component = probes.GetComponent(entity);
+					auto component = scene.softbodies.GetComponent(entity);
+					if (component != nullptr)
+					{
+						archive << true;
+						component->Serialize(archive, seri);
+					}
+					else
+					{
+						archive << false;
+					}
+				}
+				{
+					auto component = scene.armatures.GetComponent(entity);
+					if (component != nullptr)
+					{
+						archive << true;
+						component->Serialize(archive, seri);
+					}
+					else
+					{
+						archive << false;
+					}
+				}
+				{
+					auto component = scene.lights.GetComponent(entity);
 					if (component != nullptr)
 					{
 						archive << true;
@@ -2480,7 +3470,7 @@ namespace wi::scene
 					archive << false; // aabb no longer needed to be serialized
 				}
 				{
-					auto component = forces.GetComponent(entity);
+					auto component = scene.cameras.GetComponent(entity);
 					if (component != nullptr)
 					{
 						archive << true;
@@ -2492,7 +3482,7 @@ namespace wi::scene
 					}
 				}
 				{
-					auto component = decals.GetComponent(entity);
+					auto component = scene.probes.GetComponent(entity);
 					if (component != nullptr)
 					{
 						archive << true;
@@ -2507,7 +3497,7 @@ namespace wi::scene
 					archive << false; // aabb no longer needed to be serialized
 				}
 				{
-					auto component = animations.GetComponent(entity);
+					auto component = scene.forces.GetComponent(entity);
 					if (component != nullptr)
 					{
 						archive << true;
@@ -2519,7 +3509,7 @@ namespace wi::scene
 					}
 				}
 				{
-					auto component = emitters.GetComponent(entity);
+					auto component = scene.decals.GetComponent(entity);
 					if (component != nullptr)
 					{
 						archive << true;
@@ -2531,7 +3521,10 @@ namespace wi::scene
 					}
 				}
 				{
-					auto component = hairs.GetComponent(entity);
+					archive << false; // aabb no longer needed to be serialized
+				}
+				{
+					auto component = scene.animations.GetComponent(entity);
 					if (component != nullptr)
 					{
 						archive << true;
@@ -2543,7 +3536,31 @@ namespace wi::scene
 					}
 				}
 				{
-					auto component = weathers.GetComponent(entity);
+					auto component = scene.emitters.GetComponent(entity);
+					if (component != nullptr)
+					{
+						archive << true;
+						component->Serialize(archive, seri);
+					}
+					else
+					{
+						archive << false;
+					}
+				}
+				{
+					auto component = scene.hairs.GetComponent(entity);
+					if (component != nullptr)
+					{
+						archive << true;
+						component->Serialize(archive, seri);
+					}
+					else
+					{
+						archive << false;
+					}
+				}
+				{
+					auto component = scene.weathers.GetComponent(entity);
 					if (component != nullptr)
 					{
 						archive << true;
@@ -2556,7 +3573,7 @@ namespace wi::scene
 				}
 				if(archive.GetVersion() >= 30)
 				{
-					auto component = sounds.GetComponent(entity);
+					auto component = scene.sounds.GetComponent(entity);
 					if (component != nullptr)
 					{
 						archive << true;
@@ -2569,7 +3586,7 @@ namespace wi::scene
 				}
 				if (archive.GetVersion() >= 37)
 				{
-					auto component = inverse_kinematics.GetComponent(entity);
+					auto component = scene.inverse_kinematics.GetComponent(entity);
 					if (component != nullptr)
 					{
 						archive << true;
@@ -2582,7 +3599,7 @@ namespace wi::scene
 				}
 				if (archive.GetVersion() >= 38)
 				{
-					auto component = springs.GetComponent(entity);
+					auto component = scene.springs.GetComponent(entity);
 					if (component != nullptr)
 					{
 						archive << true;
@@ -2595,7 +3612,7 @@ namespace wi::scene
 				}
 				if (archive.GetVersion() >= 46)
 				{
-					auto component = animation_datas.GetComponent(entity);
+					auto component = scene.animation_datas.GetComponent(entity);
 					if (component != nullptr)
 					{
 						archive << true;
@@ -2612,24 +3629,24 @@ namespace wi::scene
 				//	The pointers must not be invalidated while serialization jobs are not finished
 				wi::jobsystem::Wait(seri.ctx);
 
-				if (archive.GetVersion() >= 72 && has_flag(flags, EntitySerializeFlags::RECURSIVE))
+				if (archive.GetVersion() >= 72 && has_flag(flags, Scene::EntitySerializeFlags::RECURSIVE))
 				{
 					// Recursive serialization for all children:
 					seri.allow_remap = restore_remap;
 					wi::vector<Entity> children;
-					for (size_t i = 0; i < hierarchy.GetCount(); ++i)
+					for (size_t i = 0; i < scene.hierarchy.GetCount(); ++i)
 					{
-						const HierarchyComponent& hier = hierarchy[i];
+						const HierarchyComponent& hier = scene.hierarchy[i];
 						if (hier.parentID == entity)
 						{
-							Entity child = hierarchy.GetEntity(i);
+							Entity child = scene.hierarchy.GetEntity(i);
 							children.push_back(child);
 						}
 					}
 					archive << children.size();
 					for (Entity child : children)
 					{
-						Entity_Serialize(archive, seri, child, flags);
+						Entity_Serialize_Internal(scene, archive, seri, child, flags);
 					}
 				}
 			}
@@ -2637,6 +3654,67 @@ namespace wi::scene
 
 		seri.allow_remap = restore_remap;
 		return entity;
+	}
+
+	Entity Scene::Entity_Serialize(
+		wi::Archive& archive,
+		EntitySerializer& seri,
+		Entity entity,
+		EntitySerializeFlags flags
+	)
+	{
+		// Manage jump position to jump to resource serialization WRITE area:
+		size_t jump_before = 0;
+		size_t jump_after = 0;
+		size_t original_pos = 0;
+		if (archive.GetVersion() >= 90)
+		{
+			if (archive.IsReadMode())
+			{
+				archive >> jump_before;
+				archive >> jump_after;
+				original_pos = archive.GetPos();
+				archive.Jump(jump_before); // jump before resourcemanager::Serialize_WRITE
+			}
+			else
+			{
+				jump_before = archive.WriteUnknownJumpPosition();
+				jump_after = archive.WriteUnknownJumpPosition();
+			}
+		}
+
+		// Keeping this alive to keep serialized resources alive until entity serialization ends:
+		wi::resourcemanager::ResourceSerializer resource_seri;
+		if (archive.IsReadMode() && archive.GetVersion() >= 90)
+		{
+			wi::resourcemanager::Serialize_READ(archive, resource_seri);
+			// After resource serialization, jump back to entity serialization area:
+			archive.Jump(original_pos); // jump back to entity serialize
+		}
+
+		Entity ret = Entity_Serialize_Internal(
+			*this,
+			archive,
+			seri,
+			entity,
+			flags
+		);
+
+		if (archive.GetVersion() >= 90)
+		{
+			if (archive.IsReadMode())
+			{
+				archive.Jump(jump_after); // jump after resourcemanager::Serialize_WRITE
+			}
+			else
+			{
+				archive.PatchUnknownJumpPosition(jump_before);
+				wi::resourcemanager::Serialize_WRITE(archive, seri.resource_registration);
+				archive.PatchUnknownJumpPosition(jump_after);
+			}
+		}
+
+		return ret;
 	}
 
 }

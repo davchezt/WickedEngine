@@ -37,7 +37,7 @@ ConstantOutput PatchConstantFunction(InputPatch<PixelInput, 3> patch)
 
 #if 1
 	// frustum culling:
-	float rad = GetMaterial().displacementMapping;
+	float rad = GetMaterial().GetDisplacement();
 	int culled[4];
 	[unroll]
 	for (int ip = 0; ip < 4; ++ip)
@@ -55,12 +55,17 @@ ConstantOutput PatchConstantFunction(InputPatch<PixelInput, 3> patch)
 
 
 	// compute the cubic geometry control points
-	output.b210 = ((2 * patch[0].pos.xyz) + patch[1].pos.xyz - (dot((patch[1].pos.xyz - patch[0].pos.xyz), patch[0].nor.xyz) * patch[0].nor.xyz)) / 3.0;
-	output.b120 = ((2 * patch[1].pos.xyz) + patch[0].pos.xyz - (dot((patch[0].pos.xyz - patch[1].pos.xyz), patch[1].nor.xyz) * patch[1].nor.xyz)) / 3.0;
-	output.b021 = ((2 * patch[1].pos.xyz) + patch[2].pos.xyz - (dot((patch[2].pos.xyz - patch[1].pos.xyz), patch[1].nor.xyz) * patch[1].nor.xyz)) / 3.0;
-	output.b012 = ((2 * patch[2].pos.xyz) + patch[1].pos.xyz - (dot((patch[1].pos.xyz - patch[2].pos.xyz), patch[2].nor.xyz) * patch[2].nor.xyz)) / 3.0;
-	output.b102 = ((2 * patch[2].pos.xyz) + patch[0].pos.xyz - (dot((patch[0].pos.xyz - patch[2].pos.xyz), patch[2].nor.xyz) * patch[2].nor.xyz)) / 3.0;
-	output.b201 = ((2 * patch[0].pos.xyz) + patch[2].pos.xyz - (dot((patch[2].pos.xyz - patch[0].pos.xyz), patch[0].nor.xyz) * patch[0].nor.xyz)) / 3.0;
+	const float3 nor[] = {
+		normalize(patch[0].nor),
+		normalize(patch[1].nor),
+		normalize(patch[2].nor),
+	};
+	output.b210 = ((2 * patch[0].pos.xyz) + patch[1].pos.xyz - (dot((patch[1].pos.xyz - patch[0].pos.xyz), nor[0]) * nor[0])) / 3.0;
+	output.b120 = ((2 * patch[1].pos.xyz) + patch[0].pos.xyz - (dot((patch[0].pos.xyz - patch[1].pos.xyz), nor[1]) * nor[1])) / 3.0;
+	output.b021 = ((2 * patch[1].pos.xyz) + patch[2].pos.xyz - (dot((patch[2].pos.xyz - patch[1].pos.xyz), nor[1]) * nor[1])) / 3.0;
+	output.b012 = ((2 * patch[2].pos.xyz) + patch[1].pos.xyz - (dot((patch[1].pos.xyz - patch[2].pos.xyz), nor[2]) * nor[2])) / 3.0;
+	output.b102 = ((2 * patch[2].pos.xyz) + patch[0].pos.xyz - (dot((patch[0].pos.xyz - patch[2].pos.xyz), nor[2]) * nor[2])) / 3.0;
+	output.b201 = ((2 * patch[0].pos.xyz) + patch[2].pos.xyz - (dot((patch[2].pos.xyz - patch[0].pos.xyz), nor[0]) * nor[0])) / 3.0;
 	float3 E = (output.b210 + output.b120 + output.b021 + output.b012 + output.b102 + output.b201) / 6.0;
 	float3 V = (patch[0].pos.xyz + patch[1].pos.xyz + patch[2].pos.xyz) / 3.0;
 	output.b111 = E + ((E - V) / 2.0);
@@ -107,46 +112,37 @@ PixelInput main(ConstantOutput input, float3 uvw : SV_DomainLocation, const Outp
 		input.b210 * ww3 * u + input.b120 * w * uu3 + input.b201 * ww3 * v + input.b021 * uu3 * v +
 		input.b102 * w * vv3 + input.b012 * u * vv3 + input.b111 * 6.0 * w * u * v;
 
-#ifdef OBJECTSHADER_USE_POSITIONPREV
-	output.pre.xyz = patch[0].pre.xyz * ww * w + patch[1].pre.xyz * uu * u + patch[2].pre.xyz * vv * v +
-		input.b210 * ww3 * u + input.b120 * w * uu3 + input.b201 * ww3 * v + input.b021 * uu3 * v +
-		input.b102 * w * vv3 + input.b012 * u * vv3 + input.b111 * 6.0 * w * u * v;
-#endif // OBJECTSHADER_USE_POSITIONPREV
-
-#ifdef OBJECTSHADER_USE_COLOR
-	output.color = w * patch[0].color + u * patch[1].color + v * patch[2].color;
-#endif // OBJECTSHADER_USE_COLOR
-
 #ifdef OBJECTSHADER_USE_UVSETS
 	output.uvsets = w * patch[0].uvsets + u * patch[1].uvsets + v * patch[2].uvsets;
 #endif // OBJECTSHADER_USE_UVSETS
 
-#ifdef OBJECTSHADER_USE_ATLAS
+#ifdef OBJECTSHADER_USE_COLOR
+	output.color = half4(w * patch[0].color + u * patch[1].color + v * patch[2].color);
+#endif // OBJECTSHADER_USE_COLOR
+
+#ifdef OBJECTSHADER_USE_COMMON
 	output.atl = w * patch[0].atl + u * patch[1].atl + v * patch[2].atl;
-#endif // OBJECTSHADER_USE_ATLAS
+	output.ao_wet = w * patch[0].ao_wet + u * patch[1].ao_wet + v * patch[2].ao_wet;
+#endif // OBJECTSHADER_USE_COMMON
 
 #ifdef OBJECTSHADER_USE_NORMAL
 	output.nor = normalize(w * patch[0].nor + u * patch[1].nor + v * patch[2].nor);
 #endif // OBJECTSHADER_USE_NORMAL
 
 #ifdef OBJECTSHADER_USE_TANGENT
-	output.tan = normalize(w * patch[0].tan + u * patch[1].tan + v * patch[2].tan);
+	output.tan = half4(normalize(w * patch[0].tan + u * patch[1].tan + v * patch[2].tan));
 #endif // OBJECTSHADER_USE_TANGENT
-
-#ifdef OBJECTSHADER_USE_POSITION3D
-	output.pos3D = output.pos.xyz;
-#endif // OBJECTSHADER_USE_POSITION3D
 
 
 #ifdef OBJECTSHADER_USE_NORMAL
 #ifdef OBJECTSHADER_USE_UVSETS
 	// displacement mapping:
 	[branch]
-	if (GetMaterial().displacementMapping > 0 && GetMaterial().textures[DISPLACEMENTMAP].IsValid())
+	if (GetMaterial().GetDisplacement() > 0 && GetMaterial().textures[DISPLACEMENTMAP].IsValid())
 	{
 		float displacement = GetMaterial().textures[DISPLACEMENTMAP].SampleLevel(sampler_objectshader, output.uvsets, 0).r;
-		displacement *= GetMaterial().displacementMapping;
-		output.pos.xyz += output.nor * displacement;
+		displacement *= GetMaterial().GetDisplacement();
+		output.pos.xyz += normalize(float3(output.nor)) * displacement;
 	}
 #endif // OBJECTSHADER_USE_UVSETS
 #endif // OBJECTSHADER_USE_NORMAL
@@ -159,12 +155,6 @@ PixelInput main(ConstantOutput input, float3 uvw : SV_DomainLocation, const Outp
 #ifndef OBJECTSHADER_USE_NOCAMERA
 	output.pos = mul(GetCamera().view_projection, output.pos);
 #endif // OBJECTSHADER_USE_NOCAMERA
-
-#ifdef OBJECTSHADER_USE_POSITIONPREV
-#ifndef OBJECTSHADER_USE_NOCAMERA
-	output.pre = mul(GetCamera().previous_view_projection, output.pre);
-#endif // OBJECTSHADER_USE_NOCAMERA
-#endif // OBJECTSHADER_USE_POSITIONPREV
 
 	return output;
 }

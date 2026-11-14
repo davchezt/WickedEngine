@@ -1,48 +1,39 @@
 #include "stdafx.h"
-#include "Editor.h"
 #include "PaintToolWindow.h"
 #include "shaders/ShaderInterop_Renderer.h"
-
-#include <cmath>
 
 using namespace wi::ecs;
 using namespace wi::scene;
 using namespace wi::graphics;
+using namespace wi::primitive;
 
 void PaintToolWindow::Create(EditorComponent* _editor)
 {
 	editor = _editor;
 
-	wi::gui::Window::Create("Paint Tool", wi::gui::Window::WindowControls::COLLAPSE);
-	SetSize(XMFLOAT2(360, 800));
-
-	float x = 105;
-	float y = 0;
-	float hei = 20;
-	float step = hei + 4;
-	float wid = 160;
+	wi::gui::Window::Create("Paint Tool", wi::gui::Window::WindowControls::CLOSE | wi::gui::Window::WindowControls::RESIZE_RIGHT);
+	SetText("Paint Tool " ICON_PAINTTOOL);
+	SetSize(XMFLOAT2(300, 800));
 
 	colorPicker.Create("Color", wi::gui::Window::WindowControls::NONE);
-	float mod_wid = colorPicker.GetScale().x;
 
 	modeComboBox.Create("Mode: ");
 	modeComboBox.SetTooltip("Choose paint tool mode");
-	modeComboBox.SetPos(XMFLOAT2(x, y));
-	modeComboBox.SetSize(XMFLOAT2(wid, hei));
-	modeComboBox.AddItem(ICON_DISABLED " Disabled");
-	modeComboBox.AddItem(ICON_MATERIAL " Texture");
-	modeComboBox.AddItem(ICON_MESH " Vertexcolor");
-	modeComboBox.AddItem(ICON_MESH " Sculpting - Add");
-	modeComboBox.AddItem(ICON_MESH " Sculpting - Subtract");
-	modeComboBox.AddItem(ICON_SOFTBODY " Softbody - Pinning");
-	modeComboBox.AddItem(ICON_SOFTBODY " Softbody - Physics");
-	modeComboBox.AddItem(ICON_HAIR " Hairparticle - Add Triangle");
-	modeComboBox.AddItem(ICON_HAIR " Hairparticle - Remove Triangle");
-	modeComboBox.AddItem(ICON_HAIR " Hairparticle - Length (Alpha)");
-	modeComboBox.AddItem(ICON_MESH " Wind weight (Alpha)");
+	modeComboBox.AddItem(ICON_DISABLED " Disabled", MODE_DISABLED);
+	modeComboBox.AddItem(ICON_MATERIAL " Texture", MODE_TEXTURE);
+	modeComboBox.AddItem(ICON_MESH " Vertexcolor", MODE_VERTEXCOLOR);
+	modeComboBox.AddItem(ICON_TERRAIN " Terrain material", MODE_TERRAIN_MATERIAL);
+	modeComboBox.AddItem(ICON_MESH " Sculpting - Add", MODE_SCULPTING_ADD);
+	modeComboBox.AddItem(ICON_MESH " Sculpting - Subtract", MODE_SCULPTING_SUBTRACT);
+	modeComboBox.AddItem(ICON_SOFTBODY " Softbody - Pinning", MODE_SOFTBODY_PINNING);
+	modeComboBox.AddItem(ICON_SOFTBODY " Softbody - Physics", MODE_SOFTBODY_PHYSICS);
+	modeComboBox.AddItem(ICON_HAIR " Hairparticle - Add Triangle", MODE_HAIRPARTICLE_ADD_TRIANGLE);
+	modeComboBox.AddItem(ICON_HAIR " Hairparticle - Remove Triangle", MODE_HAIRPARTICLE_REMOVE_TRIANGLE);
+	modeComboBox.AddItem(ICON_HAIR " Hairparticle - Length (Alpha)", MODE_HAIRPARTICLE_LENGTH);
+	modeComboBox.AddItem(ICON_MESH " Wind weight (Alpha)", MODE_WIND);
 	modeComboBox.SetSelected(0);
-	modeComboBox.OnSelect([&](wi::gui::EventArgs args) {
-		switch (args.iValue)
+	modeComboBox.OnSelect([this](wi::gui::EventArgs args) {
+		switch (args.userdata)
 		{
 		case MODE_DISABLED:
 			infoLabel.SetText("Paint Tool is disabled.");
@@ -50,8 +41,12 @@ void PaintToolWindow::Create(EditorComponent* _editor)
 		case MODE_TEXTURE:
 			infoLabel.SetText("In texture paint mode, you can paint on textures. Brush will be applied in texture space.\nREMEMBER to save texture when finished to save texture file!\nREMEMBER to save scene to retain new texture bindings on materials!");
 			break;
+		case MODE_TERRAIN_MATERIAL:
+			RecreateTerrainMaterialButtons();
+			infoLabel.SetText("You can paint terrain material layers. The paintable materials are those which are referenced by the terrain.");
+			break;
 		case MODE_VERTEXCOLOR:
-			infoLabel.SetText("In vertex color mode, you can paint colors on selected geometry (per vertex). \"Use vertex colors\" will be automatically enabled for the selected material, or all materials if the whole object is selected. If there is no vertexcolors vertex buffer, one will be created with white as default for every vertex.");
+			infoLabel.SetText("In vertex color mode, you can paint colors on geometry (per vertex). \"Use vertex colors\" will be automatically enabled for the affected materials. If there is no vertexcolors vertex buffer, one will be created with white as default for every vertex.");
 			break;
 		case MODE_SCULPTING_ADD:
 			infoLabel.SetText("In sculpt - ADD mode, you can modify vertex positions by ADD operation along normal vector (average normal of vertices touched by brush).");
@@ -60,10 +55,10 @@ void PaintToolWindow::Create(EditorComponent* _editor)
 			infoLabel.SetText("In sculpt - SUBTRACT mode, you can modify vertex positions by SUBTRACT operation along normal vector (average normal of vertices touched by brush).");
 			break;
 		case MODE_SOFTBODY_PINNING:
-			infoLabel.SetText("In soft body pinning mode, the selected object's soft body vertices can be pinned down (so they will be fixed and drive physics)");
+			infoLabel.SetText("In soft body pinning mode, the soft body vertices can be pinned down (so they will be fixed and drive physics)");
 			break;
 		case MODE_SOFTBODY_PHYSICS:
-			infoLabel.SetText("In soft body physics mode, the selected object's soft body vertices can be unpinned (so they will be simulated by physics)");
+			infoLabel.SetText("In soft body physics mode, the soft body vertices can be unpinned (so they will be simulated by physics)");
 			break;
 		case MODE_HAIRPARTICLE_ADD_TRIANGLE:
 			infoLabel.SetText("In hair particle add triangle mode, you can add triangles to the hair base mesh.\nThis will modify random distribution of hair!");
@@ -78,53 +73,67 @@ void PaintToolWindow::Create(EditorComponent* _editor)
 			infoLabel.SetText("Paint the wind affection amount onto the vertices. Use the Alpha channel to control the amount.");
 			break;
 		}
+
+		if (args.userdata == MODE_TEXTURE)
+		{
+			radiusSlider.SetRange(1, 200);
+			radiusSlider.SetValue(texture_paint_radius);
+		}
+		else if (args.userdata == MODE_TERRAIN_MATERIAL)
+		{
+			radiusSlider.SetRange(1, 100);
+			radiusSlider.SetValue(terrain_paint_radius);
+		}
+		else
+		{
+			radiusSlider.SetRange(0, 10);
+			radiusSlider.SetValue(vertex_paint_radius);
+		}
+
 	});
 	AddWidget(&modeComboBox);
 
-	y += step + 5;
-
 	infoLabel.Create("Paint Tool is disabled.");
-	infoLabel.SetSize(XMFLOAT2(mod_wid - 10, 100));
-	infoLabel.SetPos(XMFLOAT2(5, y));
 	infoLabel.SetColor(wi::Color::Transparent());
+	infoLabel.SetFitTextEnabled(true);
 	AddWidget(&infoLabel);
 
-	y += infoLabel.GetScale().y - step + 5;
-
-	radiusSlider.Create(1.0f, 500.0f, 50, 10000, "Brush Radius: ");
+	radiusSlider.Create(0.1f, 20.0f, 1, 10000, "Brush Radius: ");
 	radiusSlider.SetTooltip("Set the brush radius in pixel units");
-	radiusSlider.SetSize(XMFLOAT2(wid, hei));
-	radiusSlider.SetPos(XMFLOAT2(x, y += step));
+	radiusSlider.OnSlide([this](wi::gui::EventArgs args) {
+		if (GetMode() == MODE_TEXTURE)
+		{
+			texture_paint_radius = args.fValue;
+		}
+		else if (GetMode() == MODE_TERRAIN_MATERIAL)
+		{
+			terrain_paint_radius = args.fValue;
+		}
+		else
+		{
+			vertex_paint_radius = args.fValue;
+		}
+	});
 	AddWidget(&radiusSlider);
 
 	amountSlider.Create(0, 1, 1, 10000, "Power: ");
 	amountSlider.SetTooltip("Set the brush power amount. 0 = minimum affection, 1 = maximum affection");
-	amountSlider.SetSize(XMFLOAT2(wid, hei));
-	amountSlider.SetPos(XMFLOAT2(x, y += step));
 	AddWidget(&amountSlider);
 
 	smoothnessSlider.Create(0, 2, 1, 10000, "Smoothness: ");
 	smoothnessSlider.SetTooltip("Set the brush smoothness. 0 = hard, increase for more smoothness");
-	smoothnessSlider.SetSize(XMFLOAT2(wid, hei));
-	smoothnessSlider.SetPos(XMFLOAT2(x, y += step));
 	AddWidget(&smoothnessSlider);
 
 	spacingSlider.Create(0, 500, 1, 500, "Spacing: ");
 	spacingSlider.SetTooltip("Brush spacing means how much brush movement (in pixels) starts a new stroke. 0 = new stroke every frame, 100 = every 100 pixel movement since last stroke will start a new stroke.");
-	spacingSlider.SetSize(XMFLOAT2(wid, hei));
-	spacingSlider.SetPos(XMFLOAT2(x, y += step));
 	AddWidget(&spacingSlider);
 
 	rotationSlider.Create(0, 1, 0, 10000, "Rotation: ");
 	rotationSlider.SetTooltip("Brush rotation randomness. This will affect the splat mode brush texture.");
-	rotationSlider.SetSize(XMFLOAT2(wid, hei));
-	rotationSlider.SetPos(XMFLOAT2(x, y += step));
 	AddWidget(&rotationSlider);
 
-	stabilizerSlider.Create(1, 15, 8, 14, "Stabilizer: ");
+	stabilizerSlider.Create(1, 15, 2, 14, "Stabilizer: ");
 	stabilizerSlider.SetTooltip("The stabilizer generates a small delay between user input and painting, which will be used to compute a smoother paint stroke..");
-	stabilizerSlider.SetSize(XMFLOAT2(wid, hei));
-	stabilizerSlider.SetPos(XMFLOAT2(x, y += step));
 	if (editor->main->config.GetSection("paint_tool").Has("stabilizer"))
 	{
 		stabilizerSlider.SetValue((float)editor->main->config.GetSection("paint_tool").GetInt("stabilizer"));
@@ -137,8 +146,6 @@ void PaintToolWindow::Create(EditorComponent* _editor)
 
 	backfaceCheckBox.Create("Backfaces: ");
 	backfaceCheckBox.SetTooltip("Set whether to paint on backfaces of geometry or not");
-	backfaceCheckBox.SetSize(XMFLOAT2(hei, hei));
-	backfaceCheckBox.SetPos(XMFLOAT2(x - 20, y += step));
 	if (editor->main->config.GetSection("paint_tool").Has("backfaces"))
 	{
 		backfaceCheckBox.SetCheck(editor->main->config.GetSection("paint_tool").GetBool("backfaces"));
@@ -151,9 +158,7 @@ void PaintToolWindow::Create(EditorComponent* _editor)
 
 	wireCheckBox.Create("Wireframe: ");
 	wireCheckBox.SetTooltip("Set whether to draw wireframe on top of geometry or not");
-	wireCheckBox.SetSize(XMFLOAT2(hei, hei));
-	wireCheckBox.SetPos(XMFLOAT2(x - 20 + 100, y));
-	wireCheckBox.SetCheck(true);
+	wireCheckBox.SetCheck(false);
 	if (editor->main->config.GetSection("paint_tool").Has("wireframe"))
 	{
 		wireCheckBox.SetCheck(editor->main->config.GetSection("paint_tool").GetBool("wireframe"));
@@ -166,8 +171,6 @@ void PaintToolWindow::Create(EditorComponent* _editor)
 
 	pressureCheckBox.Create("Pressure: ");
 	pressureCheckBox.SetTooltip("Set whether to use pressure sensitivity (for example pen tablet)");
-	pressureCheckBox.SetSize(XMFLOAT2(hei, hei));
-	pressureCheckBox.SetPos(XMFLOAT2(x - 20 + 200, y));
 	if (editor->main->config.GetSection("paint_tool").Has("pressure"))
 	{
 		pressureCheckBox.SetCheck(editor->main->config.GetSection("paint_tool").GetBool("pressure"));
@@ -179,25 +182,27 @@ void PaintToolWindow::Create(EditorComponent* _editor)
 	pressureCheckBox.SetCheckText(ICON_PEN);
 	AddWidget(&pressureCheckBox);
 
+	alphaCheckBox.Create("Redirect alpha: ");
+	alphaCheckBox.SetTooltip("The red color will be redirected to write alpha channel. Alpha value controls the blending like normally.");
+	AddWidget(&alphaCheckBox);
+
+	terrainCheckBox.Create("Terrain only: ");
+	terrainCheckBox.SetTooltip("Terrain specific sculpting mode.");
+	terrainCheckBox.SetCheckText(ICON_TERRAIN);
+	AddWidget(&terrainCheckBox);
+
 	axisCombo.Create("Axis Lock: ");
 	axisCombo.SetTooltip("You can lock modification to an axis here.");
-	axisCombo.SetPos(XMFLOAT2(x, y));
-	axisCombo.SetSize(XMFLOAT2(wid, hei));
 	axisCombo.AddItem(ICON_DISABLED, (uint64_t)AxisLock::Disabled);
 	axisCombo.AddItem("X " ICON_LEFT_RIGHT, (uint64_t)AxisLock::X);
 	axisCombo.AddItem("Y " ICON_UP_DOWN, (uint64_t)AxisLock::Y);
 	axisCombo.AddItem("Z " ICON_UPRIGHT_DOWNLEFT, (uint64_t)AxisLock::Z);
 	AddWidget(&axisCombo);
 
-	colorPicker.SetPos(XMFLOAT2(5, y += step));
 	AddWidget(&colorPicker);
-
-	y += colorPicker.GetScale().y;
 
 	textureSlotComboBox.Create("Texture Slot: ");
 	textureSlotComboBox.SetTooltip("Choose texture slot of the selected material to paint (texture paint mode only)");
-	textureSlotComboBox.SetPos(XMFLOAT2(x, y += step));
-	textureSlotComboBox.SetSize(XMFLOAT2(wid, hei));
 	textureSlotComboBox.AddItem("BaseColor (RGBA)", MaterialComponent::BASECOLORMAP);
 	textureSlotComboBox.AddItem("Normal (RGB)", MaterialComponent::NORMALMAP);
 	textureSlotComboBox.AddItem("SurfaceMap (RGBA)", MaterialComponent::SURFACEMAP);
@@ -210,13 +215,14 @@ void PaintToolWindow::Create(EditorComponent* _editor)
 	textureSlotComboBox.AddItem("ClearcoatMap (R)", MaterialComponent::CLEARCOATMAP);
 	textureSlotComboBox.AddItem("ClearcoatRoughMap (R)", MaterialComponent::CLEARCOATROUGHNESSMAP);
 	textureSlotComboBox.AddItem("ClearcoatNormMap (R)", MaterialComponent::CLEARCOATNORMALMAP);
+	textureSlotComboBox.AddItem("SpecularMap (RGBA)", MaterialComponent::SPECULARMAP);
+	textureSlotComboBox.AddItem("AnisotropyMap (RG)", MaterialComponent::ANISOTROPYMAP);
+	textureSlotComboBox.AddItem("TransparencyMap (R)", MaterialComponent::TRANSPARENCYMAP);
 	textureSlotComboBox.SetSelected(0);
 	AddWidget(&textureSlotComboBox);
 
 	brushShapeComboBox.Create("Brush Shape: ");
 	brushShapeComboBox.SetTooltip("Choose shape for brush masking effect");
-	brushShapeComboBox.SetPos(XMFLOAT2(x, y += step));
-	brushShapeComboBox.SetSize(XMFLOAT2(wid, hei));
 	brushShapeComboBox.AddItem(ICON_CIRCLE);
 	brushShapeComboBox.AddItem(ICON_SQUARE);
 	brushShapeComboBox.SetSelected(0);
@@ -224,8 +230,6 @@ void PaintToolWindow::Create(EditorComponent* _editor)
 
 	saveTextureButton.Create("Save Texture");
 	saveTextureButton.SetTooltip("Save edited texture.");
-	saveTextureButton.SetSize(XMFLOAT2(wid, hei));
-	saveTextureButton.SetPos(XMFLOAT2(x, y += step));
 	saveTextureButton.OnClick([this] (wi::gui::EventArgs args) {
 
 		Scene& scene = editor->GetCurrentScene();
@@ -251,6 +255,13 @@ void PaintToolWindow::Create(EditorComponent* _editor)
 			if (wi::helper::saveTextureToMemoryFile(editTexture.texture, "PNG", texturefiledata))
 			{
 				material->textures[sel].resource.SetFileData(texturefiledata);
+				// Register into resource manager:
+				material->textures[sel].resource = wi::resourcemanager::Load(
+					material->textures[sel].name,
+					wi::resourcemanager::Flags::NONE,
+					texturefiledata.data(),
+					texturefiledata.size()
+				);
 			}
 			else
 			{
@@ -264,8 +275,6 @@ void PaintToolWindow::Create(EditorComponent* _editor)
 	brushTextureButton.Create("");
 	brushTextureButton.SetDescription("Brush tex: ");
 	brushTextureButton.SetTooltip("Open an image to use as brush texture (splatting mode).\nSplat mode means that the texture will be relative to the brush position");
-	brushTextureButton.SetSize(XMFLOAT2(hei*2, hei*2));
-	brushTextureButton.SetPos(XMFLOAT2(x, y += step));
 	brushTextureButton.sprites[wi::gui::IDLE].params.color = wi::Color::White();
 	brushTextureButton.sprites[wi::gui::FOCUS].params.color = wi::Color::Gray();
 	brushTextureButton.sprites[wi::gui::ACTIVE].params.color = wi::Color::White();
@@ -295,8 +304,6 @@ void PaintToolWindow::Create(EditorComponent* _editor)
 	revealTextureButton.Create("");
 	revealTextureButton.SetDescription("Reveal tex: ");
 	revealTextureButton.SetTooltip("Open an image to use as reveal mode texture.\nReveal mode means that the texture will use the UV of the mesh. It will be multiplied by brush tex.");
-	revealTextureButton.SetSize(XMFLOAT2(hei * 2, hei * 2));
-	revealTextureButton.SetPos(XMFLOAT2(x + 150, y));
 	revealTextureButton.sprites[wi::gui::IDLE].params.color = wi::Color::White();
 	revealTextureButton.sprites[wi::gui::FOCUS].params.color = wi::Color::Gray();
 	revealTextureButton.sprites[wi::gui::ACTIVE].params.color = wi::Color::White();
@@ -323,14 +330,12 @@ void PaintToolWindow::Create(EditorComponent* _editor)
 		});
 	AddWidget(&revealTextureButton);
 
-	Translate(XMFLOAT3((float)editor->GetLogicalWidth() - 550, 50, 0));
-
-	SetMinimized(true);
+	SetVisible(false);
 }
 
-void PaintToolWindow::Update(float dt)
+void PaintToolWindow::UpdateData(float dt)
 {
-	RecordHistory(false);
+	RecordHistory(INVALID_ENTITY);
 
 	if (GetMode() == MODE_TEXTURE)
 	{
@@ -340,6 +345,7 @@ void PaintToolWindow::Update(float dt)
 		saveTextureButton.SetVisible(true);
 		brushTextureButton.SetVisible(true);
 		revealTextureButton.SetVisible(true);
+		alphaCheckBox.SetVisible(true);
 	}
 	else
 	{
@@ -349,15 +355,35 @@ void PaintToolWindow::Update(float dt)
 		saveTextureButton.SetVisible(false);
 		brushTextureButton.SetVisible(false);
 		revealTextureButton.SetVisible(false);
+		alphaCheckBox.SetVisible(false);
+	}
+
+	if (GetMode() == MODE_TERRAIN_MATERIAL)
+	{
+		colorPicker.SetVisible(false);
+		for (auto& x : terrain_material_buttons)
+		{
+			x.SetVisible(true);
+		}
+	}
+	else
+	{
+		colorPicker.SetVisible(true);
+		for (auto& x : terrain_material_buttons)
+		{
+			x.SetVisible(false);
+		}
 	}
 
 	if (GetMode() == MODE_SCULPTING_ADD || GetMode() == MODE_SCULPTING_SUBTRACT)
 	{
 		axisCombo.SetVisible(true);
+		terrainCheckBox.SetVisible(true);
 	}
 	else
 	{
 		axisCombo.SetVisible(false);
+		terrainCheckBox.SetVisible(false);
 	}
 
 	rot -= dt;
@@ -383,9 +409,11 @@ void PaintToolWindow::Update(float dt)
 		}
 	}
 
-	auto pointer = wi::input::GetPointer();
-	posNew = XMFLOAT2(pointer.x, pointer.y);
-	float pressureNew = pressureCheckBox.GetCheck() ? pointer.w : 1.0f;
+	posNew = XMFLOAT2(editor->currentMouse.x, editor->currentMouse.y);
+	float pressureNew = pressureCheckBox.GetCheck() ? editor->currentMouse.w : 1.0f;
+
+	// Mouse wheel scroll adjusts brush radius:
+	radiusSlider.SetValue(std::max(0.1f, radiusSlider.GetValue() + editor->currentMouse.z));
 
 	const MODE mode = GetMode();
 	const float radius = radiusSlider.GetValue();
@@ -395,6 +423,7 @@ void PaintToolWindow::Update(float dt)
 	const XMFLOAT4 color_float = color.toFloat4();
 	const bool backfaces = backfaceCheckBox.GetCheck();
 	const bool wireframe = wireCheckBox.GetCheck();
+	const bool terrain_only = terrainCheckBox.GetCheck();
 	const float spacing = spacingSlider.GetValue();
 	const size_t stabilizer = (size_t)stabilizerSlider.GetValue();
 	CommandList cmd;
@@ -415,6 +444,12 @@ void PaintToolWindow::Update(float dt)
 	{
 		pos = strokes.front().position;
 	}
+
+	Scene& scene = editor->GetCurrentScene();
+	const CameraComponent& camera = editor->GetCurrentEditorScene().camera;
+	const XMMATRIX VP = camera.GetViewProjection();
+	const XMVECTOR F = camera.GetAt();
+	const float brush_rotation = wi::random::GetRandom(0.0f, rotationSlider.GetValue() * XM_2PI);
 
 	const XMVECTOR spline_p0 = strokes.empty() ? XMVectorSet(posNew.x, posNew.y, pressureNew, 0) : XMVectorSet(strokes[0].position.x, strokes[0].position.y, strokes[0].pressure, 0);
 	const XMVECTOR spline_p1 = strokes.size() < 2 ? spline_p0 : XMVectorSet(strokes[1].position.x, strokes[1].position.y, strokes[1].pressure, 0);
@@ -450,216 +485,304 @@ void PaintToolWindow::Update(float dt)
 		}
 		const bool painting = pointer_moved && strokes.size() >= stabilizer;
 
-		Scene& scene = editor->GetCurrentScene();
-		const CameraComponent& camera = editor->GetCurrentEditorScene().camera;
-		const XMVECTOR C = XMLoadFloat2(&pos);
-		const XMMATRIX VP = camera.GetViewProjection();
-		const XMVECTOR MUL = XMVectorSet(0.5f, -0.5f, 1, 1);
-		const XMVECTOR ADD = XMVectorSet(0.5f, 0.5f, 0, 0);
-		const XMVECTOR SCREEN = XMVectorSet((float)editor->GetLogicalWidth(), (float)editor->GetLogicalHeight(), 1, 1);
-		const XMVECTOR F = camera.GetAt();
-		const float brush_rotation = wi::random::GetRandom(0.0f, rotationSlider.GetValue() * XM_2PI);
-
-		for (auto& selected : editor->translator.selected)
+		switch (mode)
 		{
-			switch (mode)
-			{
-			case MODE_TEXTURE:
-			{
-				wi::primitive::Ray pickRay = wi::renderer::GetPickRay((long)pos.x, (long)pos.y, *editor, camera);
-				const wi::scene::PickResult intersect = wi::scene::Pick(pickRay, ~0u, ~0u, scene);
-				if (intersect.entity != selected.entity)
-					break;
+		default:
+			break;
+		case MODE_TEXTURE:
+		{
+			Ray pickRay = editor->pickRay;
+			brushIntersect = wi::scene::Pick(pickRay, ~0u, ~0u, scene);
 
-				ObjectComponent* object = scene.objects.GetComponent(selected.entity);
+			ObjectComponent* object = scene.objects.GetComponent(brushIntersect.entity);
+			if (object == nullptr || object->meshID == INVALID_ENTITY)
+				break;
+
+			MeshComponent* mesh = scene.meshes.GetComponent(object->meshID);
+			if (mesh == nullptr || (mesh->vertex_uvset_0.empty() && mesh->vertex_uvset_1.empty()))
+				break;
+
+			Entity materialID = mesh->subsets[brushIntersect.subsetIndex].materialID;
+			MaterialComponent* material = brushIntersect.subsetIndex >= 0 && brushIntersect.subsetIndex < (int)mesh->subsets.size() ? scene.materials.GetComponent(materialID) : nullptr;
+			if (material == nullptr)
+				break;
+
+			int uvset = 0;
+			TextureSlot editTexture = GetEditTextureSlot(*material, &uvset);
+
+			if (has_flag(editTexture.texture.desc.misc_flags, ResourceMiscFlag::SPARSE))
+				break;
+
+			// Missing texture will be created a blank one:
+			if (!editTexture.texture.IsValid())
+			{
+				std::string texturename = "painttool/";
+				const NameComponent* materialname = scene.names.GetComponent(materialID);
+				if (materialname != nullptr)
+				{
+					texturename += materialname->name;
+					texturename += "_";
+				}
+				texturename += std::to_string(wi::random::GetRandom(std::numeric_limits<int>::max()));
+				texturename += ".PNG";
+				uint64_t sel = textureSlotComboBox.GetItemUserData(textureSlotComboBox.GetSelected());
+				material->textures[sel].name = texturename;
+				material->textures[sel].resource = wi::renderer::CreatePaintableTexture(1024, 1024, 1, wi::Color::White());
+				editTexture = GetEditTextureSlot(*material, &uvset);
+
+				wi::backlog::post("Paint Tool created default texture: " + texturename);
+			}
+
+			if (!editTexture.texture.IsValid())
+				break;
+			const TextureDesc& desc = editTexture.texture.GetDesc();
+			auto& vertex_uvset = uvset == 0 ? mesh->vertex_uvset_0 : mesh->vertex_uvset_1;
+
+			const float u = brushIntersect.bary.x;
+			const float v = brushIntersect.bary.y;
+			const float w = 1 - u - v;
+			XMFLOAT2 uv;
+			uv.x = vertex_uvset[brushIntersect.vertexID0].x * w +
+				vertex_uvset[brushIntersect.vertexID1].x * u +
+				vertex_uvset[brushIntersect.vertexID2].x * v;
+			uv.y = vertex_uvset[brushIntersect.vertexID0].y * w +
+				vertex_uvset[brushIntersect.vertexID1].y * u +
+				vertex_uvset[brushIntersect.vertexID2].y * v;
+			uv.x = uv.x * material->texMulAdd.x + material->texMulAdd.z;
+			uv.y = uv.y * material->texMulAdd.y + material->texMulAdd.w;
+			uint2 center = XMUINT2(uint32_t(int(uv.x * desc.width) % desc.width), uint32_t(int(uv.y * desc.height) % desc.height));
+
+			if (painting)
+			{
+				GraphicsDevice* device = wi::graphics::GetDevice();
+				if (!cmd.IsValid())
+				{
+					cmd = device->BeginCommandList();
+				}
+
+				RecordHistory(materialID, cmd);
+
+				// Need to requery this because RecordHistory might swap textures on material:
+				editTexture = GetEditTextureSlot(*material, &uvset);
+
+				wi::renderer::PaintTextureParams paintparams = {};
+
+				paintparams.editTex = editTexture.texture;
+				if (brushTex.IsValid())
+				{
+					paintparams.brushTex = brushTex.GetTexture();
+				}
+				if (revealTex.IsValid())
+				{
+					paintparams.revealTex = revealTex.GetTexture();
+				}
+
+				paintparams.push.xPaintBrushCenter = center;
+				paintparams.push.xPaintBrushRadius = (uint32_t)pressure_radius;
+				if (brushShapeComboBox.GetSelected() == 1)
+				{
+					paintparams.push.xPaintBrushRadius = (uint)std::ceil((float(paintparams.push.xPaintBrushRadius) * 2 / std::sqrt(2.0f))); // square shape, diagonal dispatch size
+				}
+				paintparams.push.xPaintBrushAmount = amount;
+				paintparams.push.xPaintBrushSmoothness = smoothness;
+				paintparams.push.xPaintBrushColor = color.rgba;
+				paintparams.push.xPaintRedirectAlpha = alphaCheckBox.GetCheck();
+				paintparams.push.xPaintBrushRotation = brush_rotation;
+				paintparams.push.xPaintBrushShape = (uint)brushShapeComboBox.GetSelected();
+
+				wi::renderer::PaintIntoTexture(paintparams);
+			}
+			if (substep == substep_count - 1)
+			{
+				wi::renderer::PaintRadius paintrad;
+				paintrad.objectEntity = brushIntersect.entity;
+				paintrad.subset = brushIntersect.subsetIndex;
+				paintrad.radius = radius;
+				paintrad.center = center;
+				paintrad.uvset = uvset;
+				paintrad.dimensions.x = desc.width;
+				paintrad.dimensions.y = desc.height;
+				paintrad.rotation = brush_rotation;
+				paintrad.shape = (uint)brushShapeComboBox.GetSelected();
+				wi::renderer::DrawPaintRadius(paintrad);
+			}
+		}
+		break;
+
+		case MODE_TERRAIN_MATERIAL:
+		{
+			Ray pickRay = editor->pickRay;
+			brushIntersect = wi::scene::Pick(pickRay, wi::enums::FILTER_TERRAIN, ~0u, scene);
+			if (brushIntersect.entity == INVALID_ENTITY)
+				break;
+
+			const Sphere sphere = Sphere(brushIntersect.position, radius);
+			const XMVECTOR CENTER = XMLoadFloat3(&sphere.center);
+
+			wi::terrain::Terrain* terrain = nullptr;
+			for (size_t i = 0; i < scene.terrains.GetCount(); ++i)
+			{
+				for (auto& chunk : scene.terrains[i].chunks)
+				{
+					if (brushIntersect.entity == chunk.second.entity)
+					{
+						terrain = &scene.terrains[i];
+						break;
+					}
+				}
+			}
+			if (terrain == nullptr)
+				break;
+
+			for (auto& chunk : terrain->chunks)
+			{
+				auto& chunk_data = chunk.second;
+
+				const ObjectComponent* object = scene.objects.GetComponent(chunk_data.entity);
 				if (object == nullptr || object->meshID == INVALID_ENTITY)
-					break;
+					continue;
 
-				MeshComponent* mesh = scene.meshes.GetComponent(object->meshID);
+				const size_t objectIndex = scene.objects.GetIndex(chunk_data.entity);
+				const wi::primitive::AABB& aabb = scene.aabb_objects[objectIndex];
+				if (!sphere.intersects(aabb))
+					continue;
+
+				const MeshComponent* mesh = scene.meshes.GetComponent(chunk_data.entity);
 				if (mesh == nullptr || (mesh->vertex_uvset_0.empty() && mesh->vertex_uvset_1.empty()))
-					break;
+					continue;
 
-				MaterialComponent* material = selected.subsetIndex >= 0 && selected.subsetIndex < (int)mesh->subsets.size() ? scene.materials.GetComponent(mesh->subsets[selected.subsetIndex].materialID) : nullptr;
-				if (material == nullptr)
-					break;
-
-				int uvset = 0;
-				TextureSlot editTexture = GetEditTextureSlot(*material, &uvset);
-				if (!editTexture.texture.IsValid())
-					break;
-				const TextureDesc& desc = editTexture.texture.GetDesc();
-				auto& vertex_uvset = uvset == 0 ? mesh->vertex_uvset_0 : mesh->vertex_uvset_1;
-
-				const float u = intersect.bary.x;
-				const float v = intersect.bary.y;
-				const float w = 1 - u - v;
-				XMFLOAT2 uv;
-				uv.x = vertex_uvset[intersect.vertexID0].x * w +
-					vertex_uvset[intersect.vertexID1].x * u +
-					vertex_uvset[intersect.vertexID2].x * v;
-				uv.y = vertex_uvset[intersect.vertexID0].y * w +
-					vertex_uvset[intersect.vertexID1].y * u +
-					vertex_uvset[intersect.vertexID2].y * v;
-				uv.x = uv.x * material->texMulAdd.x + material->texMulAdd.z;
-				uv.y = uv.y * material->texMulAdd.y + material->texMulAdd.w;
-				uint2 center = XMUINT2(uint32_t(uv.x * desc.width), uint32_t(uv.y * desc.height));
+				const XMMATRIX W = XMLoadFloat4x4(&scene.matrix_objects[objectIndex]);
 
 				if (painting)
 				{
-					GraphicsDevice* device = wi::graphics::GetDevice();
-					if (!cmd.IsValid())
+					chunk_data.enable_blendmap_layer(terrain_material_layer);
+					uint8_t* pixels = chunk_data.blendmap_layers[terrain_material_layer].pixels.data();
+
+					bool rebuild = false;
+					for (size_t j = 0; j < mesh->vertex_positions.size(); ++j)
 					{
-						cmd = device->BeginCommandList();
-					}
+						XMVECTOR P = XMLoadFloat3(&mesh->vertex_positions[j]);
+						P = XMVector3Transform(P, W);
 
-					RecordHistory(true, cmd);
+						if (!sphere.intersects(P))
+							continue;
 
-					// Need to requery this because RecordHistory might swap textures on material:
-					editTexture = GetEditTextureSlot(*material, &uvset);
+						XMVECTOR N = XMLoadFloat3(&mesh->vertex_normals[j]);
+						N = XMVector3Normalize(XMVector3TransformNormal(N, W));
 
-					device->BindComputeShader(wi::renderer::GetShader(wi::enums::CSTYPE_PAINT_TEXTURE), cmd);
+						if (!backfaces && XMVectorGetX(XMVector3Dot(F, N)) > 0)
+							continue;
 
-					if (brushTex.IsValid())
-					{
-						device->BindResource(&brushTex.GetTexture(), 0, cmd);
-					}
-					else
-					{
-						device->BindResource(wi::texturehelper::getWhite(), 0, cmd);
-					}
-					if (revealTex.IsValid())
-					{
-						device->BindResource(&revealTex.GetTexture(), 1, cmd);
-					}
-					else
-					{
-						device->BindResource(wi::texturehelper::getWhite(), 1, cmd);
-					}
-					device->BindUAV(&editTexture.texture, 0, cmd);
-
-					PaintTextureCB cb;
-					cb.xPaintBrushCenter = center;
-					cb.xPaintBrushRadius = (uint32_t)pressure_radius;
-					if (brushShapeComboBox.GetSelected() == 1)
-					{
-						cb.xPaintBrushRadius = (uint)std::ceil((float(cb.xPaintBrushRadius) * 2 / std::sqrt(2.0f))); // square shape, diagonal dispatch size
-					}
-					cb.xPaintBrushAmount = amount;
-					cb.xPaintBrushSmoothness = smoothness;
-					cb.xPaintBrushColor = color.rgba;
-					cb.xPaintReveal = revealTex.IsValid() ? 1 : 0;
-					cb.xPaintBrushRotation = brush_rotation;
-					cb.xPaintBrushShape = (uint)brushShapeComboBox.GetSelected();
-					device->PushConstants(&cb, sizeof(cb), cmd);
-
-					const uint diameter = cb.xPaintBrushRadius * 2;
-					const uint dispatch_dim = (diameter + PAINT_TEXTURE_BLOCKSIZE - 1) / PAINT_TEXTURE_BLOCKSIZE;
-					device->Dispatch(dispatch_dim, dispatch_dim, 1, cmd);
-
-					GPUBarrier barriers[] = {
-						GPUBarrier::Memory(),
-					};
-					device->Barrier(barriers, arraysize(barriers), cmd);
-
-					if (editTexture.texture.desc.mip_levels > 1)
-					{
-						wi::renderer::GenerateMipChain(editTexture.texture, wi::renderer::MIPGENFILTER::MIPGENFILTER_LINEAR, cmd);
-					}
-				}
-				if(substep == substep_count - 1)
-				{
-					wi::renderer::PaintRadius paintrad;
-					paintrad.objectEntity = selected.entity;
-					paintrad.subset = selected.subsetIndex;
-					paintrad.radius = radius;
-					paintrad.center = center;
-					paintrad.uvset = uvset;
-					paintrad.dimensions.x = desc.width;
-					paintrad.dimensions.y = desc.height;
-					paintrad.rotation = brush_rotation;
-					paintrad.shape = (uint)brushShapeComboBox.GetSelected();
-					wi::renderer::DrawPaintRadius(paintrad);
-				}
-			}
-			break;
-
-			case MODE_VERTEXCOLOR:
-			case MODE_WIND:
-			{
-				ObjectComponent* object = scene.objects.GetComponent(selected.entity);
-				if (object == nullptr || object->meshID == INVALID_ENTITY)
-					break;
-
-				MeshComponent* mesh = scene.meshes.GetComponent(object->meshID);
-				if (mesh == nullptr)
-					break;
-
-				MaterialComponent* material = selected.subsetIndex >= 0 && selected.subsetIndex < (int)mesh->subsets.size() ? scene.materials.GetComponent(mesh->subsets[selected.subsetIndex].materialID) : nullptr;
-				if (material == nullptr)
-				{
-					for (auto& x : mesh->subsets)
-					{
-						material = scene.materials.GetComponent(x.materialID);
-						if (material != nullptr)
+						const float dist = wi::math::Distance(P, CENTER);
+						if (dist <= pressure_radius)
 						{
-							switch (mode)
+							RecordHistory(chunk_data.entity);
+							rebuild = true;
+							const float affection = amount * wi::math::SmoothStep(0, smoothness, 1 - dist / pressure_radius);
+
+							float vcol = float(pixels[j]) / 255.0f;
+							vcol = wi::math::Lerp(vcol, 1, affection);
+							pixels[j] = uint8_t(vcol * 255);
+
+							// blend out layers above:
+							for (size_t l = terrain_material_layer + 1; l < chunk_data.blendmap_layers.size(); ++l)
 							{
-							case MODE_VERTEXCOLOR:
-								material->SetUseVertexColors(true);
-								break;
-							case MODE_WIND:
-								material->SetUseWind(true);
-								break;
+								vcol = float(chunk_data.blendmap_layers[l].pixels[j]) / 255.0f;
+								vcol = wi::math::Lerp(vcol, 0, affection);
+								chunk_data.blendmap_layers[l].pixels[j] = uint8_t(vcol * 255);
 							}
 						}
 					}
-					material = nullptr;
-				}
-				else
-				{
-					switch (mode)
+					if (rebuild)
 					{
-					case MODE_VERTEXCOLOR:
-						material->SetUseVertexColors(true);
-						break;
-					case MODE_WIND:
-						material->SetUseWind(true);
-						break;
+						chunk_data.blendmap = {};
+						terrain->CreateChunkRegionTexture(chunk_data);
+						if (chunk_data.vt != nullptr)
+						{
+							chunk_data.vt->invalidate();
+						}
+					}
+				}
+			}
+		}
+		break;
+
+		case MODE_VERTEXCOLOR:
+		case MODE_WIND:
+		{
+			Ray pickRay = editor->pickRay;
+			brushIntersect = wi::scene::Pick(pickRay, wi::enums::FILTER_OBJECT_ALL, ~0u, scene);
+			if (brushIntersect.entity == INVALID_ENTITY)
+				break;
+
+			const Sphere sphere = Sphere(brushIntersect.position, radius);
+			const XMVECTOR CENTER = XMLoadFloat3(&sphere.center);
+
+			for (size_t objectIndex = 0; objectIndex < scene.objects.GetCount(); ++objectIndex)
+			{
+				if (!sphere.intersects(scene.aabb_objects[objectIndex]))
+					continue;
+
+				Entity entity = scene.objects.GetEntity(objectIndex);
+				ObjectComponent& object = scene.objects[objectIndex];
+				if (object.meshID == INVALID_ENTITY)
+					continue;
+
+				MeshComponent* mesh = scene.meshes.GetComponent(object.meshID);
+				if (mesh == nullptr)
+					continue;
+
+				for (auto& x : mesh->subsets)
+				{
+					MaterialComponent* material = scene.materials.GetComponent(x.materialID);
+					if (material != nullptr)
+					{
+						switch (mode)
+						{
+						case MODE_VERTEXCOLOR:
+							material->SetUseVertexColors(true);
+							break;
+						case MODE_WIND:
+							material->SetUseWind(true);
+							break;
+						default:
+							break;
+						}
 					}
 				}
 
 				const ArmatureComponent* armature = mesh->IsSkinned() ? scene.armatures.GetComponent(mesh->armatureID) : nullptr;
 
-				const TransformComponent* transform = scene.transforms.GetComponent(selected.entity);
+				const TransformComponent* transform = scene.transforms.GetComponent(entity);
 				if (transform == nullptr)
-					break;
+					continue;
 
 				const XMMATRIX W = XMLoadFloat4x4(&transform->world);
 
 				bool rebuild = false;
 
-				switch (mode)
-				{
-				case MODE_VERTEXCOLOR:
-					if (mesh->vertex_colors.empty())
-					{
-						mesh->vertex_colors.resize(mesh->vertex_positions.size());
-						std::fill(mesh->vertex_colors.begin(), mesh->vertex_colors.end(), wi::Color::White().rgba); // fill white
-						rebuild = true;
-					}
-					break;
-				case MODE_WIND:
-					if (mesh->vertex_windweights.empty())
-					{
-						mesh->vertex_windweights.resize(mesh->vertex_positions.size());
-						std::fill(mesh->vertex_windweights.begin(), mesh->vertex_windweights.end(), 0xFF); // fill max affection
-						rebuild = true;
-					}
-					break;
-				}
-
 				if (painting)
 				{
+					switch (mode)
+					{
+					case MODE_VERTEXCOLOR:
+						if (mesh->vertex_colors.empty())
+						{
+							mesh->vertex_colors.resize(mesh->vertex_positions.size(), wi::Color::White().rgba); // fill white
+							rebuild = true;
+						}
+						break;
+					case MODE_WIND:
+						if (mesh->vertex_windweights.empty())
+						{
+							mesh->vertex_windweights.resize(mesh->vertex_positions.size(), 0xFF); // fill max affection
+							rebuild = true;
+						}
+						break;
+					default:
+						break;
+					}
+
 					for (size_t j = 0; j < mesh->vertex_positions.size(); ++j)
 					{
 						XMVECTOR P, N;
@@ -678,15 +801,10 @@ void PaintToolWindow::Update(float dt)
 						if (!backfaces && XMVectorGetX(XMVector3Dot(F, N)) > 0)
 							continue;
 
-						P = XMVector3TransformCoord(P, VP);
-						P = P * MUL + ADD;
-						P = P * SCREEN;
-
-						const float z = XMVectorGetZ(P);
-						const float dist = XMVectorGetX(XMVector2Length(C - P));
-						if (z >= 0 && z <= 1 && dist <= pressure_radius)
+						const float dist = wi::math::Distance(P, CENTER);
+						if (dist <= pressure_radius)
 						{
-							RecordHistory(true);
+							RecordHistory(object.meshID);
 							rebuild = true;
 							const float affection = amount * wi::math::SmoothStep(0, smoothness, 1 - dist / pressure_radius);
 
@@ -706,6 +824,8 @@ void PaintToolWindow::Update(float dt)
 								mesh->vertex_windweights[j] = vcol.getA();
 							}
 							break;
+							default:
+								break;
 							}
 						}
 					}
@@ -737,17 +857,23 @@ void PaintToolWindow::Update(float dt)
 							XMStoreFloat3(&tri.positionA, P[0]);
 							XMStoreFloat3(&tri.positionB, P[1]);
 							XMStoreFloat3(&tri.positionC, P[2]);
-							if (mode == MODE_WIND)
+							if (mode == MODE_WIND && !mesh->vertex_windweights.empty())
 							{
-								tri.colorA = wi::Color(mesh->vertex_windweights[triangle[0]], 0, 0, 255);
-								tri.colorB = wi::Color(mesh->vertex_windweights[triangle[1]], 0, 0, 255);
-								tri.colorC = wi::Color(mesh->vertex_windweights[triangle[2]], 0, 0, 255);
+								tri.colorA = wi::Color::lerp(wi::Color::Black(), wi::Color::White(), float(mesh->vertex_windweights[triangle[0]]) / 255.0f);
+								tri.colorB = wi::Color::lerp(wi::Color::Black(), wi::Color::White(), float(mesh->vertex_windweights[triangle[1]]) / 255.0f);
+								tri.colorC = wi::Color::lerp(wi::Color::Black(), wi::Color::White(), float(mesh->vertex_windweights[triangle[2]]) / 255.0f);
+							}
+							else if (mode == MODE_VERTEXCOLOR && !mesh->vertex_colors.empty())
+							{
+								tri.colorA = wi::Color(mesh->vertex_colors[triangle[0]]);
+								tri.colorB = wi::Color(mesh->vertex_colors[triangle[1]]);
+								tri.colorC = wi::Color(mesh->vertex_colors[triangle[2]]);
 							}
 							else
 							{
-								tri.colorA.w = 0.8f;
-								tri.colorB.w = 0.8f;
-								tri.colorC.w = 0.8f;
+								tri.colorA = wi::Color::White();
+								tri.colorB = wi::Color::White();
+								tri.colorC = wi::Color::White();
 							}
 							wi::renderer::DrawTriangle(tri, true);
 						}
@@ -759,24 +885,41 @@ void PaintToolWindow::Update(float dt)
 					mesh->CreateRenderData();
 				}
 			}
-			break;
+		}
+		break;
 
-			case MODE_SCULPTING_ADD:
-			case MODE_SCULPTING_SUBTRACT:
+		case MODE_SCULPTING_ADD:
+		case MODE_SCULPTING_SUBTRACT:
+		{
+			Ray pickRay = editor->pickRay;
+			brushIntersect = wi::scene::Pick(pickRay, terrain_only ? wi::enums::FILTER_TERRAIN : wi::enums::FILTER_OBJECT_ALL, ~0u, scene);
+			if (brushIntersect.entity == INVALID_ENTITY)
+				break;
+
+			const Sphere sphere = Sphere(brushIntersect.position, radius);
+			const XMVECTOR CENTER = XMLoadFloat3(&sphere.center);
+
+			for (size_t objectIndex = 0; objectIndex < scene.objects.GetCount(); ++objectIndex)
 			{
-				ObjectComponent* object = scene.objects.GetComponent(selected.entity);
-				if (object == nullptr || object->meshID == INVALID_ENTITY)
-					break;
+				if (!sphere.intersects(scene.aabb_objects[objectIndex]))
+					continue;
 
-				MeshComponent* mesh = scene.meshes.GetComponent(object->meshID);
+				Entity entity = scene.objects.GetEntity(objectIndex);
+				ObjectComponent& object = scene.objects[objectIndex];
+				if (object.meshID == INVALID_ENTITY)
+					continue;
+				if (terrain_only && (object.GetFilterMask() & wi::enums::FILTER_TERRAIN) == 0)
+					continue;
+
+				MeshComponent* mesh = scene.meshes.GetComponent(object.meshID);
 				if (mesh == nullptr)
-					break;
+					continue;
 
 				const ArmatureComponent* armature = mesh->IsSkinned() ? scene.armatures.GetComponent(mesh->armatureID) : nullptr;
 
-				const TransformComponent* transform = scene.transforms.GetComponent(selected.entity);
+				const TransformComponent* transform = scene.transforms.GetComponent(entity);
 				if (transform == nullptr)
-					break;
+					continue;
 
 				const XMMATRIX W = XMLoadFloat4x4(&transform->world);
 
@@ -788,7 +931,7 @@ void PaintToolWindow::Update(float dt)
 				case PaintToolWindow::AxisLock::Disabled:
 					if (sculpting_normal.x < FLT_EPSILON && sculpting_normal.y < FLT_EPSILON && sculpting_normal.z < FLT_EPSILON)
 					{
-						sculpting_normal = editor->hovered.normal;
+						sculpting_normal = brushIntersect.normal;
 					}
 					sculptDir = XMVector3TransformNormal(XMVector3Normalize(XMLoadFloat3(&sculpting_normal)), XMMatrixInverse(nullptr, W));
 					break;
@@ -805,7 +948,6 @@ void PaintToolWindow::Update(float dt)
 					sculptDir = XMLoadFloat3(&sculpting_normal);
 					break;
 				}
-
 
 				bool rebuild = false;
 				if (painting)
@@ -832,22 +974,35 @@ void PaintToolWindow::Update(float dt)
 						if (!backfaces && dotN > 0)
 							continue;
 
-						P = XMVector3TransformCoord(P, VP);
-						P = P * MUL + ADD;
-						P = P * SCREEN;
-
-						const float z = XMVectorGetZ(P);
-						const float dist = XMVectorGetX(XMVector2Length(C - P));
-						if (z >= 0 && z <= 1 && dist <= pressure_radius)
+						const float dist = wi::math::Distance(P, CENTER);
+						if (dist <= pressure_radius)
 						{
 							const float affection = amount * wi::math::SmoothStep(0, smoothness, 1 - dist / pressure_radius);
 							sculpting_indices.push_back({ j, affection });
 						}
 					}
 
+					wi::terrain::Terrain* terrain = nullptr;
+					wi::terrain::ChunkData* chunk_data = nullptr;
+					if (object.GetFilterMask() & wi::enums::FILTER_TERRAIN)
+					{
+						for (size_t i = 0; i < scene.terrains.GetCount(); ++i)
+						{
+							for (auto& it : scene.terrains[i].chunks)
+							{
+								if (it.second.entity == entity)
+								{
+									terrain = &scene.terrains[i];
+									chunk_data = &it.second;
+									break;
+								}
+							}
+						}
+					}
+
 					if (!sculpting_indices.empty())
 					{
-						RecordHistory(true);
+						RecordHistory(object.meshID);
 						rebuild = true;
 
 						for (auto& x : sculpting_indices)
@@ -861,8 +1016,27 @@ void PaintToolWindow::Update(float dt)
 							case MODE_SCULPTING_SUBTRACT:
 								PL -= sculptDir * x.affection;
 								break;
+							default:
+								break;
 							}
 							XMStoreFloat3(&mesh->vertex_positions[x.ind], PL);
+
+							if (chunk_data != nullptr)
+							{
+								float height = mesh->vertex_positions[x.ind].y;
+								chunk_data->heightmap_data[x.ind] = uint16_t(wi::math::InverseLerp(terrain->bottomLevel, terrain->topLevel, height) * 65535);
+							}
+						}
+
+						if (mesh->bvh.IsValid())
+						{
+							mesh->BuildBVH();
+						}
+
+						if (chunk_data != nullptr)
+						{
+							chunk_data->heightmap = {};
+							terrain->CreateChunkRegionTexture(*chunk_data);
 						}
 					}
 				}
@@ -901,7 +1075,7 @@ void PaintToolWindow::Update(float dt)
 						wi::renderer::RenderableLine sculpt_dir_line;
 						sculpt_dir_line.color_start = XMFLOAT4(0, 1, 0, 1);
 						sculpt_dir_line.color_end = XMFLOAT4(0, 1, 0, 1);
-						sculpt_dir_line.start = editor->hovered.position;
+						sculpt_dir_line.start = brushIntersect.position;
 						XMStoreFloat3(
 							&sculpt_dir_line.end,
 							XMLoadFloat3(&sculpt_dir_line.start) +
@@ -916,41 +1090,52 @@ void PaintToolWindow::Update(float dt)
 					mesh->ComputeNormals(MeshComponent::COMPUTE_NORMALS_SMOOTH_FAST);
 				}
 			}
-			break;
+		}
+		break;
 
-			case MODE_SOFTBODY_PINNING:
-			case MODE_SOFTBODY_PHYSICS:
+		case MODE_SOFTBODY_PINNING:
+		case MODE_SOFTBODY_PHYSICS:
+		{
+			Ray pickRay = editor->pickRay;
+			brushIntersect = wi::scene::Pick(pickRay, wi::enums::FILTER_OBJECT_ALL, ~0u, scene);
+			if (brushIntersect.entity == INVALID_ENTITY)
+				break;
+
+			const Sphere sphere = Sphere(brushIntersect.position, radius);
+			const XMVECTOR CENTER = XMLoadFloat3(&sphere.center);
+
+			for (size_t objectIndex = 0; objectIndex < scene.objects.GetCount(); ++objectIndex)
 			{
-				ObjectComponent* object = scene.objects.GetComponent(selected.entity);
-				if (object == nullptr || object->meshID == INVALID_ENTITY)
-					break;
+				if (!sphere.intersects(scene.aabb_objects[objectIndex]))
+					continue;
 
-				const MeshComponent* mesh = scene.meshes.GetComponent(object->meshID);
+				Entity entity = scene.objects.GetEntity(objectIndex);
+				ObjectComponent& object = scene.objects[objectIndex];
+				if (object.meshID == INVALID_ENTITY)
+					continue;
+
+				const MeshComponent* mesh = scene.meshes.GetComponent(object.meshID);
 				if (mesh == nullptr)
-					break;
+					continue;
 
-				SoftBodyPhysicsComponent* softbody = scene.softbodies.GetComponent(object->meshID);
-				if (softbody == nullptr || softbody->vertex_positions_simulation.empty())
-					break;
+				SoftBodyPhysicsComponent* softbody = scene.softbodies.GetComponent(object.meshID);
+				if (softbody == nullptr || softbody->physicsobject == nullptr)
+					continue;
 
 				// Painting:
 				if (painting)
 				{
-					size_t j = 0;
-					for (auto& ind : softbody->physicsToGraphicsVertexMapping)
+					for (size_t j = 0; j < mesh->vertex_positions.size(); ++j)
 					{
-						XMVECTOR P = softbody->vertex_positions_simulation[ind].LoadPOS();
-						P = XMVector3TransformCoord(P, VP);
-						P = P * MUL + ADD;
-						P = P * SCREEN;
-						const float z = XMVectorGetZ(P);
-						if (z >= 0 && z <= 1 && XMVectorGetX(XMVector2Length(C - P)) <= pressure_radius)
+						XMVECTOR P = SkinVertex(*mesh, *softbody, (uint32_t)j);
+
+						const float dist = wi::math::Distance(P, CENTER);
+						if (dist <= pressure_radius)
 						{
-							RecordHistory(true);
+							RecordHistory(object.meshID);
 							softbody->weights[j] = (mode == MODE_SOFTBODY_PINNING ? 0.0f : 1.0f);
-							softbody->_flags |= SoftBodyPhysicsComponent::FORCE_RESET;
+							softbody->Reset();
 						}
-						j++;
 					}
 				}
 
@@ -964,28 +1149,20 @@ void PaintToolWindow::Update(float dt)
 					const MeshComponent::MeshSubset& subset = mesh->subsets[subsetIndex];
 					for (size_t j = 0; j < subset.indexCount; j += 3)
 					{
-						const uint32_t graphicsIndex0 = mesh->indices[j + 0];
-						const uint32_t graphicsIndex1 = mesh->indices[j + 1];
-						const uint32_t graphicsIndex2 = mesh->indices[j + 2];
-						const uint32_t physicsIndex0 = softbody->graphicsToPhysicsVertexMapping[graphicsIndex0];
-						const uint32_t physicsIndex1 = softbody->graphicsToPhysicsVertexMapping[graphicsIndex1];
-						const uint32_t physicsIndex2 = softbody->graphicsToPhysicsVertexMapping[graphicsIndex2];
-						const float weight0 = softbody->weights[physicsIndex0];
-						const float weight1 = softbody->weights[physicsIndex1];
-						const float weight2 = softbody->weights[physicsIndex2];
+						const uint32_t i0 = mesh->indices[j + 0];
+						const uint32_t i1 = mesh->indices[j + 1];
+						const uint32_t i2 = mesh->indices[j + 2];
+						const float weight0 = softbody->weights[i0];
+						const float weight1 = softbody->weights[i1];
+						const float weight2 = softbody->weights[i2];
+						XMVECTOR N0 = XMVectorZero(), N1 = XMVectorZero(), N2 = XMVectorZero();
 						wi::renderer::RenderableTriangle tri;
-						if (softbody->vertex_positions_simulation.empty())
-						{
-							XMStoreFloat3(&tri.positionA, XMVector3Transform(XMLoadFloat3(&mesh->vertex_positions[graphicsIndex0]), W));
-							XMStoreFloat3(&tri.positionB, XMVector3Transform(XMLoadFloat3(&mesh->vertex_positions[graphicsIndex1]), W));
-							XMStoreFloat3(&tri.positionC, XMVector3Transform(XMLoadFloat3(&mesh->vertex_positions[graphicsIndex2]), W));
-						}
-						else
-						{
-							tri.positionA = softbody->vertex_positions_simulation[graphicsIndex0].pos;
-							tri.positionB = softbody->vertex_positions_simulation[graphicsIndex1].pos;
-							tri.positionC = softbody->vertex_positions_simulation[graphicsIndex2].pos;
-						}
+						XMVECTOR P0 = SkinVertex(*mesh, *softbody, i0, &N0);
+						XMVECTOR P1 = SkinVertex(*mesh, *softbody, i1, &N1);
+						XMVECTOR P2 = SkinVertex(*mesh, *softbody, i2, &N2);
+						XMStoreFloat3(&tri.positionA, P0 + N0 * 0.01f);
+						XMStoreFloat3(&tri.positionB, P1 + N1 * 0.01f);
+						XMStoreFloat3(&tri.positionC, P2 + N2 * 0.01f);
 						if (weight0 == 0)
 							tri.colorA = XMFLOAT4(1, 1, 0, 1);
 						else
@@ -1010,25 +1187,37 @@ void PaintToolWindow::Update(float dt)
 					}
 				}
 			}
-			break;
+		}
+		break;
 
-			case MODE_HAIRPARTICLE_ADD_TRIANGLE:
-			case MODE_HAIRPARTICLE_REMOVE_TRIANGLE:
-			case MODE_HAIRPARTICLE_LENGTH:
+		case MODE_HAIRPARTICLE_ADD_TRIANGLE:
+		case MODE_HAIRPARTICLE_REMOVE_TRIANGLE:
+		case MODE_HAIRPARTICLE_LENGTH:
+		{
+			Ray pickRay = editor->pickRay;
+			brushIntersect = wi::scene::Pick(pickRay, wi::enums::FILTER_OBJECT_ALL, ~0u, scene);
+			if (brushIntersect.entity == INVALID_ENTITY)
+				break;
+
+			const Sphere sphere = Sphere(brushIntersect.position, radius);
+			const XMVECTOR CENTER = XMLoadFloat3(&sphere.center);
+
+			for (size_t i = 0; i < scene.hairs.GetCount(); ++i)
 			{
-				wi::HairParticleSystem* hair = scene.hairs.GetComponent(selected.entity);
-				if (hair == nullptr || hair->meshID == INVALID_ENTITY)
-					break;
+				wi::HairParticleSystem& hair = scene.hairs[i];
+				if (hair.meshID == INVALID_ENTITY || !sphere.intersects(hair.aabb))
+					continue;
 
-				MeshComponent* mesh = scene.meshes.GetComponent(hair->meshID);
+				const Entity hairEntity = scene.hairs.GetEntity(i);
+				MeshComponent* mesh = scene.meshes.GetComponent(hair.meshID);
 				if (mesh == nullptr)
-					break;
+					continue;
 
 				const ArmatureComponent* armature = mesh->IsSkinned() ? scene.armatures.GetComponent(mesh->armatureID) : nullptr;
 
-				const TransformComponent* transform = scene.transforms.GetComponent(selected.entity);
+				const TransformComponent* transform = scene.transforms.GetComponent(hairEntity);
 				if (transform == nullptr)
-					break;
+					continue;
 
 				const XMMATRIX W = XMLoadFloat4x4(&transform->world);
 
@@ -1052,35 +1241,60 @@ void PaintToolWindow::Update(float dt)
 						if (!backfaces && XMVectorGetX(XMVector3Dot(F, N)) > 0)
 							continue;
 
-						P = XMVector3TransformCoord(P, VP);
-						P = P * MUL + ADD;
-						P = P * SCREEN;
-
-						const float z = XMVectorGetZ(P);
-						const float dist = XMVectorGetX(XMVector2Length(C - P));
-						if (z >= 0 && z <= 1 && dist <= pressure_radius)
+						const float dist = wi::math::Distance(P, CENTER);
+						if (dist <= pressure_radius)
 						{
-							RecordHistory(true);
+							RecordHistory(hairEntity);
 							switch (mode)
 							{
 							case MODE_HAIRPARTICLE_ADD_TRIANGLE:
-								hair->vertex_lengths[j] = 1.0f;
+								hair.vertex_lengths[j] = 1.0f;
 								break;
 							case MODE_HAIRPARTICLE_REMOVE_TRIANGLE:
-								hair->vertex_lengths[j] = 0;
+								hair.vertex_lengths[j] = 0;
 								break;
 							case MODE_HAIRPARTICLE_LENGTH:
-								if (hair->vertex_lengths[j] > 0) // don't change distribution
+								if (hair.vertex_lengths[j] > 0) // don't change distribution
 								{
 									const float affection = amount * wi::math::SmoothStep(0, smoothness, 1 - dist / pressure_radius);
-									hair->vertex_lengths[j] = wi::math::Lerp(hair->vertex_lengths[j], color_float.w, affection);
+									hair.vertex_lengths[j] = wi::math::Lerp(hair.vertex_lengths[j], color_float.w, affection);
 									// don't let it "remove" the vertex by keeping its length above zero:
 									//	(because if removed, distribution also changes which might be distracting)
-									hair->vertex_lengths[j] = wi::math::Clamp(hair->vertex_lengths[j], 1.0f / 255.0f, 1.0f);
+									hair.vertex_lengths[j] = wi::math::Clamp(hair.vertex_lengths[j], 1.0f / 255.0f, 1.0f);
+								}
+								break;
+							default:
+								break;
+							}
+							hair._flags |= wi::HairParticleSystem::REBUILD_BUFFERS;
+						}
+					}
+				}
+
+				if (hair._flags & wi::HairParticleSystem::REBUILD_BUFFERS)
+				{
+					for (size_t i = 0; i < scene.terrains.GetCount(); ++i)
+					{
+						for (auto& it : scene.terrains[i].chunks)
+						{
+							if (scene.Entity_IsDescendant(hairEntity, it.second.entity))
+							{
+								// Save modified grass lengths onto the painted patch's region mask:
+								uint32_t region = wi::terrain::MATERIAL_BASE;
+								for (const wi::terrain::ChunkData::GrassPatch& patch : it.second.grass_patches)
+								{
+									if (patch.entity == hairEntity)
+									{
+										region = patch.region;
+										break;
+									}
+								}
+								if (region < wi::terrain::MATERIAL_COUNT)
+								{
+									it.second.grass_region_lengths[region] = hair.vertex_lengths;
 								}
 								break;
 							}
-							hair->_flags |= wi::HairParticleSystem::REBUILD_BUFFERS;
 						}
 					}
 				}
@@ -1114,12 +1328,12 @@ void PaintToolWindow::Update(float dt)
 						}
 					}
 
-					for (size_t j = 0; j < hair->indices.size() && wireframe; j += 3)
+					for (size_t j = 0; j < hair.indices.size() && wireframe; j += 3)
 					{
 						const uint32_t triangle[] = {
-							hair->indices[j + 0],
-							hair->indices[j + 1],
-							hair->indices[j + 2],
+							hair.indices[j + 0],
+							hair.indices[j + 1],
+							hair.indices[j + 2],
 						};
 						const XMVECTOR P[arraysize(triangle)] = {
 							XMVector3Transform(armature == nullptr ? XMLoadFloat3(&mesh->vertex_positions[triangle[0]]) : wi::scene::SkinVertex(*mesh, *armature, triangle[0]), W),
@@ -1136,9 +1350,9 @@ void PaintToolWindow::Update(float dt)
 					}
 				}
 			}
-			break;
+		}
+		break;
 
-			}
 		}
 	}
 
@@ -1194,10 +1408,17 @@ void PaintToolWindow::DrawBrush(const wi::Canvas& canvas, CommandList cmd) const
 		LoadShaders();
 	}
 
+	const CameraComponent& camera = editor->GetCurrentEditorScene().camera;
+
 	GraphicsDevice* device = wi::graphics::GetDevice();
 
 	device->EventBegin("Paint Tool", cmd);
 	device->BindPipelineState(&pso, cmd);
+
+	const float brushRadius = radiusSlider.GetValue();
+	XMFLOAT4X4 brushMatrix = brushIntersect.orientation;
+
+	const XMMATRIX W = XMMatrixRotationY(rot) * XMMatrixScaling(brushRadius, brushRadius, brushRadius) * XMLoadFloat4x4(&brushMatrix);
 
 	const uint32_t segmentCount = 36;
 	const uint32_t circle_triangleCount = segmentCount * 2;
@@ -1210,19 +1431,24 @@ void PaintToolWindow::DrawBrush(const wi::Canvas& canvas, CommandList cmd) const
 		const float angle1 = (float)(i + 1) / (float)segmentCount * XM_2PI;
 
 		// circle:
-		const float radius = radiusSlider.GetValue();
-		const float radius_outer = radius + 8;
+		const float radius = 1;
+		const float radius_outer = radius + 0.1f;
 		float brightness = i % 2 == 0 ? 1.0f : 0.0f;
 		XMFLOAT4 color_inner = XMFLOAT4(brightness, brightness, brightness, 1);
 		XMFLOAT4 color_outer = XMFLOAT4(brightness, brightness, brightness, 0);
-		const Vertex verts[] = {
-			{XMFLOAT4(std::sin(angle0) * radius, std::cos(angle0) * radius, 0, 1), color_inner},
-			{XMFLOAT4(std::sin(angle1) * radius, std::cos(angle1) * radius, 0, 1), color_inner},
-			{XMFLOAT4(std::sin(angle0) * radius_outer, std::cos(angle0) * radius_outer, 0, 1), color_outer},
-			{XMFLOAT4(std::sin(angle0) * radius_outer, std::cos(angle0) * radius_outer, 0, 1), color_outer},
-			{XMFLOAT4(std::sin(angle1) * radius_outer, std::cos(angle1) * radius_outer, 0, 1), color_outer},
-			{XMFLOAT4(std::sin(angle1) * radius, std::cos(angle1) * radius, 0, 1), color_inner},
+		Vertex verts[] = {
+			{XMFLOAT4(std::sin(angle0) * radius, 0, std::cos(angle0) * radius, 1), color_inner},
+			{XMFLOAT4(std::sin(angle1) * radius, 0, std::cos(angle1) * radius, 1), color_inner},
+			{XMFLOAT4(std::sin(angle0) * radius_outer, 0, std::cos(angle0) * radius_outer, 1), color_outer},
+			{XMFLOAT4(std::sin(angle0) * radius_outer, 0, std::cos(angle0) * radius_outer, 1), color_outer},
+			{XMFLOAT4(std::sin(angle1) * radius_outer, 0, std::cos(angle1) * radius_outer, 1), color_outer},
+			{XMFLOAT4(std::sin(angle1) * radius, 0, std::cos(angle1) * radius, 1), color_inner},
 		};
+		for (auto& x : verts)
+		{
+			XMStoreFloat4(&x.position, XMVector3Transform(XMLoadFloat4(&x.position), W));
+			x.position.w = 1;
+		}
 		std::memcpy(dst, verts, sizeof(verts));
 		dst += sizeof(verts);
 	}
@@ -1239,7 +1465,7 @@ void PaintToolWindow::DrawBrush(const wi::Canvas& canvas, CommandList cmd) const
 	device->BindVertexBuffers(vbs, 0, arraysize(vbs), strides, offsets, cmd);
 
 	MiscCB sb;
-	XMStoreFloat4x4(&sb.g_xTransform, XMMatrixRotationZ(rot) * XMMatrixTranslation(pos.x, pos.y, 0) * canvas.GetProjection());
+	XMStoreFloat4x4(&sb.g_xTransform, camera.GetViewProjection());
 	sb.g_xColor = XMFLOAT4(1, 1, 1, 1);
 	device->BindDynamicConstantBuffer(sb, CBSLOT_RENDERER_MISC, cmd);
 	device->Draw(vertexCount, 0, cmd);
@@ -1250,187 +1476,196 @@ void PaintToolWindow::DrawBrush(const wi::Canvas& canvas, CommandList cmd) const
 
 PaintToolWindow::MODE PaintToolWindow::GetMode() const
 {
-	return (MODE)modeComboBox.GetSelected();
+	if (!IsVisible())
+		return MODE_DISABLED;
+	return (MODE)modeComboBox.GetSelectedUserdata();
 }
 
-void PaintToolWindow::RecordHistory(bool start, CommandList cmd)
+void PaintToolWindow::WriteHistoryData(Entity entity, wi::Archive& archive, CommandList cmd)
 {
+	Scene& scene = editor->GetCurrentScene();
+
+	switch (GetMode())
+	{
+	case PaintToolWindow::MODE_TEXTURE:
+	{
+		MaterialComponent* material = scene.materials.GetComponent(entity);
+		if (material == nullptr)
+			break;
+
+		auto editTexture = GetEditTextureSlot(*material);
+
+		archive << textureSlotComboBox.GetSelected();
+
+		if (history_textureIndex >= history_textures.size())
+		{
+			history_textures.resize((history_textureIndex + 1) * 2);
+		}
+		history_textures[history_textureIndex] = editTexture;
+		archive << history_textureIndex;
+		history_textureIndex++;
+
+		if (cmd.IsValid())
+		{
+			// Make a copy of texture to edit and replace material resource:
+			GraphicsDevice* device = wi::graphics::GetDevice();
+			TextureSlot newslot;
+			TextureDesc desc = editTexture.texture.GetDesc();
+			desc.format = Format::R8G8B8A8_UNORM; // force format to one that is writable by GPU
+			desc.bind_flags |= BindFlag::SHADER_RESOURCE | BindFlag::UNORDERED_ACCESS;
+			desc.misc_flags = ResourceMiscFlag::TYPED_FORMAT_CASTING;
+			device->CreateTexture(&desc, nullptr, &newslot.texture);
+			device->SetName(&newslot.texture, "editor.painttool.newslot.texture");
+			for (uint32_t i = 0; i < newslot.texture.GetDesc().mip_levels; ++i)
+			{
+				int subresource_index;
+				subresource_index = device->CreateSubresource(&newslot.texture, SubresourceType::SRV, 0, 1, i, 1);
+				assert(subresource_index == i);
+				subresource_index = device->CreateSubresource(&newslot.texture, SubresourceType::UAV, 0, 1, i, 1);
+				assert(subresource_index == i);
+			}
+			// This part must be AFTER mip level subresource creation:
+			int srgb_subresource = -1;
+			{
+				Format srgb_format = GetFormatSRGB(desc.format);
+				newslot.srgb_subresource = device->CreateSubresource(
+					&newslot.texture,
+					SubresourceType::SRV,
+					0, -1,
+					0, -1,
+					&srgb_format
+				);
+			}
+			wi::renderer::CopyTexture2D(
+				newslot.texture, 0, 0, 0,
+				editTexture.texture, 0, 0, 0,
+				cmd
+			); // custom copy with format conversion and decompression capability!
+
+			ReplaceEditTextureSlot(*material, newslot);
+		}
+
+	}
+	break;
+	case PaintToolWindow::MODE_VERTEXCOLOR:
+	{
+		MeshComponent* mesh = scene.meshes.GetComponent(entity);
+		if (mesh == nullptr)
+			break;
+
+		archive << mesh->vertex_colors;
+	}
+	break;
+	case PaintToolWindow::MODE_WIND:
+	{
+		MeshComponent* mesh = scene.meshes.GetComponent(entity);
+		if (mesh == nullptr)
+			break;
+
+		archive << mesh->vertex_windweights;
+	}
+	break;
+	case PaintToolWindow::MODE_SCULPTING_ADD:
+	case PaintToolWindow::MODE_SCULPTING_SUBTRACT:
+	{
+		MeshComponent* mesh = scene.meshes.GetComponent(entity);
+		if (mesh == nullptr)
+			break;
+
+		archive << mesh->vertex_positions;
+		archive << mesh->vertex_normals;
+	}
+	break;
+	case PaintToolWindow::MODE_SOFTBODY_PINNING:
+	case PaintToolWindow::MODE_SOFTBODY_PHYSICS:
+	{
+		SoftBodyPhysicsComponent* softbody = scene.softbodies.GetComponent(entity);
+		if (softbody == nullptr)
+			break;
+
+		archive << softbody->weights;
+	}
+	break;
+	case PaintToolWindow::MODE_HAIRPARTICLE_ADD_TRIANGLE:
+	case PaintToolWindow::MODE_HAIRPARTICLE_REMOVE_TRIANGLE:
+	case PaintToolWindow::MODE_HAIRPARTICLE_LENGTH:
+	{
+		wi::HairParticleSystem* hair = scene.hairs.GetComponent(entity);
+		if (hair == nullptr)
+			break;
+
+		archive << hair->vertex_lengths;
+	}
+	break;
+	case PaintToolWindow::MODE_TERRAIN_MATERIAL:
+		{
+			bool found = false;
+			for (size_t i = 0; i < scene.terrains.GetCount() && !found; ++i)
+			{
+				wi::terrain::Terrain& terrain = scene.terrains[i];
+				for (auto& chunk : terrain.chunks)
+				{
+					auto& chunk_data = chunk.second;
+					if (chunk_data.entity == entity)
+					{
+						found = true;
+						archive << terrain_material_layer;
+						archive << chunk_data.blendmap_layers.size();
+						for (size_t l = terrain_material_layer; l < chunk_data.blendmap_layers.size(); ++l)
+						{
+							archive << chunk_data.blendmap_layers[l].pixels;
+						}
+						break;
+					}
+				}
+			}
+		}
+		break;
+	default:
+		assert(0);
+		break;
+	}
+}
+void PaintToolWindow::RecordHistory(Entity entity, CommandList cmd)
+{
+	const bool start = entity != INVALID_ENTITY;
 	if (start)
 	{
-		if (history_needs_recording_start)
-			return;
-		history_needs_recording_start = true;
-		history_needs_recording_end = true;
-
-		// Start history recording (undo)
+		if (historyStartDatas.find(entity) != historyStartDatas.end())
+			return; // already saved start data
+		WriteHistoryData(entity, historyStartDatas[entity], cmd);
+	}
+	else if(!historyStartDatas.empty() && strokes.empty())
+	{
 		currentHistory = &editor->AdvanceHistory();
 		wi::Archive& archive = *currentHistory;
 		archive << EditorComponent::HISTORYOP_PAINTTOOL;
 		archive << (uint32_t)GetMode();
-		history_redo_jump_position = archive.WriteUnknownJumpPosition();
-	}
-	else
-	{
-		if (!history_needs_recording_end || !strokes.empty())
-			return;
-		history_needs_recording_end = false;
-		history_needs_recording_start = false;
-
-		// End history recording (redo)
-	}
-
-	wi::Archive& archive = *currentHistory;
-	Scene& scene = editor->GetCurrentScene();
-
-	for (auto& selected : editor->translator.selected)
-	{
-		switch (GetMode())
+		archive << historyStartDatas.size();
+		for (auto& x : historyStartDatas)
 		{
-		case PaintToolWindow::MODE_TEXTURE:
+			archive << x.first; // archive <- entity
+		}
+		size_t undo_jump = archive.WriteUnknownJumpPosition();
+		for (auto& x : historyStartDatas)
 		{
-			ObjectComponent* object = scene.objects.GetComponent(selected.entity);
-			if (object == nullptr || object->meshID == INVALID_ENTITY)
-				break;
-
-			MeshComponent* mesh = scene.meshes.GetComponent(object->meshID);
-			if (mesh == nullptr || (mesh->vertex_uvset_0.empty() && mesh->vertex_uvset_1.empty()))
-				break;
-
-			MaterialComponent* material = selected.subsetIndex >= 0 && selected.subsetIndex < (int)mesh->subsets.size() ? scene.materials.GetComponent(mesh->subsets[selected.subsetIndex].materialID) : nullptr;
-			if (material == nullptr)
-				break;
-
-			auto editTexture = GetEditTextureSlot(*material);
-
-			archive << textureSlotComboBox.GetSelected();
-
-			if (history_textureIndex >= history_textures.size())
-			{
-				history_textures.resize((history_textureIndex + 1) * 2);
-			}
-			history_textures[history_textureIndex] = editTexture;
-			archive << history_textureIndex;
-			history_textureIndex++;
-
-			if (start)
-			{
-				// Make a copy of texture to edit and replace material resource:
-				GraphicsDevice* device = wi::graphics::GetDevice();
-				TextureSlot newslot;
-				TextureDesc desc = editTexture.texture.GetDesc();
-				desc.format = Format::R8G8B8A8_UNORM; // force format to one that is writable by GPU
-				desc.bind_flags |= BindFlag::SHADER_RESOURCE | BindFlag::UNORDERED_ACCESS;
-				desc.misc_flags = ResourceMiscFlag::TYPED_FORMAT_CASTING;
-				device->CreateTexture(&desc, nullptr, &newslot.texture);
-				for (uint32_t i = 0; i < newslot.texture.GetDesc().mip_levels; ++i)
-				{
-					int subresource_index;
-					subresource_index = device->CreateSubresource(&newslot.texture, SubresourceType::SRV, 0, 1, i, 1);
-					assert(subresource_index == i);
-					subresource_index = device->CreateSubresource(&newslot.texture, SubresourceType::UAV, 0, 1, i, 1);
-					assert(subresource_index == i);
-				}
-				// This part must be AFTER mip level subresource creation:
-				int srgb_subresource = -1;
-				{
-					Format srgb_format = GetFormatSRGB(desc.format);
-					newslot.srgb_subresource = device->CreateSubresource(
-						&newslot.texture,
-						SubresourceType::SRV,
-						0, -1,
-						0, -1,
-						&srgb_format
-					);
-				}
-				assert(cmd.IsValid());
-				device->CopyResource(&newslot.texture, &editTexture.texture, cmd);
-
-				ReplaceEditTextureSlot(*material, newslot);
-			}
-
+			archive << x.second; // archive <- data
 		}
-		break;
-		case PaintToolWindow::MODE_VERTEXCOLOR:
+		archive.PatchUnknownJumpPosition(undo_jump);
+		for (auto& x : historyStartDatas)
 		{
-			ObjectComponent* object = scene.objects.GetComponent(selected.entity);
-			if (object == nullptr || object->meshID == INVALID_ENTITY)
-				break;
-
-			MeshComponent* mesh = scene.meshes.GetComponent(object->meshID);
-			if (mesh == nullptr)
-				break;
-
-			archive << mesh->vertex_colors;
+			WriteHistoryData(x.first, archive);
 		}
-		break;
-		case PaintToolWindow::MODE_WIND:
-		{
-			ObjectComponent* object = scene.objects.GetComponent(selected.entity);
-			if (object == nullptr || object->meshID == INVALID_ENTITY)
-				break;
-
-			MeshComponent* mesh = scene.meshes.GetComponent(object->meshID);
-			if (mesh == nullptr)
-				break;
-
-			archive << mesh->vertex_windweights;
-		}
-		break;
-		case PaintToolWindow::MODE_SCULPTING_ADD:
-		case PaintToolWindow::MODE_SCULPTING_SUBTRACT:
-		{
-			ObjectComponent* object = scene.objects.GetComponent(selected.entity);
-			if (object == nullptr || object->meshID == INVALID_ENTITY)
-				break;
-
-			MeshComponent* mesh = scene.meshes.GetComponent(object->meshID);
-			if (mesh == nullptr)
-				break;
-
-			archive << mesh->vertex_positions;
-			archive << mesh->vertex_normals;
-		}
-		break;
-		case PaintToolWindow::MODE_SOFTBODY_PINNING:
-		case PaintToolWindow::MODE_SOFTBODY_PHYSICS:
-		{
-			ObjectComponent* object = scene.objects.GetComponent(selected.entity);
-			if (object == nullptr || object->meshID == INVALID_ENTITY)
-				break;
-
-			SoftBodyPhysicsComponent* softbody = scene.softbodies.GetComponent(object->meshID);
-			if (softbody == nullptr)
-				break;
-
-			archive << softbody->weights;
-		}
-		break;
-		case PaintToolWindow::MODE_HAIRPARTICLE_ADD_TRIANGLE:
-		case PaintToolWindow::MODE_HAIRPARTICLE_REMOVE_TRIANGLE:
-		case PaintToolWindow::MODE_HAIRPARTICLE_LENGTH:
-		{
-			wi::HairParticleSystem* hair = scene.hairs.GetComponent(selected.entity);
-			if (hair == nullptr)
-				break;
-
-			archive << hair->vertex_lengths;
-		}
-		break;
-		default:
-			assert(0);
-			break;
-		}
-	}
-
-	if (start)
-	{
-		archive.PatchUnknownJumpPosition(history_redo_jump_position);
+		historyStartDatas.clear();
 	}
 }
 void PaintToolWindow::ConsumeHistoryOperation(wi::Archive& archive, bool undo)
 {
 	MODE historymode;
 	archive >> (uint32_t&)historymode;
+
+	wi::vector<Entity> entities;
+	archive >> entities;
 
 	uint64_t jump_pos = 0;
 	archive >> jump_pos;
@@ -1439,25 +1674,17 @@ void PaintToolWindow::ConsumeHistoryOperation(wi::Archive& archive, bool undo)
 		archive.Jump(jump_pos);
 	}
 
-	modeComboBox.SetSelected(historymode);
+	modeComboBox.SetSelectedByUserdata(historymode);
 
 	Scene& scene = editor->GetCurrentScene();
 
-	for (auto& selected : editor->translator.selected)
+	for (auto& entity : entities)
 	{
 		switch (historymode)
 		{
 		case PaintToolWindow::MODE_TEXTURE:
 		{
-			ObjectComponent* object = scene.objects.GetComponent(selected.entity);
-			if (object == nullptr || object->meshID == INVALID_ENTITY)
-				break;
-
-			MeshComponent* mesh = scene.meshes.GetComponent(object->meshID);
-			if (mesh == nullptr || (mesh->vertex_uvset_0.empty() && mesh->vertex_uvset_1.empty()))
-				break;
-
-			MaterialComponent* material = selected.subsetIndex >= 0 && selected.subsetIndex < (int)mesh->subsets.size() ? scene.materials.GetComponent(mesh->subsets[selected.subsetIndex].materialID) : nullptr;
+			MaterialComponent* material = scene.materials.GetComponent(entity);
 			if (material == nullptr)
 				break;
 
@@ -1474,11 +1701,7 @@ void PaintToolWindow::ConsumeHistoryOperation(wi::Archive& archive, bool undo)
 		break;
 		case PaintToolWindow::MODE_VERTEXCOLOR:
 		{
-			ObjectComponent* object = scene.objects.GetComponent(selected.entity);
-			if (object == nullptr || object->meshID == INVALID_ENTITY)
-				break;
-
-			MeshComponent* mesh = scene.meshes.GetComponent(object->meshID);
+			MeshComponent* mesh = scene.meshes.GetComponent(entity);
 			if (mesh == nullptr)
 				break;
 
@@ -1492,11 +1715,7 @@ void PaintToolWindow::ConsumeHistoryOperation(wi::Archive& archive, bool undo)
 		break;
 		case PaintToolWindow::MODE_WIND:
 		{
-			ObjectComponent* object = scene.objects.GetComponent(selected.entity);
-			if (object == nullptr || object->meshID == INVALID_ENTITY)
-				break;
-
-			MeshComponent* mesh = scene.meshes.GetComponent(object->meshID);
+			MeshComponent* mesh = scene.meshes.GetComponent(entity);
 			if (mesh == nullptr)
 				break;
 
@@ -1511,11 +1730,7 @@ void PaintToolWindow::ConsumeHistoryOperation(wi::Archive& archive, bool undo)
 		case PaintToolWindow::MODE_SCULPTING_ADD:
 		case PaintToolWindow::MODE_SCULPTING_SUBTRACT:
 		{
-			ObjectComponent* object = scene.objects.GetComponent(selected.entity);
-			if (object == nullptr || object->meshID == INVALID_ENTITY)
-				break;
-
-			MeshComponent* mesh = scene.meshes.GetComponent(object->meshID);
+			MeshComponent* mesh = scene.meshes.GetComponent(entity);
 			if (mesh == nullptr)
 				break;
 
@@ -1527,16 +1742,37 @@ void PaintToolWindow::ConsumeHistoryOperation(wi::Archive& archive, bool undo)
 			mesh->vertex_normals = archive_mesh.vertex_normals;
 
 			mesh->CreateRenderData();
+
+			if (mesh->bvh.IsValid())
+			{
+				mesh->BuildBVH();
+			}
+
+			// refresh terrain heightmap in case this mesh was a terrain chunk:
+			for (size_t i = 0; i < scene.terrains.GetCount(); ++i)
+			{
+				wi::terrain::Terrain& terrain = scene.terrains[i];
+				for (auto& it : terrain.chunks)
+				{
+					wi::terrain::ChunkData& chunk_data = it.second;
+					if (chunk_data.entity == entity)
+					{
+						for (size_t v = 0; v < chunk_data.heightmap_data.size(); ++v)
+						{
+							chunk_data.heightmap_data[v] = uint16_t(wi::math::InverseLerp(terrain.bottomLevel, terrain.topLevel, mesh->vertex_positions[v].y) * 65535);
+						}
+						chunk_data.heightmap = {};
+						terrain.CreateChunkRegionTexture(chunk_data);
+						break;
+					}
+				}
+			}
 		}
 		break;
 		case PaintToolWindow::MODE_SOFTBODY_PINNING:
 		case PaintToolWindow::MODE_SOFTBODY_PHYSICS:
 		{
-			ObjectComponent* object = scene.objects.GetComponent(selected.entity);
-			if (object == nullptr || object->meshID == INVALID_ENTITY)
-				break;
-
-			SoftBodyPhysicsComponent* softbody = scene.softbodies.GetComponent(object->meshID);
+			SoftBodyPhysicsComponent* softbody = scene.softbodies.GetComponent(entity);
 			if (softbody == nullptr)
 				break;
 
@@ -1544,15 +1780,14 @@ void PaintToolWindow::ConsumeHistoryOperation(wi::Archive& archive, bool undo)
 			archive >> archive_softbody.weights;
 
 			softbody->weights = archive_softbody.weights;
-
-			softbody->_flags |= SoftBodyPhysicsComponent::FORCE_RESET;
+			softbody->Reset();
 		}
 		break;
 		case PaintToolWindow::MODE_HAIRPARTICLE_ADD_TRIANGLE:
 		case PaintToolWindow::MODE_HAIRPARTICLE_REMOVE_TRIANGLE:
 		case PaintToolWindow::MODE_HAIRPARTICLE_LENGTH:
 		{
-			wi::HairParticleSystem* hair = scene.hairs.GetComponent(selected.entity);
+			wi::HairParticleSystem* hair = scene.hairs.GetComponent(entity);
 			if (hair == nullptr)
 				break;
 
@@ -1562,6 +1797,35 @@ void PaintToolWindow::ConsumeHistoryOperation(wi::Archive& archive, bool undo)
 			hair->vertex_lengths = archive_hair.vertex_lengths;
 
 			hair->_flags |= wi::HairParticleSystem::REBUILD_BUFFERS;
+		}
+		break;
+		case PaintToolWindow::MODE_TERRAIN_MATERIAL:
+		{
+			for (size_t i = 0; i < scene.terrains.GetCount(); ++i)
+			{
+				wi::terrain::Terrain& terrain = scene.terrains[i];
+				for (auto& chunk : terrain.chunks)
+				{
+					auto& chunk_data = chunk.second;
+					if (chunk_data.entity == entity)
+					{
+						archive >> terrain_material_layer;
+						size_t count = 0;
+						archive >> count;
+						chunk_data.blendmap_layers.resize(count);
+						for (size_t l = terrain_material_layer; l < count; ++l)
+						{
+							archive >> chunk_data.blendmap_layers[l].pixels;
+						}
+						chunk_data.blendmap = {};
+						if (chunk_data.vt != nullptr)
+						{
+							chunk_data.vt->invalidate();
+						}
+						break;
+					}
+				}
+			}
 		}
 		break;
 		default:
@@ -1594,55 +1858,129 @@ void PaintToolWindow::ReplaceEditTextureSlot(wi::scene::MaterialComponent& mater
 void PaintToolWindow::ResizeLayout()
 {
 	wi::gui::Window::ResizeLayout();
-	const float padding = 4;
-	const float width = GetWidgetAreaSize().x;
-	float y = padding;
 
-	auto add = [&](wi::gui::Widget& widget) {
-		if (!widget.IsVisible())
-			return;
-		const float margin_left = 110;
-		const float margin_right = 30;
-		widget.SetPos(XMFLOAT2(margin_left, y));
-		widget.SetSize(XMFLOAT2(width - margin_left - margin_right, widget.GetScale().y));
-		y += widget.GetSize().y;
-		y += padding;
-	};
-	auto add_right = [&](wi::gui::Widget& widget) {
-		if (!widget.IsVisible())
-			return;
-		const float margin_right = 30;
-		widget.SetPos(XMFLOAT2(width - margin_right - widget.GetSize().x, y));
-		y += widget.GetSize().y;
-		y += padding;
-	};
-	auto add_fullwidth = [&](wi::gui::Widget& widget) {
-		if (!widget.IsVisible())
-			return;
-		const float margin_left = padding;
-		const float margin_right = padding;
-		widget.SetPos(XMFLOAT2(margin_left, y));
-		widget.SetSize(XMFLOAT2(width - margin_left - margin_right, widget.GetScale().y));
-		y += widget.GetSize().y;
-		y += padding;
-	};
+	layout.margin_left = 110;
 
-	add(modeComboBox);
-	add_fullwidth(infoLabel);
-	add_fullwidth(colorPicker);
-	add(radiusSlider);
-	add(amountSlider);
-	add(smoothnessSlider);
-	add(spacingSlider);
-	add(rotationSlider);
-	add(stabilizerSlider);
-	add_right(backfaceCheckBox);
-	wireCheckBox.SetPos(XMFLOAT2(backfaceCheckBox.GetPos().x - wireCheckBox.GetSize().x - 100, backfaceCheckBox.GetPos().y));
-	add_right(pressureCheckBox);
-	add(textureSlotComboBox);
-	add(brushShapeComboBox);
-	add(axisCombo);
-	add(saveTextureButton);
-	add_right(brushTextureButton);
-	add_right(revealTextureButton);
+	layout.add(modeComboBox);
+	layout.add_fullwidth(infoLabel);
+	layout.add_fullwidth(colorPicker);
+	layout.add(radiusSlider);
+	layout.add(amountSlider);
+	layout.add(smoothnessSlider);
+	layout.add(spacingSlider);
+	layout.add(rotationSlider);
+	layout.add(stabilizerSlider);
+	layout.add_right(wireCheckBox, backfaceCheckBox);
+	layout.add_right(terrainCheckBox, alphaCheckBox, pressureCheckBox);
+	layout.add(textureSlotComboBox);
+	layout.add(brushShapeComboBox);
+	layout.add(axisCombo);
+	layout.add(saveTextureButton);
+	layout.add_right(brushTextureButton);
+	layout.add_right(revealTextureButton);
+
+	if (GetMode() == MODE_TERRAIN_MATERIAL)
+	{
+		Scene& scene = editor->GetCurrentScene();
+		if (scene.terrains.GetCount() > 0)
+		{
+			const wi::terrain::Terrain& terrain = scene.terrains[0];
+
+			wi::gui::Theme theme;
+			theme.image.CopyFrom(sprites[wi::gui::IDLE].params);
+			theme.image.background = false;
+			theme.image.blendFlag = wi::enums::BLENDMODE_ALPHA;
+			theme.font.CopyFrom(font.params);
+			theme.shadow_color = wi::Color::lerp(theme.font.color, wi::Color::Transparent(), 0.25f);
+			theme.tooltipFont.CopyFrom(tooltipFont.params);
+			theme.tooltipImage.CopyFrom(tooltipSprite.params);
+
+			const float preview_size = 100;
+			const float border = 20 * preview_size / 100.0f;
+			int cells = std::max(1, int(GetWidgetAreaSize().x / (preview_size + border)));
+			float offset_y = layout.y + border;
+
+			for (size_t i = 0; i < terrain_material_buttons.size(); ++i)
+			{
+				Entity entity = terrain.materialEntities[i];
+
+				wi::gui::Button& button = terrain_material_buttons[i];
+
+				button.SetTheme(theme);
+				button.SetColor(wi::Color::White());
+				button.SetColor(wi::Color(255, 255, 255, 150), wi::gui::IDLE);
+				button.SetShadowRadius(0);
+
+				if (terrain_material_layer == i)
+				{
+					button.SetColor(wi::Color::White());
+					button.SetShadowRadius(3);
+				}
+
+				MaterialComponent* material = scene.materials.GetComponent(entity);
+				if (material != nullptr)
+				{
+					// find first good texture that we can show:
+					button.SetImage({});
+					for (auto& slot : material->textures)
+					{
+						if (slot.resource.IsValid())
+						{
+							button.SetImage(slot.resource);
+							break;
+						}
+					}
+				}
+
+				const NameComponent* name = scene.names.GetComponent(entity);
+				if (name != nullptr)
+				{
+					button.SetTooltip(name->name);
+				}
+				button.font.params.h_align = wi::font::WIFALIGN_CENTER;
+				button.font.params.v_align = wi::font::WIFALIGN_BOTTOM;
+
+				button.SetSize(XMFLOAT2(preview_size, preview_size));
+				button.SetPos(XMFLOAT2((i % cells) * (preview_size + border) + border, offset_y));
+				if ((i % cells) == (cells - 1))
+				{
+					offset_y += preview_size + border;
+				}
+			}
+		}
+	}
+}
+
+void PaintToolWindow::RecreateTerrainMaterialButtons()
+{
+	if (editor == nullptr)
+		return;
+
+	const wi::scene::Scene& scene = editor->GetCurrentScene();
+	if (scene.terrains.GetCount() == 0)
+		return;
+	const wi::terrain::Terrain& terrain = scene.terrains[0];
+
+	for (auto& x : terrain_material_buttons)
+	{
+		RemoveWidget(&x);
+	}
+	terrain_material_buttons.resize(terrain.materialEntities.size());
+
+	for (size_t i = 0; i < terrain.materialEntities.size(); ++i)
+	{
+		Entity entity = terrain.materialEntities[i];
+
+		wi::gui::Button& button = terrain_material_buttons[i];
+		button.Create("");
+		AddWidget(&button);
+		button.SetText("");
+		button.SetTooltip("");
+
+		button.OnClick([i, this](wi::gui::EventArgs args) {
+			terrain_material_layer = i;
+		});
+	}
+
+	ResizeLayout();
 }

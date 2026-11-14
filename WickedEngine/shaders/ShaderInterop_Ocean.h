@@ -2,46 +2,35 @@
 #define WI_SHADERINTEROP_OCEAN_H
 #include "ShaderInterop.h"
 
-#define OCEAN_COMPUTE_TILESIZE 8
+static const uint OCEAN_COMPUTE_TILESIZE = 8;
 
-// Simulation constants:
-
-CBUFFER(Ocean_Simulation_ImmutableCB, CBSLOT_OTHER_OCEAN_SIMULATION_IMMUTABLE)
+CBUFFER(OceanCB, CBSLOT_OTHER_OCEAN)
 {
-	uint g_ActualDim;
-	uint g_InWidth;
-	uint g_OutWidth;
-	uint g_OutHeight;
+	float4 xOceanWaterColor;
+	float4 xOceanExtinctionColor;
+	float4 xOceanScreenSpaceParams;
 
-	uint g_DtxAddressOffset;
-	uint g_DtyAddressOffset;
-};
+	float xOceanTexelLength;
+	float xOceanPatchSizeRecip;
+	float xOceanMapHalfTexel;
+	float xOceanWaterHeight;
 
-CBUFFER(Ocean_Simulation_PerFrameCB, CBSLOT_OTHER_OCEAN_SIMULATION_PERFRAME)
-{
-	float g_TimeScale;
-	float g_ChoppyScale;
-	float g_GridLen;
-	float Ocean_Simulation_PerFrameCB_padding;
-};
+	float xOceanSurfaceDisplacementTolerance;
+	uint xOceanActualDim;
+	uint xOceanInWidth;
+	uint xOceanOutWidth;
 
+	uint xOceanOutHeight;
+	// Element offset to the second packed FFT field (Dy). The first field packs
+	// height (real output) + Dx (imaginary output) via the two-for-one real FFT.
+	uint xOceanSecondFieldOffset;
+	uint xOcean_padding2;
+	float xOceanTimeScale;
 
-// Rendering constants:
-
-CBUFFER(Ocean_RenderCB, CBSLOT_OTHER_OCEAN_RENDER)
-{
-	float4		xOceanWaterColor;
-	float4		xOceanScreenSpaceParams;
-
-	float		xOceanTexelLength;
-	float		xOceanPatchSizeRecip;
-	float		xOceanMapHalfTexel;
-	float		xOceanWaterHeight;
-
-	float		xOceanSurfaceDisplacementTolerance;
-	float		xOceanPadding1;
-	float		xOceanPadding2;
-	float		xOceanPadding3;
+	float xOceanChoppyScale;
+	float xOceanGridLen;
+	float xOceanWaveAmplitude;
+	float xOcean_padding1;
 };
 
 #endif // WI_SHADERINTEROP_OCEAN_H

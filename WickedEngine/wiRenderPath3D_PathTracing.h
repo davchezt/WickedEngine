@@ -5,13 +5,14 @@
 namespace wi
 {
 
-	class RenderPath3D_PathTracing :
-		public RenderPath3D
+	class RenderPath3D_PathTracing : public RenderPath3D
 	{
 	protected:
 		int sam = -1;
 		int target = 1024;
 		wi::graphics::Texture traceResult;
+		wi::graphics::Texture traceDepth;
+		wi::graphics::Texture traceStencil;
 
 		wi::vector<uint8_t> texturedata_src;
 		wi::vector<uint8_t> texturedata_dst;
@@ -22,12 +23,11 @@ namespace wi
 		wi::graphics::Texture denoiserResult;
 		wi::jobsystem::context denoiserContext;
 
-		wi::graphics::RenderPass renderpass_debugbvh;
-
 		void ResizeBuffers() override;
 
 	public:
-		const wi::graphics::Texture* GetDepthStencil() const override { return nullptr; };
+
+		~RenderPath3D_PathTracing();
 
 		void Update(float dt) override;
 		void Render() const override;
@@ -41,9 +41,13 @@ namespace wi
 		float getDenoiserProgress() const { return denoiserProgress; }
 		bool isDenoiserAvailable() const;
 
-		void resetProgress() { sam = -1; denoiserProgress = 0; }
+		void resetProgress() { wi::jobsystem::Wait(denoiserContext); sam = -1; denoiserProgress = 0; volumetriccloudResources.ResetFrame(); }
 
 		uint8_t instanceInclusionMask_PathTrace = 0xFF;
+
+		// This is an identifier of RenderPath subtype that is used for lua binding.
+		static constexpr const auto script_check_identifier = relative_path_storage(__FILE__);
+		const char* GetScriptBindingID() const override { return script_check_identifier.c_str(); }
 	};
 
 }

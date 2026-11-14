@@ -10,43 +10,53 @@ struct ImpostorOutput
 
 ImpostorOutput main(PixelInput input)
 {
+	ShaderMaterial material = GetMaterial();
+
+	float4 uvsets = input.GetUVSets();
+	
 	float4 color;
 	[branch]
-	if (GetMaterial().textures[BASECOLORMAP].IsValid())
+	if (material.textures[BASECOLORMAP].IsValid())
 	{
-		color = GetMaterial().textures[BASECOLORMAP].Sample(sampler_objectshader, input.uvsets);
+		color = material.textures[BASECOLORMAP].Sample(sampler_linear_wrap, uvsets);
 	}
 	else
 	{
 		color = 1;
 	}
-	color *= GetMaterial().baseColor /** input.color*/;
-	clip(color.a - GetMaterial().alphaTest);
+	color *= input.color;
+	clip(color.a - material.GetAlphaTest());
 
 	float3 N = normalize(input.nor);
-	float3 P = input.pos3D;
-
-	float3x3 TBN = compute_tangent_frame(N, P, input.uvsets.xy);
-
+	
+	input.tan.w = input.tan.w < 0 ? -1 : 1;
+	half3 bitangent = cross(input.tan.xyz, input.nor) * input.tan.w;
+	float3x3 TBN = float3x3(input.tan.xyz, bitangent, input.nor); // unnormalized TBN! http://www.mikktspace.com/
+	
 	[branch]
-	if (GetMaterial().textures[NORMALMAP].IsValid())
+	if (material.textures[NORMALMAP].IsValid())
 	{
-		float3 bumpColor;
-		NormalMapping(input.uvsets, N, TBN, bumpColor);
+		[branch]
+		if (material.GetNormalMapStrength() > 0 && material.textures[NORMALMAP].IsValid())
+		{
+			float3 normalMap = float3(material.textures[NORMALMAP].Sample(sampler_objectshader, uvsets).rg, 1);
+			float3 bumpColor = normalMap.rgb * 2 - 1;
+			N = normalize(lerp(N, mul(bumpColor, TBN), material.GetNormalMapStrength()));
+		}
 	}
 
 	float4 surfaceMap = 1;
 	[branch]
-	if (GetMaterial().textures[SURFACEMAP].IsValid())
+	if (material.textures[SURFACEMAP].IsValid())
 	{
-		surfaceMap = GetMaterial().textures[SURFACEMAP].Sample(sampler_objectshader, input.uvsets);
+		surfaceMap = material.textures[SURFACEMAP].Sample(sampler_linear_wrap, uvsets);
 	}
 
 	float4 surface;
 	surface.r = surfaceMap.r;
-	surface.g = GetMaterial().roughness * surfaceMap.g;
-	surface.b = GetMaterial().metalness * surfaceMap.b;
-	surface.a = GetMaterial().reflectance * surfaceMap.a;
+	surface.g = material.GetRoughness() * surfaceMap.g;
+	surface.b = material.GetMetalness() * surfaceMap.b;
+	surface.a = material.GetReflectance() * surfaceMap.a;
 
 	ImpostorOutput output;
 	output.color = color;

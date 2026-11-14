@@ -10,6 +10,20 @@ namespace wi::primitive
 	}
 	AABB AABB::transform(const XMMATRIX& mat) const
 	{
+#if 1
+		const XMVECTOR MIN = XMLoadFloat3(&_min);
+		const XMVECTOR MAX = XMLoadFloat3(&_max);
+		const XMVECTOR C = XMVectorScale(XMVectorAdd(MIN, MAX), 0.5f);
+		const XMVECTOR E = XMVectorAbs(XMVectorScale(XMVectorSubtract(MAX, MIN), 0.5f));
+		const XMVECTOR T = XMVector3Transform(C, mat);
+		XMVECTOR H = XMVectorMultiply(XMVectorAbs(mat.r[0]), XMVectorSplatX(E));
+		H = XMVectorMultiplyAdd(XMVectorAbs(mat.r[1]), XMVectorSplatY(E), H);
+		H = XMVectorMultiplyAdd(XMVectorAbs(mat.r[2]), XMVectorSplatZ(E), H);
+		XMFLOAT3 min, max;
+		XMStoreFloat3(&min, XMVectorSubtract(T, H));
+		XMStoreFloat3(&max, XMVectorAdd(T, H));
+		return AABB(min, max);
+#else
 		const XMVECTOR vcorners[8] = {
 			XMVector3Transform(XMLoadFloat3(&_min), mat),
 			XMVector3Transform(XMVectorSet(_min.x, _max.y, _min.z, 1), mat),
@@ -41,6 +55,7 @@ namespace wi::primitive
 		XMStoreFloat3(&min, vmin);
 		XMStoreFloat3(&max, vmax);
 		return AABB(min, max);
+#endif
 	}
 	AABB AABB::transform(const XMFLOAT4X4& mat) const
 	{
@@ -53,9 +68,14 @@ namespace wi::primitive
 	XMFLOAT3 AABB::getHalfWidth() const
 	{
 		XMFLOAT3 center = getCenter();
-		return XMFLOAT3(abs(_max.x - center.x), abs(_max.y - center.y), abs(_max.z - center.z));
+		return XMFLOAT3(std::abs(_max.x - center.x), std::abs(_max.y - center.y), std::abs(_max.z - center.z));
 	}
-	XMMATRIX AABB::AABB::getAsBoxMatrix() const
+	XMFLOAT3 AABB::getExtents() const
+	{
+		XMFLOAT3 center = getCenter();
+		return XMFLOAT3(std::abs(_max.x - _min.x), std::abs(_max.y - _min.y), std::abs(_max.z - _min.z));
+	}
+	XMMATRIX AABB::getAsBoxMatrix() const
 	{
 		XMFLOAT3 ext = getHalfWidth();
 		XMMATRIX sca = XMMatrixScaling(ext.x, ext.y, ext.z);
@@ -63,6 +83,25 @@ namespace wi::primitive
 		XMMATRIX tra = XMMatrixTranslation(pos.x, pos.y, pos.z);
 
 		return sca * tra;
+	}
+	XMMATRIX AABB::getUnormRemapMatrix() const
+	{
+		return
+			XMMatrixScaling(_max.x - _min.x, _max.y - _min.y, _max.z - _min.z) *
+			XMMatrixTranslation(_min.x, _min.y, _min.z)
+			;
+	}
+	void AABB::unormRemap(XMMATRIX& mat) const
+	{
+		const XMVECTOR r0 = mat.r[0];
+		const XMVECTOR r1 = mat.r[1];
+		const XMVECTOR r2 = mat.r[2];
+		mat.r[3] = XMVectorMultiplyAdd(r0, XMVectorReplicate(_min.x), mat.r[3]);
+		mat.r[3] = XMVectorMultiplyAdd(r1, XMVectorReplicate(_min.y), mat.r[3]);
+		mat.r[3] = XMVectorMultiplyAdd(r2, XMVectorReplicate(_min.z), mat.r[3]);
+		mat.r[0] = XMVectorScale(r0, _max.x - _min.x);
+		mat.r[1] = XMVectorScale(r1, _max.y - _min.y);
+		mat.r[2] = XMVectorScale(r2, _max.z - _min.z);
 	}
 	float AABB::getArea() const
 	{
@@ -73,7 +112,7 @@ namespace wi::primitive
 	float AABB::getRadius() const
 	{
 		XMFLOAT3 abc = getHalfWidth();
-		return std::sqrt(std::pow(std::sqrt(std::pow(abc.x, 2.0f) + std::pow(abc.y, 2.0f)), 2.0f) + std::pow(abc.z, 2.0f));
+		return std::sqrt(sqr(std::sqrt(sqr(abc.x) + sqr(abc.y))) + sqr(abc.z));
 	}
 	AABB::INTERSECTION_TYPE AABB::intersects(const AABB& b) const
 	{
@@ -132,6 +171,12 @@ namespace wi::primitive
 		if (p.z < _min.z) return false;
 		return true;
 	}
+	bool AABB::intersects(const XMVECTOR& P) const
+	{
+		XMFLOAT3 p;
+		XMStoreFloat3(&p, P);
+		return intersects(p);
+	}
 	bool AABB::intersects(const Ray& ray) const
 	{
 		if (!IsValid())
@@ -182,6 +227,16 @@ namespace wi::primitive
 		bool intersection = frustum.Intersects(bb);
 		return intersection;
 	}
+	bool AABB::intersects(const BoundingBox& other) const
+	{
+		BoundingBox bb = BoundingBox(getCenter(), getHalfWidth());
+		return bb.Intersects(other);
+	}
+	bool AABB::intersects(const BoundingOrientedBox& other) const
+	{
+		BoundingBox bb = BoundingBox(getCenter(), getHalfWidth());
+		return bb.Intersects(other);
+	}
 	AABB AABB::operator* (float a)
 	{
 		XMFLOAT3 min = getMin();
@@ -197,6 +252,17 @@ namespace wi::primitive
 	AABB AABB::Merge(const AABB& a, const AABB& b)
 	{
 		return AABB(wi::math::Min(a.getMin(), b.getMin()), wi::math::Max(a.getMax(), b.getMax()));
+	}
+	void AABB::AddPoint(const XMFLOAT3& pos)
+	{
+		_min = wi::math::Min(_min, pos);
+		_max = wi::math::Max(_max, pos);
+	}
+	void AABB::AddPoint(const XMVECTOR& P)
+	{
+		XMFLOAT3 p;
+		XMStoreFloat3(&p, P);
+		AddPoint(p);
 	}
 	void AABB::Serialize(wi::Archive& archive, wi::ecs::EntitySerializer& seri)
 	{
@@ -223,12 +289,47 @@ namespace wi::primitive
 			}
 		}
 	}
+	XMFLOAT4 AABB::ProjectToScreen(const XMMATRIX& ViewProjection) const
+	{
+		XMVECTOR SCREEN_MIN = XMVectorSet(1000000, 1000000, 1000000, 1000000);
+		XMVECTOR SCREEN_MAX = XMVectorSet(-1000000, -1000000, -1000000, -1000000);
+		XMVECTOR MUL = XMVectorSet(0.5f, -0.5f, 1, 1);
+		XMVECTOR ADD = XMVectorSet(0.5f, 0.5f, 0, 0);
+		for (int i = 0; i < 8; ++i)
+		{
+			XMFLOAT3 c = corner(i);
+			XMVECTOR C = XMLoadFloat3(&c);
+			C = XMVector3TransformCoord(C, ViewProjection);	// world -> clip
+			C = XMVectorMultiplyAdd(C, MUL, ADD);			// clip -> uv
+			SCREEN_MIN = XMVectorMin(SCREEN_MIN, C);
+			SCREEN_MAX = XMVectorMax(SCREEN_MAX, C);
+		}
+
+		XMFLOAT4 ret;
+		ret.x = XMVectorGetX(SCREEN_MIN);
+		ret.y = XMVectorGetY(SCREEN_MIN);
+		ret.z = XMVectorGetX(SCREEN_MAX);
+		ret.w = XMVectorGetY(SCREEN_MAX);
+
+		return ret;
+	}
 
 
 
 
 
-
+	bool Sphere::intersects(const XMVECTOR& P) const
+	{
+		float distsq = wi::math::DistanceSquared(XMLoadFloat3(&center), P);
+		float radiussq = radius * radius;
+		return distsq < radiussq;
+	}
+	bool Sphere::intersects(const XMFLOAT3& P) const
+	{
+		float distsq = wi::math::DistanceSquared(center, P);
+		float radiussq = radius * radius;
+		return distsq < radiussq;
+	}
 	bool Sphere::intersects(const AABB& b) const
 	{
 		if (!b.IsValid())
@@ -287,8 +388,10 @@ namespace wi::primitive
 		A -= N * b.radius;
 		B += N * b.radius;
 		XMVECTOR C = XMLoadFloat3(&center);
-		dist = wi::math::GetPointSegmentDistance(C, A, B);
-		XMStoreFloat3(&direction, (C - wi::math::ClosestPointOnLineSegment(A, B, C)) / dist);
+		XMVECTOR D = C - wi::math::ClosestPointOnLineSegment(A, B, C);
+		dist = XMVectorGetX(XMVector3Length(D));
+		D /= dist;
+		XMStoreFloat3(&direction, D);
 		dist = dist - radius - b.radius;
 		return dist < 0;
 	}
@@ -324,12 +427,12 @@ namespace wi::primitive
 		float B = XMVectorGetX(XMVector3Dot(OC, D));
 		float c = XMVectorGetX(XMVector3Dot(OC, OC)) - radius * radius;
 		float discr = B * B - c;
-		if (discr > 0)
+		if (discr >= 0)
 		{
 			float discrSq = std::sqrt(discr);
 
 			float t = (-B - discrSq);
-			if (t<b.TMax && t>b.TMin)
+			if (t >= b.TMin && t <= b.TMax)
 			{
 				XMVECTOR P = O + D * t;
 				XMVECTOR N = XMVector3Normalize(P - C);
@@ -339,15 +442,32 @@ namespace wi::primitive
 			}
 
 			t = (-B + discrSq);
-			if (t<b.TMax && t>b.TMin)
+			if (t >= b.TMin && t <= b.TMax)
 			{
 				XMVECTOR P = O + D * t;
 				XMVECTOR N = XMVector3Normalize(P - C);
 				dist = t;
 				XMStoreFloat3(&direction, N);
+				return true;
 			}
 		}
 		return false;
+	}
+	XMFLOAT4X4 Sphere::GetPlacementOrientation(const XMFLOAT3& position, const XMFLOAT3& normal) const
+	{
+		XMVECTOR N = XMVector3Normalize(XMLoadFloat3(&normal));
+		XMVECTOR P = XMLoadFloat3(&position);
+		XMVECTOR E = XMLoadFloat3(&center) - P;
+		XMVECTOR T = XMVector3Normalize(XMVector3Cross(N, P - E));
+		XMVECTOR B = XMVector3Normalize(XMVector3Cross(T, N));
+		N = XMVectorSetW(N, 0);
+		T = XMVectorSetW(T, 0);
+		B = XMVectorSetW(B, 0);
+		P = XMVectorSetW(P, 1);
+		XMMATRIX M = { T, N, B, P };
+		XMFLOAT4X4 orientation;
+		XMStoreFloat4x4(&orientation, M);
+		return orientation;
 	}
 
 
@@ -480,7 +600,41 @@ namespace wi::primitive
 		sphere.radius = radius;
 		return sphere.intersects(ray, dist, direction);
 	}
+	bool Capsule::intersects(const XMFLOAT3& point) const
+	{
+		XMVECTOR Base = XMLoadFloat3(&base);
+		XMVECTOR Tip = XMLoadFloat3(&tip);
+		XMVECTOR Radius = XMVectorReplicate(radius);
+		XMVECTOR Normal = XMVector3Normalize(Tip - Base);
+		XMVECTOR LineEndOffset = Normal * Radius;
+		XMVECTOR A = Base + LineEndOffset;
+		XMVECTOR B = Tip - LineEndOffset;
 
+		XMVECTOR P = XMLoadFloat3(&point);
+
+		XMVECTOR C = wi::math::ClosestPointOnLineSegment(A, B, P);
+
+		return XMVectorGetX(XMVector3Length(P - C)) <= radius;
+	}
+	XMFLOAT4X4 Capsule::GetPlacementOrientation(const XMFLOAT3& position, const XMFLOAT3& normal) const
+	{
+		const XMVECTOR Base = XMLoadFloat3(&base);
+		const XMVECTOR Tip = XMLoadFloat3(&tip);
+		const XMVECTOR Axis = XMVector3Normalize(Tip - Base);
+		XMVECTOR N = XMVector3Normalize(XMLoadFloat3(&normal));
+		XMVECTOR P = XMLoadFloat3(&position);
+		XMVECTOR E = Axis;
+		XMVECTOR T = XMVector3Normalize(XMVector3Cross(N, P - E));
+		XMVECTOR B = XMVector3Normalize(XMVector3Cross(T, N));
+		N = XMVectorSetW(N, 0);
+		T = XMVectorSetW(T, 0);
+		B = XMVectorSetW(B, 0);
+		P = XMVectorSetW(P, 1);
+		XMMATRIX M = { T, N, B, P };
+		XMFLOAT4X4 orientation;
+		XMStoreFloat4x4(&orientation, M);
+		return orientation;
+	}
 
 
 
@@ -682,6 +836,35 @@ namespace wi::primitive
 	{
 		return b.intersects(*this, dist, direction);
 	}
+	void Ray::CreateFromPoints(const XMFLOAT3& a, const XMFLOAT3& b)
+	{
+		XMVECTOR A = XMLoadFloat3(&a);
+		XMVECTOR B = XMLoadFloat3(&b);
+		XMVECTOR D = B - A;
+		XMVECTOR L = XMVector3Length(D);
+		D /= L;
+		XMStoreFloat3(&origin, A);
+		XMStoreFloat3(&direction, D);
+		XMStoreFloat3(&direction_inverse, XMVectorReciprocal(D));
+		TMin = 0;
+		TMax = XMVectorGetX(L);
+	}
+	XMFLOAT4X4 Ray::GetPlacementOrientation(const XMFLOAT3& position, const XMFLOAT3& normal) const
+	{
+		XMVECTOR N = XMVector3Normalize(XMLoadFloat3(&normal));
+		XMVECTOR P = XMLoadFloat3(&position);
+		XMVECTOR E = XMLoadFloat3(&origin);
+		XMVECTOR T = XMVector3Normalize(XMVector3Cross(N, P - E));
+		XMVECTOR B = XMVector3Normalize(XMVector3Cross(T, N));
+		N = XMVectorSetW(N, 0);
+		T = XMVectorSetW(T, 0);
+		B = XMVectorSetW(B, 0);
+		P = XMVectorSetW(P, 1);
+		XMMATRIX M = { T, N, B, P };
+		XMFLOAT4X4 orientation;
+		XMStoreFloat4x4(&orientation, M);
+		return orientation;
+	}
 
 
 
@@ -794,6 +977,18 @@ namespace wi::primitive
 
 
 
+	bool Hitbox2D::intersects(const XMFLOAT2& b) const
+	{
+		if (pos.x + siz.x < b.x)
+			return false;
+		else if (pos.x > b.x)
+			return false;
+		else if (pos.y + siz.y < b.y)
+			return false;
+		else if (pos.y > b.y)
+			return false;
+		return true;
+	}
 	bool Hitbox2D::intersects(const Hitbox2D& b) const
 	{
 		return wi::math::Collision2D(pos, siz, b.pos, b.siz);

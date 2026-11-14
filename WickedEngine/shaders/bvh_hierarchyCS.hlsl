@@ -12,9 +12,9 @@
 // in "Maximizing Parallelism in the Construction of BVHs, Octrees,
 // and k-d Trees"
 
-ByteAddressBuffer primitiveCounterBuffer : register(t0);
+StructuredBuffer<uint> primitiveCounterBuffer : register(t0);
 StructuredBuffer<uint> primitiveIDBuffer : register(t1);
-StructuredBuffer<float> primitiveMortonBuffer : register(t2); // float because it was sorted
+StructuredBuffer<uint> primitiveMortonBuffer : register(t2);
 
 RWByteAddressBuffer bvhNodeBuffer : register(u0);
 RWStructuredBuffer<uint> bvhParentBuffer : register(u1);
@@ -33,8 +33,8 @@ int GetLongestCommonPrefix(uint indexA, uint indexB, uint elementCount)
 	}
 	else
 	{
-		uint mortonCodeA = (float)primitiveMortonBuffer[primitiveIDBuffer[indexA]];
-		uint mortonCodeB = (float)primitiveMortonBuffer[primitiveIDBuffer[indexB]];
+		uint mortonCodeA = primitiveMortonBuffer[indexA];
+		uint mortonCodeB = primitiveMortonBuffer[indexB];
 		if (mortonCodeA != mortonCodeB)
 		{
 			return CountLeadingZeroes(mortonCodeA ^ mortonCodeB);
@@ -70,7 +70,7 @@ uint2 DetermineRange(uint idx, uint elementCount)
 	}
 
 	int j = idx + length * d;
-	return uint2(min(idx, j), max(idx, j));
+	return uint2(min((int)idx, j), max((int)idx, j));
 }
 
 int FindSplit(int first, uint last, uint elementCount)
@@ -101,7 +101,7 @@ int FindSplit(int first, uint last, uint elementCount)
 void main( uint3 DTid : SV_DispatchThreadID )
 {
 	const uint idx = DTid.x;
-	const uint primitiveCount = primitiveCounterBuffer.Load(0);
+	const uint primitiveCount = primitiveCounterBuffer[0];
 
 	if (idx < primitiveCount - 1)
 	{
@@ -130,6 +130,7 @@ void main( uint3 DTid : SV_DispatchThreadID )
 		node.LeftChildIndex = childAIndex;
 		node.RightChildIndex = childBIndex;
 		bvhNodeBuffer.Store<BVHNode>(idx * sizeof(BVHNode), node);
+		
 		// write to children:
 		bvhParentBuffer[childAIndex] = idx;
 		bvhParentBuffer[childBIndex] = idx;

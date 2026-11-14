@@ -1,131 +1,203 @@
 #include "globals.hlsli"
 #include "emittedparticleHF.hlsli"
 #include "ShaderInterop_EmittedParticle.h"
+#include "shadowHF.hlsli"
+
+struct PushEmit
+{
+	uint offset;
+};
+PUSHCONSTANT(push, PushEmit);
+
+ByteAddressBuffer emitBuffer : register(t0);
 
 RWStructuredBuffer<Particle> particleBuffer : register(u0);
 RWStructuredBuffer<uint> aliveBuffer_CURRENT : register(u1);
 RWStructuredBuffer<uint> aliveBuffer_NEW : register(u2);
 RWStructuredBuffer<uint> deadBuffer : register(u3);
-RWByteAddressBuffer counterBuffer : register(u4);
+RWStructuredBuffer<ParticleCounters> counterBuffer : register(u4);
 
-#ifdef EMIT_FROM_MESH
-Buffer<uint> meshIndexBuffer : register(t0);
-ByteAddressBuffer meshVertexBuffer_POS : register(t1);
-#endif // EMIT_FROM_MESH
-
-
-[numthreads(THREADCOUNT_EMIT, 1, 1)]
+[numthreads(64, 1, 1)]
 void main(uint3 DTid : SV_DispatchThreadID)
 {
-	uint emitCount = counterBuffer.Load(PARTICLECOUNTER_OFFSET_REALEMITCOUNT);
+	EmitLocation location = emitBuffer.Load<EmitLocation>(push.offset);
+	
+	if (DTid.x >= location.count)
+		return;
+	
+	RNG rng;
+	rng.init(uint2(xEmitterRandomness, DTid.x), GetFrame().frame_count);
 
-	if(DTid.x < emitCount)
-	{
-		RNG rng;
-		rng.init(uint2(xEmitterRandomness, DTid.x), GetFrame().frame_count);
-
-		const float4x4 worldMatrix = xEmitterTransform.GetMatrix();
+	const float4x4 worldMatrix = location.transform.GetMatrix();
+	float3 emitPos = 0;
+	float3 nor = 0;
+	float3 velocity = xParticleVelocity;
+	float4 baseColor = EmitterGetMaterial().GetBaseColor() * unpack_rgba(location.color);
 		
 #ifdef EMIT_FROM_MESH
-		// random triangle on emitter surface:
-		uint tri = (uint)((xEmitterMeshIndexCount / 3) * hash1(DTid.x + GetFrame().frame_count));
+	// random subset of emitter mesh:
+	uint geometryIndex = xEmitterMeshGeometryOffset + rng.next_uint(xEmitterMeshGeometryCount);
+	ShaderGeometry geometry = load_geometry(geometryIndex);
+	
+	// random triangle on emitter surface:
+	const uint triangleCount = geometry.indexCount / 3;
+	const uint tri = rng.next_uint(triangleCount);
 
-		// load indices of triangle from index buffer
-		uint i0 = meshIndexBuffer[tri * 3 + 0];
-		uint i1 = meshIndexBuffer[tri * 3 + 1];
-		uint i2 = meshIndexBuffer[tri * 3 + 2];
+	// load indices of triangle from index buffer
+	uint i0 = 0;
+	uint i1 = 0;
+	uint i2 = 0;
+	[branch]
+	if(geometry.ib >= 0)
+	{
+		Buffer<uint> buf = bindless_buffers_uint[descriptor_index(geometry.ib)];
+		i0 = buf[geometry.indexOffset + tri * 3 + 0];
+		i1 = buf[geometry.indexOffset + tri * 3 + 1];
+		i2 = buf[geometry.indexOffset + tri * 3 + 2];
+	}
 
-		// load vertices of triangle from vertex buffer:
-		float4 pos_nor0 = asfloat(meshVertexBuffer_POS.Load4(i0 * xEmitterMeshVertexPositionStride));
-		float4 pos_nor1 = asfloat(meshVertexBuffer_POS.Load4(i1 * xEmitterMeshVertexPositionStride));
-		float4 pos_nor2 = asfloat(meshVertexBuffer_POS.Load4(i2 * xEmitterMeshVertexPositionStride));
+	// load vertices of triangle from vertex buffer:
+	float3 pos0 = 0;
+	float3 pos1 = 0;
+	float3 pos2 = 0;
+	[branch]
+	if(geometry.vb_pos_wind >= 0)
+	{
+		Buffer<float4> buf = bindless_buffers_float4[geometry.vb_pos_wind];
+		pos0 = buf[i0].xyz;
+		pos1 = buf[i1].xyz;
+		pos2 = buf[i2].xyz;
+	}
 
-		uint nor_u = asuint(pos_nor0.w);
-		float3 nor0;
+	float3 nor0 = 0;
+	float3 nor1 = 0;
+	float3 nor2 = 0;
+	[branch]
+	if(geometry.vb_nor >= 0)
+	{
+		Buffer<float4> buf = bindless_buffers_float4[geometry.vb_nor];
+		nor0 = buf[i0].xyz;
+		nor1 = buf[i1].xyz;
+		nor2 = buf[i2].xyz;
+	}
+
+	// random barycentric coords:
+	float f = rng.next_float();
+	float g = rng.next_float();
+	[flatten]
+	if (f + g > 1)
+	{
+		f = 1 - f;
+		g = 1 - g;
+	}
+	float2 bary = float2(f, g);
+
+	// compute final surface position on triangle from barycentric coords:
+	emitPos = attribute_at_bary(pos0.xyz, pos1.xyz, pos2.xyz, bary);
+	emitPos = mul(xEmitterBaseMeshUnormRemap.GetMatrix(), float4(emitPos, 1)).xyz;
+	nor = normalize(attribute_at_bary(nor0, nor1, nor2, bary));
+	nor = normalize(mul((float3x3)worldMatrix, nor));
+
+	// Take velocity from surface motion:
+	[branch]
+	if(geometry.vb_pre >= 0)
+	{
+		Buffer<float4> buf = bindless_buffers_float4[geometry.vb_pre];
+		float3 pre0 = buf[i0].xyz;
+		float3 pre1 = buf[i1].xyz;
+		float3 pre2 = buf[i2].xyz;
+		float3 pre = attribute_at_bary(pre0.xyz, pre1.xyz, pre2.xyz, bary);
+		pre = mul(xEmitterBaseMeshUnormRemap.GetMatrix(), float4(pre, 1)).xyz;
+		velocity += emitPos - pre;
+	}
+
+	if(xEmitterOptions & EMITTER_OPTION_BIT_TAKE_COLOR_FROM_MESH)
+	{
+		ShaderMaterial material = load_material(geometry.materialIndex);
+		baseColor *= material.GetBaseColor();
+		
+		[branch]
+		if (geometry.vb_col >= 0 && material.IsUsingVertexColors())
 		{
-			nor0.x = (float)((nor_u >> 0) & 0x000000FF) / 255.0f * 2.0f - 1.0f;
-			nor0.y = (float)((nor_u >> 8) & 0x000000FF) / 255.0f * 2.0f - 1.0f;
-			nor0.z = (float)((nor_u >> 16) & 0x000000FF) / 255.0f * 2.0f - 1.0f;
+			Buffer<float4> buf = bindless_buffers_float4[geometry.vb_col];
+			const float4 c0 = buf[i0];
+			const float4 c1 = buf[i1];
+			const float4 c2 = buf[i2];
+			float4 vertexColor = attribute_at_bary(c0, c1, c2, bary);
+			baseColor *= vertexColor;
 		}
-		nor_u = asuint(pos_nor1.w);
-		float3 nor1;
+		
+		float4 uvsets = 0;
+		[branch]
+		if(geometry.vb_uvs >= 0)
 		{
-			nor1.x = (float)((nor_u >> 0) & 0x000000FF) / 255.0f * 2.0f - 1.0f;
-			nor1.y = (float)((nor_u >> 8) & 0x000000FF) / 255.0f * 2.0f - 1.0f;
-			nor1.z = (float)((nor_u >> 16) & 0x000000FF) / 255.0f * 2.0f - 1.0f;
-		}
-		nor_u = asuint(pos_nor2.w);
-		float3 nor2;
-		{
-			nor2.x = (float)((nor_u >> 0) & 0x000000FF) / 255.0f * 2.0f - 1.0f;
-			nor2.y = (float)((nor_u >> 8) & 0x000000FF) / 255.0f * 2.0f - 1.0f;
-			nor2.z = (float)((nor_u >> 16) & 0x000000FF) / 255.0f * 2.0f - 1.0f;
-		}
+			Buffer<float4> buf = bindless_buffers_float4[geometry.vb_uvs];
+			float4 uv0 = lerp(geometry.uv_range_min.xyxy, geometry.uv_range_max.xyxy, buf[i0]);
+			float4 uv1 = lerp(geometry.uv_range_min.xyxy, geometry.uv_range_max.xyxy, buf[i1]);
+			float4 uv2 = lerp(geometry.uv_range_min.xyxy, geometry.uv_range_max.xyxy, buf[i2]);
+			uvsets = attribute_at_bary(uv0, uv1, uv2, bary);
+			uvsets.xy = mad(uvsets.xy, material.texMulAdd.xy, material.texMulAdd.zw);
 
-		// random barycentric coords:
-		float f = rng.next_float();
-		float g = rng.next_float();
-		[flatten]
-		if (f + g > 1)
-		{
-			f = 1 - f;
-			g = 1 - g;
+			[branch]
+			if(material.textures[BASECOLORMAP].IsValid())
+			{
+				baseColor *= material.textures[BASECOLORMAP].SampleLevel(sampler_linear_wrap, uvsets, 0);
+			}
 		}
-
-		// compute final surface position on triangle from barycentric coords:
-		float3 pos = pos_nor0.xyz + f * (pos_nor1.xyz - pos_nor0.xyz) + g * (pos_nor2.xyz - pos_nor0.xyz);
-		float3 nor = nor0 + f * (nor1 - nor0) + g * (nor2 - nor0);
-		pos = mul(worldMatrix, float4(pos, 1)).xyz;
-		nor = normalize(mul((float3x3)worldMatrix, nor));
+	}
 
 #else
 
 #ifdef EMITTER_VOLUME
-		// Emit inside volume:
-		float3 pos = mul(worldMatrix, float4(rng.next_float() * 2 - 1, rng.next_float() * 2 - 1, rng.next_float() * 2 - 1, 1)).xyz;
+	// Emit inside volume:
+	emitPos = float3(rng.next_float() * 2 - 1, rng.next_float() * 2 - 1, rng.next_float() * 2 - 1);
 #else
-		// Just emit from center point:
-		float3 pos = mul(worldMatrix, float4(0, 0, 0, 1)).xyz;
+	// Just emit from center point:
+	emitPos = 0;
 #endif // EMITTER_VOLUME
-
-		float3 nor = 0;
 
 #endif // EMIT_FROM_MESH
 
-		float particleStartingSize = xParticleSize + xParticleSize * (rng.next_float() - 0.5f) * xParticleRandomFactor;
-
-		// create new particle:
-		Particle particle;
-		particle.position = pos;
-		particle.force = 0;
-		particle.mass = xParticleMass;
-		particle.velocity = xParticleVelocity + (nor + (float3(rng.next_float(), rng.next_float(), rng.next_float()) - 0.5f) * xParticleRandomFactor) * xParticleNormalFactor;
-		particle.rotationalVelocity = xParticleRotation + (rng.next_float() - 0.5f) * xParticleRandomFactor;
-		particle.maxLife = xParticleLifeSpan + xParticleLifeSpan * (rng.next_float() - 0.5f) * xParticleLifeSpanRandomness;
-		particle.life = particle.maxLife;
-		particle.sizeBeginEnd = float2(particleStartingSize, particleStartingSize * xParticleScaling);
-		particle.color_mirror = 0;
-		particle.color_mirror |= ((rng.next_float() > 0.5f) << 31) & 0x10000000;
-		particle.color_mirror |= ((rng.next_float() < 0.5f) << 30) & 0x20000000;
-
-		uint color_modifier = 0;
-		color_modifier |= (uint)(255.0 * lerp(1, rng.next_float(), xParticleRandomColorFactor)) << 0;
-		color_modifier |= (uint)(255.0 * lerp(1, rng.next_float(), xParticleRandomColorFactor)) << 8;
-		color_modifier |= (uint)(255.0 * lerp(1, rng.next_float(), xParticleRandomColorFactor)) << 16;
-		particle.color_mirror |= pack_rgba(float4(EmitterGetMaterial().baseColor.rgb, 1)) & color_modifier;
-
-
-		// new particle index retrieved from dead list (pop):
-		uint deadCount;
-		counterBuffer.InterlockedAdd(PARTICLECOUNTER_OFFSET_DEADCOUNT, -1, deadCount);
-		uint newParticleIndex = deadBuffer[deadCount - 1];
-
-		// write out the new particle:
-		particleBuffer[newParticleIndex] = particle;
-
-		// and add index to the alive list (push):
-		uint aliveCount;
-		counterBuffer.InterlockedAdd(PARTICLECOUNTER_OFFSET_ALIVECOUNT, 1, aliveCount);
-		aliveBuffer_CURRENT[aliveCount] = newParticleIndex;
+	float3 pos = mul(worldMatrix, float4(emitPos, 1)).xyz;
+	
+	// Blocker shadow map check using previous frame:
+	[branch]
+	if ((xEmitterOptions & EMITTER_OPTION_BIT_USE_RAIN_BLOCKER) && rain_blocker_check_prev(pos))
+	{
+		return;
 	}
+
+	float particleStartingSize = xParticleSize + xParticleSize * (rng.next_float() - 0.5f) * xParticleRandomFactor;
+
+	// create new particle:
+	Particle particle;
+	particle.position = pos;
+	particle.force = 0;
+	particle.mass = xParticleMass;
+	particle.velocity = velocity + (nor + (float3(rng.next_float(), rng.next_float(), rng.next_float()) - 0.5f) * xParticleRandomFactor) * xParticleNormalFactor;
+	particle.rotation_rotationVelocity = pack_half2(float2((rng.next_float() - 0.5f) * xParticleRandomFactor * PI * 2, xParticleRotation * (rng.next_float() - 0.5f) * (1 + xParticleRandomFactor)));
+	particle.maxLife = xParticleLifeSpan + xParticleLifeSpan * (rng.next_float() - 0.5f) * xParticleLifeSpanRandomness;
+	particle.life = particle.maxLife;
+	particle.sizeBeginEnd = float2(particleStartingSize, particleStartingSize * xParticleScaling);
+
+	baseColor.r *= lerp(1, rng.next_float(), xParticleRandomColorFactor);
+	baseColor.g *= lerp(1, rng.next_float(), xParticleRandomColorFactor);
+	baseColor.b *= lerp(1, rng.next_float(), xParticleRandomColorFactor);
+	particle.color = pack_rgba(baseColor);
+	
+	// new particle index retrieved from dead list (pop):
+	int deadCount;
+	InterlockedAdd(counterBuffer[0].deadCount, -1, deadCount);
+	if(deadCount < 1)
+		return;
+
+	uint newParticleIndex = deadBuffer[deadCount - 1];
+
+	// write out the new particle:
+	particleBuffer[newParticleIndex] = particle;
+
+	// and add index to the alive list (push):
+	uint aliveCount;
+	InterlockedAdd(counterBuffer[0].aliveCount_afterSimulation, 1, aliveCount);
+	aliveBuffer_CURRENT[aliveCount] = newParticleIndex;
 }

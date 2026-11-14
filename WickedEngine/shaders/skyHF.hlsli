@@ -2,25 +2,28 @@
 #define WI_SKY_HF
 #include "globals.hlsli"
 #include "skyAtmosphere.hlsli"
+#include "fogHF.hlsli"
 
 // Custom Atmosphere based on: https://www.shadertoy.com/view/Ml2cWG
 // Cloud noise based on: https://www.shadertoy.com/view/4tdSWr
 
-float3 AccurateAtmosphericScattering(Texture2D<float4> skyViewLutTexture, Texture2D<float4> transmittanceLUT, Texture2D<float4> multiScatteringLUT, float3 rayOrigin, float3 rayDirection, float3 sunDirection, float3 sunColor, bool enableSun, bool darkMode, bool stationary)
+float3 AccurateAtmosphericScattering(float2 pixelPosition, float3 rayOrigin, float3 rayDirection, float3 sunDirection, float3 sunColor,
+	bool enableSun, bool darkMode, bool stationary, bool highQuality, bool perPixelNoise, bool receiveShadow)
 {
     AtmosphereParameters atmosphere = GetWeather().atmosphere;
 
-    float3 worldDirection = rayDirection;
-
-    float3 skyRelativePosition = stationary ? float3(0.00001, 0.00001, 0.00001) : rayOrigin; // We get compiler warnings: "floating point division by zero" when stationary is true, but it gets handled by GetCameraPlanetPos anyway
+	// We get compiler warnings: "floating point division by zero" when stationary is true, but it gets handled by GetCameraPlanetPos anyway
+    float3 skyRelativePosition = stationary ? float3(0.00001, 0.00001, 0.00001) : rayOrigin;
+	
     float3 worldPosition = GetCameraPlanetPos(atmosphere, skyRelativePosition);
+    float3 worldDirection = rayDirection;
 
     float viewHeight = length(worldPosition);
 
-    float3 luminance = float3(0.0, 0.0, 0.0);
+    float3 luminance = 0;
 
-    const bool fastSky = true;
-    if (viewHeight < atmosphere.topRadius && fastSky)
+	// Switch to high quality when above atmosphere layer, if high quality is not already enabled:
+	if (viewHeight < atmosphere.topRadius && !highQuality)
     {
         float2 uv;
         float3 upVector = normalize(worldPosition);
@@ -36,50 +39,43 @@ float3 AccurateAtmosphericScattering(Texture2D<float4> skyViewLutTexture, Textur
 
         SkyViewLutParamsToUv(atmosphere, intersectGround, viewZenithCosAngle, lightViewCosAngle, viewHeight, uv);
 
-        luminance = skyViewLutTexture.SampleLevel(sampler_linear_clamp, uv, 0).rgb;
-    }
+		luminance = texture_skyviewlut.SampleLevel(sampler_linear_clamp, uv, 0).rgb;
+	}
     else
     {
         // Move to top atmosphere as the starting point for ray marching.
-        // This is critical to be after the above to not disrupt above atmosphere tests and voxel selection.
-        if (MoveToTopAtmosphere(worldPosition, worldDirection, atmosphere.topRadius))
-        {
-            // Apply the start offset after moving to the top of atmosphere to avoid black pixels
-            const float startOffsetKm = 0.1; // 100m seems enough for long distances
-            worldPosition += worldDirection * startOffsetKm;
+		// This is critical to be after the above to not disrupt above atmosphere tests and voxel selection.
+		if (MoveToTopAtmosphere(worldPosition, worldDirection, atmosphere.topRadius))
+		{
+			// Apply the start offset after moving to the top of atmosphere to avoid black pixels
+			worldPosition += worldDirection * AP_START_OFFSET_KM;
 
-            float3 sunIlluminance = sunColor;
+			float3 sunIlluminance = sunColor;
 
-            SamplingParameters sampling;
-            {
-                sampling.variableSampleCount = true;
-                sampling.sampleCountIni = 0.0f;
-                sampling.rayMarchMinMaxSPP = float2(4, 14);
-                sampling.distanceSPPMaxInv = 0.01;
-				sampling.perPixelNoise = false;
-			}
-			const float2 pixelPosition = float2(0.0, 0.0);
-            const float tDepth = 0.0;
-            const bool opaque = false;
-            const bool ground = false;
-            const bool mieRayPhase = true;
-            const bool multiScatteringApprox = true;
-            const bool volumetricCloudShadow = false;
-            SingleScatteringResult ss = IntegrateScatteredLuminance(
-                atmosphere, pixelPosition, worldPosition, worldDirection, sunDirection, sunIlluminance,
-                sampling, tDepth, opaque, ground, mieRayPhase, multiScatteringApprox, volumetricCloudShadow, transmittanceLUT, multiScatteringLUT);
+			const float tDepth = 0.0;
+			const float sampleCountIni = 0.0;
+			const bool variableSampleCount = true;
+			const bool opaque = false;
+			const bool ground = false;
+			const bool mieRayPhase = true;
+			const bool multiScatteringApprox = true;
+			const bool volumetricCloudShadow = receiveShadow;
+			const bool opaqueShadow = receiveShadow;
+			SingleScatteringResult ss = IntegrateScatteredLuminance(
+				atmosphere, pixelPosition, worldPosition, worldDirection, sunDirection, sunIlluminance, tDepth, sampleCountIni, variableSampleCount,
+				perPixelNoise, opaque, ground, mieRayPhase, multiScatteringApprox, volumetricCloudShadow, opaqueShadow, texture_transmittancelut, texture_multiscatteringlut);
 
-            luminance = ss.L;
-        }
+			luminance = ss.L;
+		}
     }
 
-    float3 totalColor = float3(0.0, 0.0, 0.0);
+    float3 totalColor = 0;
 
     if (enableSun)
     {
         float3 sunIlluminance = sunColor;
-        totalColor = luminance + GetSunLuminance(worldPosition, worldDirection, sunDirection, sunIlluminance, atmosphere, transmittanceLUT);
-    }
+		totalColor = luminance + GetSunLuminance(worldPosition, worldDirection, sunDirection, sunIlluminance, atmosphere, texture_transmittancelut);
+	}
     else
     {
         totalColor = luminance; // We cant really seperate mie from luminance due to precomputation, todo?
@@ -90,12 +86,38 @@ float3 AccurateAtmosphericScattering(Texture2D<float4> skyViewLutTexture, Textur
         totalColor = max(pow(saturate(dot(sunDirection, rayDirection)), 64) * sunColor, 0) * luminance * 1.0;
     }
 
-    return totalColor;
+	if (GetFrame().options & OPTION_BIT_HEIGHT_FOG)
+	{
+		const float3 planet_center = atmosphere.planetCenter * SKY_UNIT_TO_M;
+		const float bottom_radius = atmosphere.bottomRadius * SKY_UNIT_TO_M;
+		const float top_radius = bottom_radius + GetWeather().fog.height_end;
+		float dist = RaySphereIntersectNearest(rayOrigin, rayDirection, planet_center, top_radius);
+
+		if(dist >= 0)
+		{
+			// Offset origin with fog start value.
+			// We can't do this with normal distance due to infinite distance.
+			const float3 offsetO = rayOrigin + rayDirection * GetWeather().fog.start;
+			float4 fog = GetFog(dist, offsetO, rayDirection);
+			if (fog.a > 0) // this check avoids switching to fully fogged above fog level camera at zero density
+			{
+				if (length(rayOrigin - planet_center) > top_radius) // check if we are above fog height sphere
+				{
+					// hack: flip fog when camera is above
+					fog.a = 1 - fog.a; // this only supports non-premultiplied fog
+				}
+				totalColor = lerp(totalColor, fog.rgb, fog.a); // non-premultiplied fog
+			}
+		}
+	}
+
+	return totalColor;
 }
 
 // Returns sky color modulated by the sun and clouds
-//	V	: view direction
-float3 GetDynamicSkyColor(in float3 V, bool sun_enabled = true, bool clouds_enabled = true, bool dark_enabled = false, bool realistic_sky_stationary = false)
+//	pixel	: screen pixel position
+//	V		: view direction
+float3 GetDynamicSkyColor(in float2 pixel, in float3 V, bool sun_enabled = true, bool dark_enabled = false, bool stationary = false, bool highQuality = false, bool perPixelNoise = false, bool receiveShadow = false, bool clouds_enabled = true)
 {
     float3 sky = 0;
 
@@ -103,16 +125,17 @@ float3 GetDynamicSkyColor(in float3 V, bool sun_enabled = true, bool clouds_enab
     {
         sky = AccurateAtmosphericScattering
         (
-            texture_skyviewlut,          // Sky View Lut (combination of precomputed atmospheric LUTs)
-            texture_transmittancelut,
-            texture_multiscatteringlut,
-            GetCamera().position,           // Ray origin
+			pixel,
+            GetCamera().position,       // Ray origin
             V,                          // Ray direction
-			GetSunDirection(),               // Position of the sun
-			GetSunColor(),                   // Sun Color
+			GetSunDirection(),          // Position of the sun
+			GetSunColor(),              // Sun Color
             sun_enabled,                // Use sun and total
             dark_enabled,               // Enable dark mode for light shafts etc.
-            realistic_sky_stationary    // Fixed position for ambient and environment capture.
+            stationary,					// Fixed position for ambient and environment capture.
+			highQuality,				// Skip color lookup from lut
+			perPixelNoise,				// Vary sampling position with TAA
+			receiveShadow				// Atmosphere to use pre-rendered shadow data
         );
     }
     else
@@ -121,8 +144,51 @@ float3 GetDynamicSkyColor(in float3 V, bool sun_enabled = true, bool clouds_enab
     }
 
 	sky *= GetWeather().sky_exposure;
+	
+	if (clouds_enabled && V.y > 0 && GetScene().texture_cloudmap >= 0 && !stationary)
+	{
+		float4 cloudmap = bindless_textures[descriptor_index(GetScene().texture_cloudmap)].SampleLevel(sampler_linear_clamp, encode_hemioct(V.xzy) * 0.5 + 0.5, 0);
+		if (dark_enabled)
+			cloudmap.rgb = 0;
+		sky.rgb = sky.rgb * (1.0 - cloudmap.a) + cloudmap.rgb;
+	}
 
-    return sky;
+	return sky;
+}
+float3 GetDynamicSkyColor(in float3 V, bool sun_enabled = true, bool dark_enabled = false, bool stationary = false, bool highQuality = false, bool perPixelNoise = false, bool receiveShadow = false, bool clouds_enabled = true)
+{
+	return GetDynamicSkyColor(float2(0.0f, 0.0f), V, sun_enabled, dark_enabled, stationary, highQuality, perPixelNoise, receiveShadow, clouds_enabled);
+}
+
+float3 GetStaticSkyColor(in float3 V, bool clouds_enabled = true)
+{
+	ShaderWeather weather = GetWeather();
+	float2x2 rot = float2x2(
+		weather.sky_rotation_cos, -weather.sky_rotation_sin,
+		weather.sky_rotation_sin, weather.sky_rotation_cos
+	);
+	V.xz = mul(V.xz, rot);
+
+	float3 sky = 0;
+	if (GetFrame().options & OPTION_BIT_STATIC_SKY_SPHEREMAP)
+	{
+		float2 uv = (float2(-atan2(V.z, V.x) / PI, -V.y) + 1.0) * 0.5;
+		sky = bindless_textures[descriptor_index(GetScene().globalenvmap)].SampleLevel(sampler_linear_clamp, uv, 0).rgb;
+	}
+	else
+	{
+		sky = bindless_cubemaps[descriptor_index(GetScene().globalenvmap)].SampleLevel(sampler_linear_clamp, V, 0).rgb;
+	}
+	
+	sky *= GetWeather().sky_exposure;
+
+	if (clouds_enabled && V.y > 0 && GetScene().texture_cloudmap >= 0)
+	{
+		float4 cloudmap = bindless_textures[descriptor_index(GetScene().texture_cloudmap)].SampleLevel(sampler_linear_clamp, encode_hemioct(V.xzy) * 0.5 + 0.5, 0);
+		sky.rgb = sky.rgb * (1.0 - cloudmap.a) + cloudmap.rgb;
+	}
+
+	return sky;
 }
 
 

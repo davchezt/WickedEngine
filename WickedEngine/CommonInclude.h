@@ -4,8 +4,7 @@
 // This is a helper include file pasted into all engine headers, try to keep it minimal!
 // Do not include engine features in this file!
 
-#include <cstdlib>
-#include <cstring>
+#include <cfloat>
 #include <cstdint>
 #include <type_traits>
 
@@ -15,54 +14,545 @@
 #define NOMINMAX
 #endif // NOMINMAX
 
+#if defined(__GNUC__) || defined(__clang__)
+#define __forceinline __attribute__((always_inline)) inline
+#define NO_SANITIZE(x) __attribute__((no_sanitize(x)))
+#else
+#define NO_SANITIZE(x)
+#endif // defined(__GNUC__) || defined(__clang__)
+
+#ifdef _MSC_VER
+#define WI_DISABLE_DEPRECATED_BEGIN __pragma(warning(push)) __pragma(warning(disable: 4996))
+#define WI_DISABLE_DEPRECATED_END __pragma(warning(pop))
+#else
+#define WI_DISABLE_DEPRECATED_BEGIN _Pragma("GCC diagnostic push") _Pragma("GCC diagnostic ignored \"-Wdeprecated-declarations\"")
+#define WI_DISABLE_DEPRECATED_END _Pragma("GCC diagnostic pop")
+#endif // _MSC_VER
+
+// Simple common math helpers:
+
+template<typename T>
+constexpr T align(T value, T alignment)
+{
+	return ((value + alignment - T(1)) / alignment) * alignment;
+}
+
+template<typename T>
+constexpr bool is_aligned(T value, T alignment)
+{
+	return align(value, alignment) == value;
+}
+
+template <typename T>
+constexpr T sqr(T x) { return x * x; }
+
+template <typename T>
+constexpr T pow4(T x) { return sqr(sqr(x)); }
+
+template <typename T>
+constexpr T pow8(T x) { return sqr(pow4(x)); }
+
+template <typename T>
+constexpr T clamp(T x, T a, T b)
+{
+	return x < a ? a : (x > b ? b : x);
+}
+
+template <typename T>
+constexpr T saturate(T x)
+{
+	return clamp(x, T(0), T(1));
+}
+
+template <typename T>
+constexpr T frac(T x)
+{
+	T f = x - T(int(x));
+	f = f < 0 ? (1 + f) : f;
+	return f;
+}
+
+template <typename T>
+constexpr float lerp(T x, T y, T a)
+{
+	return x * (1 - a) + y * a;
+}
+
+template <typename T>
+constexpr T inverse_lerp(T value1, T value2, T pos)
+{
+	return value2 == value1 ? T(0) : ((pos - value1) / (value2 - value1));
+}
+
+template <typename T>
+constexpr T smoothstep(T edge0, T edge1, T x)
+{
+	const T t = saturate((x - edge0) / (edge1 - edge0));
+	return t * t * (T(3) - T(2) * t);
+}
+
+template <typename float4, typename float2>
+constexpr float bilinear(float4 gather, float2 pixel_frac)
+{
+	const float top_row = lerp(gather.w, gather.z, pixel_frac.x);
+	const float bottom_row = lerp(gather.x, gather.y, pixel_frac.x);
+	return lerp(top_row, bottom_row, pixel_frac.y);
+}
+
+// Stack allocated string utility:
+template <unsigned capacity = 256>
+struct StackString
+{
+	char chars[capacity] = {};
+	unsigned cnt = 0;
+	static_assert(capacity > 1);
+	constexpr operator const char* () const { return chars; }
+	constexpr const char* const c_str() const { return chars; }
+	constexpr void push_back(const char* str) { while (*str != 0 && (cnt < (capacity - 1))) { chars[cnt++] = *str; str++; } }
+	constexpr unsigned size() const { return capacity; }
+	constexpr unsigned length() const { return cnt; }
+	constexpr bool empty() const { return cnt == 0; }
+	constexpr StackString() = default;
+	constexpr StackString(const StackString&) = default;
+	constexpr StackString(StackString&&) = default;
+	constexpr StackString(const char* str) { push_back(str); }
+};
+
+// Stack allocated simplified vector container:
+template<typename T, unsigned count>
+struct StackVector
+{
+	T items[count] = {};
+	unsigned last = 0;
+	constexpr void resize(unsigned size) { last = size; }
+	constexpr unsigned size() const { return last; }
+	constexpr bool empty() const { return last == 0; }
+	constexpr void push_back(const T& item) { items[last++] = item; }
+	constexpr void push_back(T&& item) { items[last++] = static_cast<T&&>(item); }
+	constexpr void pop_back() { if (!empty()) items[--last] = {}; }
+	constexpr void clear() { for (unsigned i = 0; i < count; ++i) items[i] = {}; last = 0; }
+	constexpr T* data() { return items; }
+	constexpr const T* data() const { return items; }
+	constexpr T* begin() { return items; }
+	constexpr T* end() { return items + last; }
+	constexpr const T& back() const { return items[last - 1]; }
+	constexpr T& back() { return items[last - 1]; }
+	constexpr const T& front() const { return items[0]; }
+	constexpr T& front() { return items[0]; }
+	constexpr T& emplace_back() { push_back({}); return back(); }
+	constexpr const T& operator[](unsigned index) const { return items[index]; }
+	constexpr T& operator[](unsigned index) { return items[index]; }
+};
+
+// CPU intrinsics:
+#if defined(_MSC_VER) && !defined(__clang__)
+#include <intrin.h>
+#if defined(_M_ARM64)
+#include <arm64intr.h>
+#endif // _M_ARM64
+inline long AtomicAnd(volatile long* ptr, long mask)
+{
+	return _InterlockedAnd(ptr, mask);
+}
+inline long long AtomicAnd(volatile long long* ptr, long long mask)
+{
+	return _InterlockedAnd64(ptr, mask);
+}
+inline long AtomicOr(volatile long* ptr, long mask)
+{
+	return _InterlockedOr(ptr, mask);
+}
+inline long long AtomicOr(volatile long long* ptr, long long mask)
+{
+	return _InterlockedOr64(ptr, mask);
+}
+inline long AtomicXor(volatile long* ptr, long mask)
+{
+	return _InterlockedXor(ptr, mask);
+}
+inline long long AtomicXor(volatile long long* ptr, long long mask)
+{
+	return _InterlockedXor64(ptr, mask);
+}
+inline long AtomicAdd(volatile long* ptr, long val)
+{
+	return _InterlockedExchangeAdd(ptr, val);
+}
+inline long long AtomicAdd(volatile long long* ptr, long long val)
+{
+	return _InterlockedExchangeAdd64(ptr, val);
+}
+#if _MSC_VER >= 1950 // _InterlockedMin/Max intrinsics were added in VS 2026
+inline long AtomicMin(volatile long* ptr, long val)
+{
+	return _InterlockedMin(ptr, val);
+}
+inline long long AtomicMin(volatile long long* ptr, long long val)
+{
+	return _InterlockedMin64(ptr, val);
+}
+inline long AtomicMax(volatile long* ptr, long val)
+{
+	return _InterlockedMax(ptr, val);
+}
+inline long long AtomicMax(volatile long long* ptr, long long val)
+{
+	return _InterlockedMax64(ptr, val);
+}
+#else
+inline long AtomicMin(volatile long* ptr, long val)
+{
+	long old = *ptr;
+	long prev;
+	while (val < old && (prev = _InterlockedCompareExchange(ptr, val, old)) != old)
+		old = prev;
+	return old;
+}
+inline long long AtomicMin(volatile long long* ptr, long long val)
+{
+	long long old = *ptr;
+	long long prev;
+	while (val < old && (prev = _InterlockedCompareExchange64(ptr, val, old)) != old)
+		old = prev;
+	return old;
+}
+inline long AtomicMax(volatile long* ptr, long val)
+{
+	long old = *ptr;
+	long prev;
+	while (val > old && (prev = _InterlockedCompareExchange(ptr, val, old)) != old)
+		old = prev;
+	return old;
+}
+inline long long AtomicMax(volatile long long* ptr, long long val)
+{
+	long long old = *ptr;
+	long long prev;
+	while (val > old && (prev = _InterlockedCompareExchange64(ptr, val, old)) != old)
+		old = prev;
+	return old;
+}
+#endif
+inline unsigned int countbits(unsigned int value)
+{
+	return __popcnt(value);
+}
+inline unsigned long countbits(unsigned long value)
+{
+	return (unsigned long)__popcnt64((unsigned long long)value);
+}
+inline unsigned long long countbits(unsigned long long value)
+{
+	return __popcnt64(value);
+}
+inline unsigned int firstbithigh(unsigned int value)
+{
+	unsigned long bit_index;
+	if (_BitScanReverse(&bit_index, (unsigned long)value))
+	{
+		return 31u - (unsigned int)bit_index;
+	}
+	return 0;
+}
+inline unsigned long firstbithigh(unsigned long value)
+{
+	unsigned long bit_index;
+	if (_BitScanReverse64(&bit_index, (unsigned long long)value))
+	{
+		return 31ul - bit_index;
+	}
+	return 0;
+}
+inline unsigned long firstbithigh(unsigned long long value)
+{
+	unsigned long bit_index;
+	if (_BitScanReverse64(&bit_index, value))
+	{
+		return 63ull - bit_index;
+	}
+	return 0;
+}
+inline unsigned int firstbitlow(unsigned int value)
+{
+	unsigned long bit_index;
+	if (_BitScanForward(&bit_index, value))
+	{
+		return (unsigned int)bit_index;
+	}
+	return 0;
+}
+inline unsigned long firstbitlow(unsigned long value)
+{
+	unsigned long bit_index;
+	if (_BitScanForward64(&bit_index, (unsigned long long)value))
+	{
+		return bit_index;
+	}
+	return 0;
+}
+inline unsigned long firstbitlow(unsigned long long value)
+{
+	unsigned long bit_index;
+	if (_BitScanForward64(&bit_index, value))
+	{
+		return bit_index;
+	}
+	return 0;
+}
+#else
+inline long AtomicAnd(volatile long* ptr, long mask)
+{
+	return __atomic_fetch_and(ptr, mask, __ATOMIC_SEQ_CST);
+}
+inline long long AtomicAnd(volatile long long* ptr, long long mask)
+{
+	return __atomic_fetch_and(ptr, mask, __ATOMIC_SEQ_CST);
+}
+inline long AtomicOr(volatile long* ptr, long mask)
+{
+	return __atomic_fetch_or(ptr, mask, __ATOMIC_SEQ_CST);
+}
+inline long long AtomicOr(volatile long long* ptr, long long mask)
+{
+	return __atomic_fetch_or(ptr, mask, __ATOMIC_SEQ_CST);
+}
+inline long AtomicXor(volatile long* ptr, long mask)
+{
+	return __atomic_fetch_xor(ptr, mask, __ATOMIC_SEQ_CST);
+}
+inline long long AtomicXor(volatile long long* ptr, long long mask)
+{
+	return __atomic_fetch_xor(ptr, mask, __ATOMIC_SEQ_CST);
+}
+inline long AtomicAdd(volatile long* ptr, long val)
+{
+	return __atomic_fetch_add(ptr, val, __ATOMIC_SEQ_CST);
+}
+inline long long AtomicAdd(volatile long long* ptr, long long val)
+{
+	return __atomic_fetch_add(ptr, val, __ATOMIC_SEQ_CST);
+}
+#if defined(__clang__) || (defined(__GNUC__) && __GNUC__ >= 17) // AtomicMin and AtomicMax are different for Clang and GCC
+inline long AtomicMin(volatile long* ptr, long val)
+{
+	return __atomic_fetch_min(ptr, val, __ATOMIC_SEQ_CST);
+}
+inline long long AtomicMin(volatile long long* ptr, long long val)
+{
+	return __atomic_fetch_min(ptr, val, __ATOMIC_SEQ_CST);
+}
+inline long AtomicMax(volatile long* ptr, long val)
+{
+	return __atomic_fetch_max(ptr, val, __ATOMIC_SEQ_CST);
+}
+inline long long AtomicMax(volatile long long* ptr, long long val)
+{
+	return __atomic_fetch_max(ptr, val, __ATOMIC_SEQ_CST);
+}
+#else
+inline long AtomicMin(volatile long* ptr, long val)
+{
+	long old = __atomic_load_n(ptr, __ATOMIC_RELAXED);
+	long newval;
+	do {
+		newval = old < val ? old : val;
+	} while (!__atomic_compare_exchange_n(ptr, &old, newval, false,
+		__ATOMIC_SEQ_CST, __ATOMIC_RELAXED));
+	return old;
+}
+inline long long AtomicMin(volatile long long* ptr, long long val)
+{
+	long long old = __atomic_load_n(ptr, __ATOMIC_RELAXED);
+	long long newval;
+	do {
+		newval = old < val ? old : val;
+	} while (!__atomic_compare_exchange_n(ptr, &old, newval, false,
+		__ATOMIC_SEQ_CST, __ATOMIC_RELAXED));
+	return old;
+}
+inline long AtomicMax(volatile long* ptr, long val)
+{
+	long old = __atomic_load_n(ptr, __ATOMIC_RELAXED);
+	long newval;
+	do {
+		newval = old > val ? old : val;
+	} while (!__atomic_compare_exchange_n(ptr, &old, newval, false,
+		__ATOMIC_SEQ_CST, __ATOMIC_RELAXED));
+	return old;
+}
+inline long long AtomicMax(volatile long long* ptr, long long val)
+{
+	long long old = __atomic_load_n(ptr, __ATOMIC_RELAXED);
+	long long newval;
+	do {
+		newval = old > val ? old : val;
+	} while (!__atomic_compare_exchange_n(ptr, &old, newval, false,
+		__ATOMIC_SEQ_CST, __ATOMIC_RELAXED));
+	return old;
+}
+#endif
+inline unsigned int countbits(unsigned int value)
+{
+	return __builtin_popcount(value);
+}
+inline unsigned long long countbits(unsigned long value)
+{
+	return __builtin_popcountl(value);
+}
+inline unsigned long long countbits(unsigned long long value)
+{
+	return __builtin_popcountll(value);
+}
+inline unsigned long firstbithigh(unsigned int value)
+{
+	if (value == 0)
+	{
+		return 0;
+	}
+	return __builtin_clz(value);
+}
+inline unsigned long firstbithigh(unsigned long value)
+{
+	if (value == 0)
+	{
+		return 0;
+	}
+	return __builtin_clzl(value);
+}
+inline unsigned long firstbithigh(unsigned long long value)
+{
+	if (value == 0)
+	{
+		return 0;
+	}
+	return __builtin_clzll(value);
+}
+inline unsigned long firstbitlow(unsigned int value)
+{
+	if (value == 0)
+	{
+		return 0;
+	}
+	return __builtin_ctz(value);
+}
+inline unsigned long firstbitlow(unsigned long value)
+{
+	if (value == 0)
+	{
+		return 0;
+	}
+	return __builtin_ctzl(value);
+}
+inline unsigned long firstbitlow(unsigned long long value)
+{
+	if (value == 0)
+	{
+		return 0;
+	}
+	return __builtin_ctzll(value);
+}
+#endif // _WIN32
+
+inline long AtomicLoad(const volatile long* ptr)
+{
+	return AtomicOr((volatile long*)ptr, 0);
+}
+inline long long AtomicLoad(const volatile long long* ptr)
+{
+	return AtomicOr((volatile long long*)ptr, 0);
+}
+
 // Enable enum flags:
 //	https://www.justsoftwaresolutions.co.uk/cplusplus/using-enum-classes-as-bitfields.html
 template<typename E>
-struct enable_bitmask_operators {
-	static constexpr bool enable = false;
-};
+struct enable_bitmask_operators : std::false_type {};
+
 template<typename E>
-constexpr typename std::enable_if<enable_bitmask_operators<E>::enable, E>::type operator|(E lhs, E rhs)
+using EnableIfBitmaskOps = std::enable_if_t<enable_bitmask_operators<E>::value, int>;
+
+template<typename E, EnableIfBitmaskOps<E> = 0>
+constexpr E operator|(E lhs, E rhs)
 {
-	typedef typename std::underlying_type<E>::type underlying;
-	return static_cast<E>(
-		static_cast<underlying>(lhs) | static_cast<underlying>(rhs));
+	using U = std::underlying_type_t<E>;
+	return static_cast<E>(static_cast<U>(lhs) | static_cast<U>(rhs));
 }
-template<typename E>
-constexpr typename std::enable_if<enable_bitmask_operators<E>::enable, E&>::type operator|=(E& lhs, E rhs)
+template<typename E, EnableIfBitmaskOps<E> = 0>
+constexpr E operator|=(E& lhs, E rhs)
 {
-	typedef typename std::underlying_type<E>::type underlying;
-	lhs = static_cast<E>(
-		static_cast<underlying>(lhs) | static_cast<underlying>(rhs));
+	using U = std::underlying_type_t<E>;
+	lhs = static_cast<E>(static_cast<U>(lhs) | static_cast<U>(rhs));
 	return lhs;
 }
-template<typename E>
-constexpr typename std::enable_if<enable_bitmask_operators<E>::enable, E>::type operator&(E lhs, E rhs)
+template<typename E, EnableIfBitmaskOps<E> = 0>
+constexpr E operator&(E lhs, E rhs)
 {
-	typedef typename std::underlying_type<E>::type underlying;
-	return static_cast<E>(
-		static_cast<underlying>(lhs) & static_cast<underlying>(rhs));
+	using U = std::underlying_type_t<E>;
+	return static_cast<E>(static_cast<U>(lhs) & static_cast<U>(rhs));
 }
-template<typename E>
-constexpr typename std::enable_if<enable_bitmask_operators<E>::enable, E&>::type operator&=(E& lhs, E rhs)
+template<typename E, EnableIfBitmaskOps<E> = 0>
+constexpr E operator&=(E& lhs, E rhs)
 {
-	typedef typename std::underlying_type<E>::type underlying;
-	lhs = static_cast<E>(
-		static_cast<underlying>(lhs) & static_cast<underlying>(rhs));
+	using U = std::underlying_type_t<E>;
+	lhs = static_cast<E>(static_cast<U>(lhs) & static_cast<U>(rhs));
 	return lhs;
 }
-template<typename E>
-constexpr typename std::enable_if<enable_bitmask_operators<E>::enable, E>::type operator~(E rhs)
+template<typename E, EnableIfBitmaskOps<E> = 0>
+constexpr E operator~(E rhs)
 {
-	typedef typename std::underlying_type<E>::type underlying;
-	rhs = static_cast<E>(
-		~static_cast<underlying>(rhs));
+	using U = std::underlying_type_t<E>;
+	rhs = static_cast<E>(~static_cast<U>(rhs));
 	return rhs;
 }
 template<typename E>
 constexpr bool has_flag(E lhs, E rhs)
 {
 	return (lhs & rhs) == rhs;
+}
+template<typename T, typename U>
+constexpr void set_flag(T& flags, const U flag, const bool set)
+{
+	if (set)
+	{
+		flags |= static_cast<T>(flag);
+	}
+	else
+	{
+		flags &= ~static_cast<T>(flag);
+	}
+}
+// Extract file name from a path at compile-time
+constexpr const char* relative_path(const char* path)
+{
+	const char* startPosition = path;
+	for (const char* currentCharacter = path; *currentCharacter != '\0'; ++currentCharacter)
+	{
+		if (*currentCharacter == '\\' || *currentCharacter == '/')
+		{
+			startPosition = currentCharacter;
+		}
+	}
+
+	if (startPosition != path)
+	{
+		++startPosition;
+	}
+
+	return startPosition;
+}
+
+constexpr auto relative_path_storage(const char* path)
+{
+	StackString ret;
+	ret.push_back(relative_path(path));
+	return ret;
+}
+
+// Extract function name from a string at compile-time
+constexpr auto extract_function_name(const char* str)
+{
+	StackString ret;
+	ret.push_back(str);
+	return ret;
 }
 
 #endif //WICKEDENGINE_COMMONINCLUDE_H

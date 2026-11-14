@@ -9,12 +9,12 @@ struct Particle
 	float3 position;
 	float mass;
 	float3 force;
-	float rotationalVelocity;
+	uint rotation_rotationVelocity;
 	float3 velocity;
 	float maxLife;
 	float2 sizeBeginEnd;
 	float life;
-	uint color_mirror;
+	uint color;
 };
 
 struct ParticleCounters
@@ -26,41 +26,38 @@ struct ParticleCounters
 	uint culledCount;
 	uint cellAllocator;
 };
-static const uint PARTICLECOUNTER_OFFSET_ALIVECOUNT = 0;
-static const uint PARTICLECOUNTER_OFFSET_DEADCOUNT = PARTICLECOUNTER_OFFSET_ALIVECOUNT + 4;
-static const uint PARTICLECOUNTER_OFFSET_REALEMITCOUNT = PARTICLECOUNTER_OFFSET_DEADCOUNT + 4;
-static const uint PARTICLECOUNTER_OFFSET_ALIVECOUNT_AFTERSIMULATION = PARTICLECOUNTER_OFFSET_REALEMITCOUNT + 4;
-static const uint PARTICLECOUNTER_OFFSET_CULLEDCOUNT = PARTICLECOUNTER_OFFSET_ALIVECOUNT_AFTERSIMULATION + 4;
-static const uint PARTICLECOUNTER_OFFSET_CELLALLOCATOR = PARTICLECOUNTER_OFFSET_CULLEDCOUNT + 4;
 
-static const uint EMITTER_OPTION_BIT_FRAME_BLENDING_ENABLED = 1 << 0;
-static const uint EMITTER_OPTION_BIT_SPH_ENABLED = 1 << 1;
-static const uint EMITTER_OPTION_BIT_MESH_SHADER_ENABLED = 1 << 2;
-static const uint EMITTER_OPTION_BIT_COLLIDERS_DISABLED = 1 << 3;
+enum EMITTER_OPTIONS
+{
+	EMITTER_OPTION_BIT_FRAME_BLENDING_ENABLED = 1 << 0,
+	EMITTER_OPTION_BIT_SPH_ENABLED = 1 << 1,
+	EMITTER_OPTION_BIT_MESH_SHADER_ENABLED = 1 << 2,
+	EMITTER_OPTION_BIT_COLLIDERS_DISABLED = 1 << 3,
+	EMITTER_OPTION_BIT_USE_RAIN_BLOCKER = 1 << 4,
+	EMITTER_OPTION_BIT_TAKE_COLOR_FROM_MESH = 1 << 5,
+};
 
 CBUFFER(EmittedParticleCB, CBSLOT_OTHER_EMITTEDPARTICLE)
 {
-	ShaderTransform	xEmitterTransform;
-
-	uint		xEmitCount;
-	uint		xEmitterMeshIndexCount;
-	uint		xEmitterMeshVertexPositionStride;
+	uint		xEmitBufferOffset;
 	float		xEmitterRandomness;
-
+	float		xParticleRandomColorFactor;
 	float		xParticleSize;
+
 	float		xParticleScaling;
 	float		xParticleRotation;
 	float		xParticleRandomFactor;
-
 	float		xParticleNormalFactor;
+
 	float		xParticleLifeSpan;
 	float		xParticleLifeSpanRandomness;
 	float		xParticleMass;
-
 	float		xParticleMotionBlurAmount;
+
 	uint		xEmitterMaxParticleCount;
 	uint		xEmitterInstanceIndex;
-	uint		xEmitter_padding1;
+	uint		xEmitterMeshGeometryOffset;
+	uint		xEmitterMeshGeometryCount;
 
 	uint2		xEmitterFramesXY;
 	uint		xEmitterFrameCount;
@@ -91,18 +88,26 @@ CBUFFER(EmittedParticleCB, CBSLOT_OTHER_EMITTEDPARTICLE)
 	float3		xParticleVelocity;
 	float		xParticleDrag;
 
-	float		xParticleRandomColorFactor;
-	int padding0;
-	int padding1;
-	int padding2;
+	ShaderTransform xEmitterBaseMeshUnormRemap;
 };
 
-static const uint THREADCOUNT_EMIT = 256;
+struct EmitLocation
+{
+	ShaderTransform transform;
+	uint count;
+	uint color;
+	int padding0;
+	int padding1;
+};
+
 static const uint THREADCOUNT_MESH_SHADER = 32;
 
-static const uint ARGUMENTBUFFER_OFFSET_DISPATCHEMIT = 0;
-static const uint ARGUMENTBUFFER_OFFSET_DISPATCHSIMULATION = ARGUMENTBUFFER_OFFSET_DISPATCHEMIT + (3 * 4);
-static const uint ARGUMENTBUFFER_OFFSET_DRAWPARTICLES = ARGUMENTBUFFER_OFFSET_DISPATCHSIMULATION + (3 * 4);
+struct EmitterIndirectArgs
+{
+	IndirectDispatchArgs dispatch;
+	IndirectDrawArgsInstanced draw_culled;
+	IndirectDrawArgsInstanced draw_all;
+};
 
 
 // If this is not defined, SPH will be resolved as N-body simulation (O(n^2) complexity)

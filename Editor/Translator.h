@@ -1,8 +1,4 @@
 #pragma once
-#include "CommonInclude.h"
-#include "wiCanvas.h"
-#include "wiVector.h"
-#include "wiUnorderedSet.h"
 
 class Translator
 {
@@ -12,18 +8,21 @@ private:
 	bool dragEnded = false;
 	XMFLOAT3 intersection_start = XMFLOAT3(0, 0, 0);
 	XMFLOAT3 axis = XMFLOAT3(1, 0, 0);
+	XMFLOAT4 drag_plane = XMFLOAT4(0, 0, 0, 0);
 	float angle = 0;
 	float angle_start = 0;
 	bool has_selected_transform = false;
+	wi::vector<uint64_t> temp_filters;
+	wi::vector<wi::ecs::Entity> selectedWithHierarchy; // all the selected entities and their descendants
 public:
 
-	void Update(const wi::scene::CameraComponent& camera, const wi::Canvas& canvas);
-	void Draw(const wi::scene::CameraComponent& camera, wi::graphics::CommandList cmd) const;
+	void Update(const wi::scene::CameraComponent& camera, const XMFLOAT4& currentMouse, const wi::Canvas& canvas);
+	void Draw(const wi::scene::CameraComponent& camera, const XMFLOAT4& currentMouse, wi::graphics::CommandList cmd) const;
 
 	// Attach selection to translator temporarily
 	void PreTranslate();
 	// Apply translator to selection
-	void PostTranslate();
+	void PostTranslate() const;
 
 	wi::scene::Scene* scene = nullptr;
 	wi::scene::TransformComponent transform;
@@ -34,6 +33,10 @@ public:
 	float scale_snap = 1;
 	float rotate_snap = XM_PIDIV4;
 	float translate_snap = 1;
+	float tool_opacity = 1;
+	float tool_darken_negative_axes = 1;
+	float tool_scale = 1.0f;
+	float tool_thickness = 1.0f;
 
 	enum TRANSLATOR_STATE
 	{
@@ -52,11 +55,13 @@ public:
 
 	float dist = 1;
 
-	bool interactable = true;
 	bool isTranslator = true;
 	bool isScalator = false;
 	bool isRotator = false;
+	bool isLocalSpace = false;
+	bool is2D = false;
 	bool IsEnabled() const { return isTranslator || isRotator || isScalator; }
+	XMMATRIX GetLocalRotation() const;
 	void SetEnabled(bool value)
 	{
 		if (value && !IsEnabled())
@@ -76,6 +81,8 @@ public:
 	bool IsDragStarted() const { return dragStarted; };
 	// Check if the drag ended in this exact frame
 	bool IsDragEnded() const { return dragEnded; };
+
+	bool IsInteracting() const { return state != TRANSLATOR_IDLE; }
 
 	wi::scene::TransformComponent transform_start;
 	wi::vector<XMFLOAT4X4> matrices_start;

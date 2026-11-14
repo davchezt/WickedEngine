@@ -1,6 +1,6 @@
 #include "wiPlatform.h"
 
-#if defined(_WIN32) && !defined(PLATFORM_UWP)
+#ifdef PLATFORM_WINDOWS_DESKTOP
 #include "wiNetwork.h"
 #include "wiBacklog.h"
 #include "wiTimer.h"
@@ -30,22 +30,22 @@ namespace wi::network
 				assert(0);
 			}
 
-			wi::backlog::post("wi::network Initialized (" + std::to_string((int)std::round(timer.elapsed())) + " ms)");
+			wilog("wi::network Initialized (%d ms)", (int)std::round(timer.elapsed()));
 		}
 		~NetworkInternal()
 		{
 			WSACleanup();
 		}
 	};
-	inline std::shared_ptr<NetworkInternal>& network_internal()
+	inline wi::allocator::shared_ptr<NetworkInternal>& network_internal()
 	{
-		static std::shared_ptr<NetworkInternal> internal_state = std::make_shared<NetworkInternal>();
+		static wi::allocator::shared_ptr<NetworkInternal> internal_state = wi::allocator::make_shared_single<NetworkInternal>();
 		return internal_state;
 	}
 
 	struct SocketInternal
 	{
-		std::shared_ptr<NetworkInternal> networkinternal;
+		wi::allocator::shared_ptr<NetworkInternal> networkinternal;
 		SOCKET handle = NULL;
 
 		~SocketInternal()
@@ -65,7 +65,7 @@ namespace wi::network
 
 	bool CreateSocket(Socket* sock)
 	{
-		std::shared_ptr<SocketInternal> socketinternal = std::make_shared<SocketInternal>();
+		wi::allocator::shared_ptr<SocketInternal> socketinternal = wi::allocator::make_shared<SocketInternal>();
 		socketinternal->networkinternal = network_internal();
 		sock->internal_state = socketinternal;
 
@@ -82,7 +82,7 @@ namespace wi::network
 
 	bool Send(const Socket* sock, const Connection* connection, const void* data, size_t dataSize)
 	{
-		if (socket != nullptr && sock->IsValid())
+		if (sock != nullptr && sock->IsValid())
 		{
 			sockaddr_in target;
 			target.sin_family = AF_INET;
@@ -109,7 +109,7 @@ namespace wi::network
 
 	bool ListenPort(const Socket* sock, uint16_t port)
 	{
-		if (socket != nullptr && sock->IsValid())
+		if (sock != nullptr && sock->IsValid())
 		{
 			sockaddr_in target;
 			target.sin_family = AF_INET;
@@ -133,7 +133,7 @@ namespace wi::network
 
 	bool CanReceive(const Socket* sock, long timeout_microseconds)
 	{
-		if (socket != nullptr && sock->IsValid())
+		if (sock != nullptr && sock->IsValid())
 		{
 			auto socketinternal = to_internal(sock);
 
@@ -159,7 +159,7 @@ namespace wi::network
 
 	bool Receive(const Socket* sock, Connection* connection, void* data, size_t dataSize)
 	{
-		if (socket != nullptr && sock->IsValid())
+		if (sock != nullptr && sock->IsValid())
 		{
 			auto socketinternal = to_internal(sock);
 
@@ -186,4 +186,4 @@ namespace wi::network
 
 }
 
-#endif // _WIN32 && !PLATFORM_UWP
+#endif // PLATFORM_WINDOWS_DESKTOP

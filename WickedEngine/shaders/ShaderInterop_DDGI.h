@@ -5,10 +5,11 @@
 
 static const uint DDGI_MAX_RAYCOUNT = 512; // affects global ray buffer size
 static const uint DDGI_COLOR_RESOLUTION = 8; // this should not be modified, border update code is fixed
-static const uint DDGI_COLOR_TEXELS = 1 + DDGI_COLOR_RESOLUTION + 1; // with border
+static const uint DDGI_COLOR_TEXELS = DDGI_COLOR_RESOLUTION; // no border, color is stored in SH
 static const uint DDGI_DEPTH_RESOLUTION = 16; // this should not be modified, border update code is fixed
 static const uint DDGI_DEPTH_TEXELS = 1 + DDGI_DEPTH_RESOLUTION + 1; // with border
 static const float DDGI_KEEP_DISTANCE = 0.1f; // how much distance should probes keep from surfaces
+static const uint DDGI_RAY_BUCKET_COUNT = 4; // ray count per bucket
 
 #define DDGI_LINEAR_BLENDING
 
@@ -20,12 +21,23 @@ struct DDGIPushConstants
 	float blendSpeed;
 };
 
+#ifndef __cplusplus
 struct DDGIRayData
 {
-	float3 direction;
-	float depth;
-	float4 radiance;
+	half3 direction;
+	half depth;
+	half3 radiance;
 };
+struct DDGIVarianceData
+{
+	half3 mean;
+	half3 shortMean;
+	half vbbr;
+	half3 variance;
+	half inconsistency;
+};
+#endif // __cplusplus
+
 struct DDGIRayDataPacked
 {
 	uint4 data;
@@ -33,39 +45,48 @@ struct DDGIRayDataPacked
 #ifndef __cplusplus
 	inline void store(DDGIRayData rayData)
 	{
-		data.xy = pack_half4(float4(rayData.direction, rayData.depth));
-		data.zw = pack_half4(rayData.radiance);
+		data.xy = pack_half4(half4(rayData.direction, rayData.depth));
+		data.zw = pack_half3(rayData.radiance);
 	}
 	inline DDGIRayData load()
 	{
 		DDGIRayData rayData;
-		float4 unpk = unpack_half4(data.xy);
+		half4 unpk = unpack_half4(data.xy);
 		rayData.direction = unpk.xyz;
 		rayData.depth = unpk.w;
-		rayData.radiance = unpack_half4(data.zw);
+		rayData.radiance = unpack_half3(data.zw);
 		return rayData;
 	}
 #endif // __cplusplus
 };
 
-struct DDGIProbeOffset
+struct DDGIVarianceDataPacked
 {
-	uint2 data;
+	uint4 data;
 
 #ifndef __cplusplus
-	inline void store(float3 offset)
+	inline void store(DDGIVarianceData varianceData)
 	{
-		data = pack_half3(offset);
+		data.x = Pack_R11G11B10_FLOAT(varianceData.mean);
+		data.y = Pack_R11G11B10_FLOAT(varianceData.shortMean);
+		data.z = Pack_R11G11B10_FLOAT(varianceData.variance);
+		data.w = pack_half2(float2(varianceData.vbbr, varianceData.inconsistency));
 	}
-	inline float3 load()
+	inline DDGIVarianceData load()
 	{
-		return unpack_half3(data);
+		DDGIVarianceData varianceData;
+		varianceData.mean = Unpack_R11G11B10_FLOAT(data.x);
+		varianceData.shortMean = Unpack_R11G11B10_FLOAT(data.y);
+		varianceData.variance = Unpack_R11G11B10_FLOAT(data.z);
+		half2 other = unpack_half2(data.w);
+		varianceData.vbbr = other.x;
+		varianceData.inconsistency = other.y;
+		return varianceData;
 	}
 #endif // __cplusplus
 };
 
 #ifndef __cplusplus
-
 inline float3 ddgi_cellsize()
 {
 	return GetScene().ddgi.cell_size;
@@ -87,35 +108,34 @@ inline uint3 ddgi_probe_coord(uint probeIndex)
 {
 	return unflatten3D(probeIndex, GetScene().ddgi.grid_dimensions);
 }
-inline uint ddgi_probe_index(uint3 probeCoord)
+inline uint ddgi_probe_index(min16uint3 probeCoord)
 {
 	return flatten3D(probeCoord, GetScene().ddgi.grid_dimensions);
 }
-inline float3 ddgi_probe_position(uint3 probeCoord)
+inline uint3 ddgi_probe_offset_pixel(min16uint3 probeCoord)
 {
-	float3 pos = GetScene().ddgi.grid_min + probeCoord * ddgi_cellsize();
-	[branch]
-	if (GetScene().ddgi.offset_buffer >= 0)
-	{
-		pos += bindless_buffers[GetScene().ddgi.offset_buffer].Load<DDGIProbeOffset>(ddgi_probe_index(probeCoord) * sizeof(DDGIProbeOffset)).load();
-	}
+	return probeCoord.xzy;
+}
+inline float3 ddgi_probe_position_rest(min16uint3 probeCoord)
+{
+	return GetScene().ddgi.grid_min + probeCoord * ddgi_cellsize();
+}
+inline float3 ddgi_probe_position(min16uint3 probeCoord)
+{
+	float3 pos = ddgi_probe_position_rest(probeCoord);
+	uint probeIndex = ddgi_probe_index(probeCoord);
+	StructuredBuffer<DDGIProbe> probe_buffer = bindless_structured_ddgi_probes[descriptor_index(GetScene().ddgi.probe_buffer)];
+	DDGIProbe probe = probe_buffer[probeIndex];
+	float3 offset = unpack_half3(probe.offset);
+	offset = offset * ddgi_cellsize() * 0.5;
+	pos += offset;
 	return pos;
 }
-inline uint2 ddgi_probe_color_pixel(uint3 probeCoord)
-{
-	return probeCoord.xz * DDGI_COLOR_TEXELS + uint2(probeCoord.y * GetScene().ddgi.grid_dimensions.x * DDGI_COLOR_TEXELS, 0) + 1;
-}
-inline float2 ddgi_probe_color_uv(uint3 probeCoord, float3 direction)
-{
-	float2 pixel = ddgi_probe_color_pixel(probeCoord);
-	pixel += (encode_oct(normalize(direction)) * 0.5 + 0.5) * DDGI_COLOR_RESOLUTION;
-	return pixel * GetScene().ddgi.color_texture_resolution_rcp;
-}
-inline uint2 ddgi_probe_depth_pixel(uint3 probeCoord)
+inline uint2 ddgi_probe_depth_pixel(min16uint3 probeCoord)
 {
 	return probeCoord.xz * DDGI_DEPTH_TEXELS + uint2(probeCoord.y * GetScene().ddgi.grid_dimensions.x * DDGI_DEPTH_TEXELS, 0) + 1;
 }
-inline float2 ddgi_probe_depth_uv(uint3 probeCoord, float3 direction)
+inline float2 ddgi_probe_depth_uv(min16uint3 probeCoord, half3 direction)
 {
 	float2 pixel = ddgi_probe_depth_pixel(probeCoord);
 	pixel += (encode_oct(normalize(direction)) * 0.5 + 0.5) * DDGI_DEPTH_RESOLUTION;
@@ -124,25 +144,30 @@ inline float2 ddgi_probe_depth_uv(uint3 probeCoord, float3 direction)
 
 
 // Based on: https://github.com/diharaw/hybrid-rendering/blob/master/src/shaders/gi/gi_common.glsl
-float3 ddgi_sample_irradiance(float3 P, float3 N)
+half3 ddgi_sample_irradiance(in float3 P, in half3 N, inout half3 out_dominant_lightdir, inout half3 out_dominant_lightcolor)
 {
-	uint3 base_grid_coord = ddgi_base_probe_coord(P);
-	float3 base_probe_pos = ddgi_probe_position(base_grid_coord);
+	StructuredBuffer<DDGIProbe> probe_buffer = bindless_structured_ddgi_probes[descriptor_index(GetScene().ddgi.probe_buffer)];
+	const min16uint3 base_grid_coord = ddgi_base_probe_coord(P);
+	const float3 reference_probe_pos = ddgi_probe_position_rest(base_grid_coord); // taking the rest pose!
 
-	float3 sum_irradiance = 0;
-	float sum_weight = 0;
+	half sum_weight = 0;
+
+	// Note: the quality seems to be a lot better when weighting the whole SH instead of
+	//	blending irradiance, specular and dld separately
+	SH::L1_RGB sum_sh = SH::L1_RGB::Zero();
 
 	// alpha is how far from the floor(currentVertex) position. on [0, 1] for each axis.
-	float3 alpha = saturate((P - base_probe_pos) * ddgi_cellsize_rcp());
+	half3 alpha = saturate((P - reference_probe_pos) * ddgi_cellsize_rcp());
 
 	// Iterate over adjacent probe cage
-	for (uint i = 0; i < 8; ++i)
+	for (min16uint i = 0; i < 8; ++i)
 	{
 		// Compute the offset grid coord and clamp to the probe grid boundary
 		// Offset = 0 or 1 along each axis
-		uint3 offset = uint3(i, i >> 1, i >> 2) & 1;
-		uint3 probe_grid_coord = clamp(base_grid_coord + offset, 0, GetScene().ddgi.grid_dimensions - 1);
-		//int p = ddgi_probe_index(probe_grid_coord);
+		min16uint3 offset = uint3(i, i >> 1, i >> 2) & 1;
+		min16uint3 probe_grid_coord = clamp(base_grid_coord + offset, 0u.xxx, GetScene().ddgi.grid_dimensions - 1);
+		uint probe_index = ddgi_probe_index(probe_grid_coord);
+		DDGIProbe probe = probe_buffer[probe_index];
 
 		// Make cosine falloff in tangent plane with respect to the angle from the surface to the probe so that we never
 		// test a probe that is *behind* the surface.
@@ -157,15 +182,15 @@ float3 ddgi_sample_irradiance(float3 P, float3 N)
 		// then samples can pass through thin occluders to the other
 		// side (this can only happen if there are MULTIPLE occluders
 		// near each other, a wall surface won't pass through itself.)
-		float3 probe_to_point = P - probe_pos + N * 0.001;
-		float3 dir = normalize(-probe_to_point);
+		half3 probe_to_point = P - probe_pos + N * 0.001;
+		half3 dir = normalize(-probe_to_point);
 
 		// Compute the trilinear weights based on the grid cell vertex to smoothly
 		// transition between probes. Avoid ever going entirely to zero because that
 		// will cause problems at the border probes. This isn't really a lerp. 
 		// We're using 1-a when offset = 0 and a when offset = 1.
-		float3 trilinear = lerp(1.0 - alpha, alpha, offset);
-		float weight = 1.0;
+		half3 trilinear = lerp(1.0 - alpha, alpha, half3(offset));
+		half weight = 1.0;
 
 		// Clamp all of the multiplies. We can't let the weight go to zero because then it would be 
 		// possible for *all* weights to be equally low and get normalized
@@ -177,7 +202,7 @@ float3 ddgi_sample_irradiance(float3 P, float3 N)
 			// Computed without the biasing applied to the "dir" variable. 
 			// This test can cause reflection-map looking errors in the image
 			// (stuff looks shiny) if the transition is poor.
-			float3 true_direction_to_probe = normalize(probe_pos - P);
+			half3 true_direction_to_probe = normalize(probe_pos - P);
 
 			// The naive soft backface weight would ignore a probe when
 			// it is behind the surface. That's good for walls. But for small details inside of a
@@ -188,7 +213,7 @@ float3 ddgi_sample_irradiance(float3 P, float3 N)
 
 			// The small offset at the end reduces the "going to zero" impact
 			// where this is really close to exactly opposite
-			weight *= lerp(saturate(dot(dir, N)), sqr(max(0.0001, (dot(true_direction_to_probe, N) + 1.0) * 0.5)) + 0.2, GetScene().ddgi.smooth_backface);
+			weight *= lerp(saturate(dot(dir, N)), sqr(max(0.0001, (dot(true_direction_to_probe, N) + 1.0) * 0.5)) + 0.2, (half)GetScene().ddgi.smooth_backface);
 		}
 
 		// Moment visibility test
@@ -199,16 +224,16 @@ float3 ddgi_sample_irradiance(float3 P, float3 N)
 			//float2 tex_coord = texture_coord_from_direction(-dir, p, ddgi.depth_texture_width, ddgi.depth_texture_height, ddgi.depth_probe_side_length);
 			float2 tex_coord = ddgi_probe_depth_uv(probe_grid_coord, -dir);
 
-			float dist_to_probe = length(probe_to_point);
+			half dist_to_probe = length(probe_to_point);
 
 			//float2 temp = textureLod(depth_texture, tex_coord, 0.0f).rg;
-			float2 temp = bindless_textures[GetScene().ddgi.depth_texture].SampleLevel(sampler_linear_clamp, tex_coord, 0).xy;
-			float mean = temp.x;
-			float variance = abs(sqr(temp.x) - temp.y);
+			half2 temp = bindless_textures_half4[descriptor_index(GetScene().ddgi.depth_texture)].SampleLevel(sampler_linear_clamp, tex_coord, 0).xy;
+			half mean = temp.x;
+			half variance = abs(sqr(temp.x) - temp.y);
 
 			// http://www.punkuser.net/vsm/vsm_paper.pdf; equation 5
 			// Need the max in the denominator because biasing can cause a negative displacement
-			float chebyshev_weight = variance / (variance + sqr(max(dist_to_probe - mean, 0.0)));
+			half chebyshev_weight = variance / (variance + sqr(max(dist_to_probe - mean, 0.0)));
 
 			// Increase contrast in the weight 
 			chebyshev_weight = max(pow(chebyshev_weight, 3), 0.0);
@@ -218,95 +243,79 @@ float3 ddgi_sample_irradiance(float3 P, float3 N)
 #endif
 
 		// Avoid zero weight
-		weight = max(0.000001, weight);
+		weight = max(0.01, weight);
 
-		float3 irradiance_dir = N;
-
-		//float2 tex_coord = texture_coord_from_direction(normalize(irradiance_dir), p, ddgi.irradiance_texture_width, ddgi.irradiance_texture_height, ddgi.irradiance_probe_side_length);
-		float2 tex_coord = ddgi_probe_color_uv(probe_grid_coord, irradiance_dir);
-
-		//float3 probe_irradiance = textureLod(irradiance_texture, tex_coord, 0.0f).rgb;
-		float3 probe_irradiance = bindless_textures[GetScene().ddgi.color_texture].SampleLevel(sampler_linear_clamp, tex_coord, 0).rgb;
+		half3 irradiance_dir = N;
 
 		// A tiny bit of light is really visible due to log perception, so
 		// crush tiny weights but keep the curve continuous. This must be done
 		// before the trilinear weights, because those should be preserved.
-		const float crush_threshold = 0.2f;
+		const half crush_threshold = 0.2;
 		if (weight < crush_threshold)
-			weight *= weight * weight * (1.0f / sqr(crush_threshold));
+			weight *= weight * weight / sqr(crush_threshold);
 
 		// Trilinear weights
 		weight *= trilinear.x * trilinear.y * trilinear.z;
 
-		// Weight in a more-perceptual brightness space instead of radiance space.
-		// This softens the transitions between probes with respect to translation.
-		// It makes little difference most of the time, but when there are radical transitions
-		// between probes this helps soften the ramp.
-#ifndef DDGI_LINEAR_BLENDING
-		probe_irradiance = sqrt(probe_irradiance);
-#endif
+		sum_sh = SH::Add(sum_sh, SH::Multiply(probe.radiance.Unpack(), weight));
 
-		sum_irradiance += weight * probe_irradiance;
 		sum_weight += weight;
 	}
 
 	if (sum_weight > 0)
 	{
-		float3 net_irradiance = sum_irradiance / sum_weight;
+		sum_sh = SH::Multiply(sum_sh, rcp(sum_weight));
 
-		// Go back to linear irradiance
-#ifndef DDGI_LINEAR_BLENDING
-		net_irradiance = sqr(net_irradiance);
-#endif
+		// Evaluate the diffuse irradiance in full (float) precision.
+		//
+		// The SH helpers run in half precision, and CalculateIrradiance()
+		// convolves the radiance with a cosine lobe - a multiply by PI on the
+		// L0 band. For a bright probe near a light source the L0 coefficient is
+		// already large, so that multiply overflows half to +Inf. That Inf is
+		// then fed back into the probes by the raytrace pass, where the mean
+		// estimator cannot recover from it, and it spreads across the whole
+		// probe field, blowing the scene out to white. Doing the
+		// convolve+evaluate in float keeps the full dynamic range without
+		// overflowing (so the GI brightness does not have to be clamped, which
+		// would flatten it).
+		//
+		// This is exactly SH::CalculateIrradiance(sum_sh, N) / PI, inlined in
+		// float: convolve with the cosine lobe (CosineA0/CosineA1) then
+		// evaluate in direction N (BasisL0/BasisL1).
+		half3 net_irradiance;
+		{
+			const float cosine_a0 = PI;               // CosineA0
+			const float cosine_a1 = (2.0 * PI) / 3.0; // CosineA1
+			const float basis_l0 = 1.0 / (2.0 * sqrt(PI));
+			const float basis_l1 = sqrt(3.0) / (2.0 * sqrt(PI));
+			const float3 nrm = (float3)N;
+			const float3 irradiance =
+				basis_l0 * cosine_a0 * (float3)sum_sh.C[0] +
+				basis_l1 * cosine_a1 * nrm.y * (float3)sum_sh.C[1] +
+				basis_l1 * cosine_a1 * nrm.z * (float3)sum_sh.C[2] +
+				basis_l1 * cosine_a1 * nrm.x * (float3)sum_sh.C[3];
+			net_irradiance = (half3)clamp(irradiance / PI, 0.0, MEDIUMP_FLT_MAX);
+		}
 
-		//net_irradiance *= 0.85; // energy preservation
+		// The dominant-light extraction still uses the half-precision SH path.
+		// Clamp the averaged SH so its dot products stay finite for very bright
+		// probes; this only affects the directional specular approximation, not
+		// the diffuse irradiance computed above. 40000 keeps DotProduct finite.
+		[unroll]
+		for (uint sh_coeff = 0; sh_coeff < SH::L1_RGB::NumCoefficients; ++sh_coeff)
+			sum_sh.C[sh_coeff] = clamp(sum_sh.C[sh_coeff], -40000.0, 40000.0);
+
+		SH::ApproximateDirectionalLight(sum_sh, out_dominant_lightdir, out_dominant_lightcolor);
+
+		// bending with normal direction to push dld above surface level since light can't fall to surface from behind
+		out_dominant_lightdir = normalize(out_dominant_lightdir + N * 0.8);
 
 		return net_irradiance;
-		//return 0.5f * PI * net_irradiance;
 	}
 
 	return 0;
 }
 
-// Border offsets from: https://github.com/diharaw/hybrid-rendering/blob/master/src/shaders/gi/gi_border_update.glsl
-static const uint4 DDGI_COLOR_BORDER_OFFSETS[36] = {
-	uint4(8, 1, 1, 0),
-	uint4(7, 1, 2, 0),
-	uint4(6, 1, 3, 0),
-	uint4(5, 1, 4, 0),
-	uint4(4, 1, 5, 0),
-	uint4(3, 1, 6, 0),
-	uint4(2, 1, 7, 0),
-	uint4(1, 1, 8, 0),
-	uint4(8, 8, 1, 9),
-	uint4(7, 8, 2, 9),
-	uint4(6, 8, 3, 9),
-	uint4(5, 8, 4, 9),
-	uint4(4, 8, 5, 9),
-	uint4(3, 8, 6, 9),
-	uint4(2, 8, 7, 9),
-	uint4(1, 8, 8, 9),
-	uint4(1, 8, 0, 1),
-	uint4(1, 7, 0, 2),
-	uint4(1, 6, 0, 3),
-	uint4(1, 5, 0, 4),
-	uint4(1, 4, 0, 5),
-	uint4(1, 3, 0, 6),
-	uint4(1, 2, 0, 7),
-	uint4(1, 1, 0, 8),
-	uint4(8, 8, 9, 1),
-	uint4(8, 7, 9, 2),
-	uint4(8, 6, 9, 3),
-	uint4(8, 5, 9, 4),
-	uint4(8, 4, 9, 5),
-	uint4(8, 3, 9, 6),
-	uint4(8, 2, 9, 7),
-	uint4(8, 1, 9, 8),
-	uint4(8, 8, 0, 0),
-	uint4(1, 8, 9, 0),
-	uint4(8, 1, 0, 9),
-	uint4(1, 1, 9, 9)
-};
 static const uint4 DDGI_DEPTH_BORDER_OFFSETS[68] = {
 	uint4(16, 1, 1, 0),
 	uint4(15, 1, 2, 0),
@@ -377,6 +386,61 @@ static const uint4 DDGI_DEPTH_BORDER_OFFSETS[68] = {
 	uint4(16, 1, 0, 17),
 	uint4(1, 1, 17, 17)
 };
+
+void MultiscaleMeanEstimator(
+	half3 y,
+	inout DDGIVarianceData data,
+	half shortWindowBlend = 0.08f
+)
+{
+	half3 mean = data.mean;
+	half3 shortMean = data.shortMean;
+	half vbbr = data.vbbr;
+	half3 variance = data.variance;
+	half inconsistency = data.inconsistency;
+
+	// Suppress fireflies.
+	{
+		half3 dev = sqrt(max(1e-5, variance));
+		half3 highThreshold = 0.1 + shortMean + dev * 8;
+		half3 overflow = max(0, y - highThreshold);
+		y -= overflow;
+	}
+
+	half3 delta = y - shortMean;
+	shortMean = lerp(shortMean, y, shortWindowBlend);
+	half3 delta2 = y - shortMean;
+
+	// This should be a longer window than shortWindowBlend to avoid bias
+	// from the variance getting smaller when the short-term mean does.
+	half varianceBlend = shortWindowBlend * 0.5;
+	variance = lerp(variance, delta * delta2, varianceBlend);
+	half3 dev = sqrt(max(1e-5, variance));
+
+	half3 shortDiff = mean - shortMean;
+
+	half relativeDiff = dot(half3(0.299, 0.587, 0.114),
+		abs(shortDiff) / max(1e-5, dev));
+	inconsistency = lerp(inconsistency, relativeDiff, 0.08);
+
+	half varianceBasedBlendReduction =
+		clamp(dot(half3(0.299, 0.587, 0.114),
+			0.5 * shortMean / max(1e-5, dev)), 1.0 / 32, 1);
+
+	half3 catchUpBlend = clamp(smoothstep(0, 1,
+		relativeDiff * max(0.02, inconsistency - 0.2)), 1.0 / 256, 1);
+	catchUpBlend *= vbbr;
+
+	vbbr = lerp(vbbr, varianceBasedBlendReduction, 0.1);
+	mean = lerp(mean, y, saturate(catchUpBlend));
+
+	// Output
+	data.mean = mean;
+	data.shortMean = shortMean;
+	data.vbbr = vbbr;
+	data.variance = variance;
+	data.inconsistency = inconsistency;
+}
 
 #endif // __cplusplus
 

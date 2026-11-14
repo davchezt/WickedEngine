@@ -20,12 +20,12 @@ struct RayPayload
 	float4 data;
 };
 
-#ifndef SPIRV
+#ifndef __spirv__
 GlobalRootSignature MyGlobalRootSignature =
 {
 	WICKED_ENGINE_DEFAULT_ROOTSIGNATURE
 };
-#endif // SPIRV
+#endif // __spirv__
 
 [shader("raygeneration")]
 void RTReflection_Raygen()
@@ -33,15 +33,15 @@ void RTReflection_Raygen()
 	uint2 DTid = DispatchRaysIndex().xy;
 	const float2 uv = ((float2)DTid.xy + 0.5) / (float2)DispatchRaysDimensions();
 
-	const uint downsampleFactor = 2;
-
 	// This is necessary for accurate upscaling. This is so we don't reuse the same half-res pixels
-	uint2 screenJitter = floor(blue_noise(uint2(0, 0)).xy * downsampleFactor);
-	uint2 jitterPixel = screenJitter + DTid.xy * downsampleFactor;
+	uint2 screenJitter = floor(blue_noise(uint2(0, 0)).xy * rtreflection_downscalefactor);
+	uint2 jitterPixel = screenJitter + DTid.xy * rtreflection_downscalefactor;
 	float2 jitterUV = (screenJitter + DTid.xy + 0.5f) / (float2)DispatchRaysDimensions();
 
 	const float depth = texture_depth.SampleLevel(sampler_linear_clamp, jitterUV, 0);
-	const float roughness = texture_roughness[jitterPixel];
+
+	const half3 normal_roughness = texture_normal_roughness[jitterPixel].rgb;
+	const half roughness = normal_roughness.b;
 
 	if (!NeedReflection(roughness, depth, rtreflection_roughness_cutoff))
 	{
@@ -51,9 +51,9 @@ void RTReflection_Raygen()
 		return;
 	}
 
-	const float3 N = decode_oct(texture_normal[jitterPixel]);
+	const float3 N = decode_normal(normal_roughness.rg);
 	const float3 P = reconstruct_position(jitterUV, depth);
-	const float3 V = normalize(GetCamera().position - P);
+	const float3 V = normalize(GetCamera().frustum_corners.screen_to_nearplane(uv) - P); // ortho support
 
 	const float4 GGX = ReflectionDir_GGX(V, N, roughness, blue_noise(DTid.xy).xy);
 	const float3 R = GGX.xyz;
@@ -90,21 +90,19 @@ void RTReflection_Raygen()
 void RTReflection_ClosestHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
 	PrimitiveID prim;
+	prim.init();
 	prim.primitiveIndex = PrimitiveIndex();
 	prim.instanceIndex = InstanceID();
 	prim.subsetIndex = GeometryIndex();
 
 	Surface surface;
 	surface.init();
-	if (HitKind() != HIT_KIND_TRIANGLE_FRONT_FACE)
-	{
-		surface.flags |= SURFACE_FLAG_BACKFACE;
-	}
+	surface.SetBackface(HitKind() != HIT_KIND_TRIANGLE_FRONT_FACE);
 	if (!surface.load(prim, attr.barycentrics))
 		return;
 
 	surface.pixel = DispatchRaysIndex().xy;
-	surface.screenUV = surface.pixel / (float2)DispatchRaysDimensions().xy;
+	surface.screenUV = (surface.pixel + 0.5) / (float2)DispatchRaysDimensions().xy;
 
 	if (surface.material.IsUnlit())
 	{
@@ -121,13 +119,13 @@ void RTReflection_ClosestHit(inout RayPayload payload, in BuiltInTriangleInterse
 		lighting.create(0, 0, GetAmbient(surface.N), 0);
 
 		[loop]
-		for (uint iterator = 0; iterator < GetFrame().lightarray_count; iterator++)
+		for (uint iterator = 0; iterator < lights().item_count(); iterator++)
 		{
-			ShaderEntity light = load_entity(GetFrame().lightarray_offset + iterator);
+			ShaderEntity light = load_entity(lights().first_item() + iterator);
 			if ((light.layerMask & surface.material.layerMask) == 0)
 				continue;
 
-			if (light.GetFlags() & ENTITY_FLAG_LIGHT_STATIC)
+			if (light.IsStaticLight())
 			{
 				continue; // static lights will be skipped (they are used in lightmap baking)
 			}
@@ -144,6 +142,11 @@ void RTReflection_ClosestHit(inout RayPayload payload, in BuiltInTriangleInterse
 				light_point(light, surface, lighting);
 			}
 			break;
+			case ENTITY_TYPE_RECTLIGHT:
+			{
+				light_rect(light, surface, lighting);
+			}
+			break;
 			case ENTITY_TYPE_SPOTLIGHT:
 			{
 				light_spot(light, surface, lighting);
@@ -156,9 +159,9 @@ void RTReflection_ClosestHit(inout RayPayload payload, in BuiltInTriangleInterse
 		lighting.indirect.specular += surface.emissiveColor;
 
 		[branch]
-		if (GetScene().ddgi.color_texture >= 0)
+		if (GetScene().ddgi.probe_buffer >= 0)
 		{
-			lighting.indirect.diffuse = ddgi_sample_irradiance(surface.P, surface.N);
+			lighting.indirect.diffuse = ddgi_sample_irradiance(surface.P, surface.N, surface.dominant_lightdir, surface.dominant_lightcolor);
 		}
 
 		ApplyLighting(surface, lighting, payload.data);
@@ -170,6 +173,7 @@ void RTReflection_ClosestHit(inout RayPayload payload, in BuiltInTriangleInterse
 void RTReflection_AnyHit(inout RayPayload payload, in BuiltInTriangleIntersectionAttributes attr)
 {
 	PrimitiveID prim;
+	prim.init();
 	prim.primitiveIndex = PrimitiveIndex();
 	prim.instanceIndex = InstanceID();
 	prim.subsetIndex = GeometryIndex();

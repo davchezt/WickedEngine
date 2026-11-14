@@ -1,86 +1,90 @@
 #define DISABLE_SOFT_SHADOWMAP
-#define TRANSPARENT_SHADOWMAP_SECONDARY_DEPTH_CHECK // fix the lack of depth testing
 #include "volumetricLightHF.hlsli"
 #include "volumetricCloudsHF.hlsli"
+#include "fogHF.hlsli"
+#include "oceanSurfaceHF.hlsli"
 
-float4 main(VertexToPixel input) : SV_TARGET
+float4 main(VertexToPixel input) : SV_Target
 {
-	ShaderEntity light = load_entity(GetFrame().lightarray_offset + (uint)g_xColor.x);
-
-	if (!light.IsCastingShadow())
-	{
-		// Dirlight volume has no meaning without shadows!!
-		return 0;
-	}
-
-	float2 ScreenCoord = input.pos2D.xy / input.pos2D.w * float2(0.5f, -0.5f) + 0.5f;
-	float depth = max(input.pos.z, texture_depth.SampleLevel(sampler_point_clamp, ScreenCoord, 2));
+	ShaderEntity light = load_entity(directional_lights().first_item() + (uint)g_xColor.x);
+	
+	float2 ScreenCoord = input.pos2D.xy / input.pos2D.w * float2(0.5, -0.5) + 0.5;
+	float4 depths = texture_depth.GatherRed(sampler_point_clamp, ScreenCoord);
+	float depth = max(depths.x, max(depths.y, max(depths.z, depths.w)));
 	float3 P = reconstruct_position(ScreenCoord, depth);
-	float3 V = GetCamera().position - P;
+	float3 V = GetCamera().frustum_corners.screen_to_nearplane(ScreenCoord) - P; // ortho support
 	float cameraDistance = length(V);
 	V /= cameraDistance;
 
-	float marchedDistance = 0;
-	float3 accumulation = 0;
+	// Fix for ocean: because ocean is not in linear depth, we trace it instead
+	const ShaderOcean ocean = GetWeather().ocean;
+	if (ocean.IsValid())
+	{
+		float3 rayDirection = -V;
+		float dist = intersectPlaneClampInfiniteDist(GetCamera().position, rayDirection, float3(0, 1, 0), ocean.water_height);
+		if (dist > 0 && dist < cameraDistance)
+		{
+			P = GetCamera().position + rayDirection * dist;
+			cameraDistance = dist;
+		}
+	}
 
-	const float3 L = light.GetDirection();
-	const float scattering = ComputeScattering(saturate(dot(L, -V)));
+	float marchedDistance = 0;
+	half3 accumulation = 0;
+
+	const half3 L = light.GetDirection();
+	const half scattering = ComputeScattering(saturate(dot(L, -V)));
 
 	float3 rayEnd = GetCamera().position;
 
 	const uint sampleCount = 16;
+	const half sampleCount_rcp = rcp((half)sampleCount);
 	const float stepSize = length(P - rayEnd) / sampleCount;
 
 	// dither ray start to help with undersampling:
-	P = P + V * stepSize * dither(input.pos.xy);
+	P = P + V * min(stepSize * dither(input.pos.xy), 10); // limit dithering step to 10 to avoid very large dither on sky
 
 	// Perform ray marching to integrate light volume along view ray:
 	[loop]
 	for (uint i = 0; i < sampleCount; ++i)
 	{
 		bool valid = false;
-		
-		for (uint cascade = 0; cascade < GetFrame().shadow_cascade_count; ++cascade)
+
+		half3 shadow = 1;
+		for (uint cascade = 0; cascade < light.GetShadowCascadeCount(); ++cascade)
 		{
 			float3 shadow_pos = mul(load_entitymatrix(light.GetMatrixIndex() + cascade), float4(P, 1)).xyz; // ortho matrix, no divide by .w
-			float3 shadow_uv = shadow_pos.xyz * float3(0.5f, -0.5f, 0.5f) + 0.5f;
+			float3 shadow_uv = clipspace_to_uv(shadow_pos.xyz);
 
 			[branch]
 			if (is_saturated(shadow_uv))
 			{
-				float3 attenuation = shadow_2D(light, shadow_pos, shadow_uv.xy, cascade);
-
-				if (GetFrame().options & OPTION_BIT_VOLUMETRICCLOUDS_SHADOWS)
-				{
-					attenuation *= shadow_2D_volumetricclouds(P);
-				}
-				
-				// Evaluate sample height for height fog calculation, given 0 for V:
-				attenuation *= GetFogAmount(cameraDistance - marchedDistance, P, float3(0.0, 0.0, 0.0));
-				attenuation *= scattering;
-				
-				accumulation += attenuation;
-
-				marchedDistance += stepSize;
-				P = P + V * stepSize;
-
-				valid = true;
+				shadow *= shadow_2D(light, shadow_pos.z, shadow_uv.xy, cascade, input.pos.xy);
 				break;
 			}
 		}
 
-		if (!valid)
+		if (GetFrame().options & OPTION_BIT_VOLUMETRICCLOUDS_CAST_SHADOW)
 		{
-			break;
+			shadow *= shadow_2D_volumetricclouds(P);
 		}
-	}
-	accumulation /= sampleCount;
 
-	float3 atmosphere_transmittance = 1;
+		// Evaluate sample height for height fog calculation, given 0 for V:
+		shadow *= (half)g_xColor.y + GetFogAmount(cameraDistance - marchedDistance, P, 0);
+		shadow *= scattering;
+
+		accumulation += shadow;
+
+		marchedDistance += stepSize;
+		P = P + V * stepSize;
+	}
+	accumulation *= sampleCount_rcp;
+
+	half3 atmosphere_transmittance = 1;
 	if (GetFrame().options & OPTION_BIT_REALISTIC_SKY)
 	{
 		atmosphere_transmittance = GetAtmosphericLightTransmittance(GetWeather().atmosphere, P, L, texture_transmittancelut);
 	}
 
-	return max(0, float4(accumulation * light.GetColor().rgb * atmosphere_transmittance, 1));
+	return saturateMediump(max(0, half4(accumulation * light.GetColor().rgb * atmosphere_transmittance, 1)));
 }

@@ -1,6 +1,7 @@
 #pragma once
 #include "wiGraphics.h"
 #include "wiVector.h"
+#include "wiAllocator.h"
 
 #include <string>
 
@@ -11,6 +12,8 @@ namespace wi::shadercompiler
 	{
 		NONE = 0,
 		DISABLE_OPTIMIZATION = 1 << 0,
+		STRIP_REFLECTION = 1 << 1,
+		KEEP_DEBUG_INFORMATION = 1 << 2,
 	};
 	struct CompilerInput
 	{
@@ -27,8 +30,8 @@ namespace wi::shadercompiler
 	};
 	struct CompilerOutput
 	{
-		std::shared_ptr<void> internal_state;
-		inline bool IsValid() const { return internal_state.get() != nullptr; }
+		wi::allocator::shared_ptr<void> internal_state;
+		constexpr bool IsValid() const { return internal_state.IsValid(); }
 
 		const uint8_t* shaderdata = nullptr;
 		size_t shadersize = 0;
@@ -47,6 +50,4 @@ namespace wi::shadercompiler
 }
 
 template<>
-struct enable_bitmask_operators<wi::shadercompiler::Flags> {
-	static const bool enable = true;
-};
+struct enable_bitmask_operators<wi::shadercompiler::Flags> : std::true_type {};

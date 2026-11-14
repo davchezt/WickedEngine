@@ -1,6 +1,4 @@
 #pragma once
-#include "WickedEngine.h"
-
 class EditorComponent;
 
 class DecalWindow : public wi::gui::Window
@@ -12,8 +10,10 @@ public:
 	wi::ecs::Entity entity;
 	void SetEntity(wi::ecs::Entity entity);
 
-	wi::gui::CheckBox placementCheckBox;
 	wi::gui::Label infoLabel;
+	wi::gui::CheckBox placementCheckBox;
+	wi::gui::CheckBox onlyalphaCheckBox;
+	wi::gui::Slider slopeBlendPowerSlider;
 
 	void ResizeLayout() override;
 };

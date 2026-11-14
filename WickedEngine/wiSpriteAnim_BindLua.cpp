@@ -4,13 +4,13 @@
 namespace wi::lua
 {
 
-	const char SpriteAnim_BindLua::className[] = "SpriteAnim";
-
 	Luna<SpriteAnim_BindLua>::FunctionType SpriteAnim_BindLua::methods[] = {
 		lunamethod(SpriteAnim_BindLua, SetRot),
 		lunamethod(SpriteAnim_BindLua, SetRotation),
 		lunamethod(SpriteAnim_BindLua, SetOpacity),
 		lunamethod(SpriteAnim_BindLua, SetFade),
+		lunamethod(SpriteAnim_BindLua, SetWobbleAnimAmount),
+		lunamethod(SpriteAnim_BindLua, SetWobbleAnimSpeed),
 		lunamethod(SpriteAnim_BindLua, SetRepeatable),
 		lunamethod(SpriteAnim_BindLua, SetVelocity),
 		lunamethod(SpriteAnim_BindLua, SetScaleX),
@@ -53,8 +53,6 @@ namespace wi::lua
 		anim = wi::Sprite::Anim();
 	}
 
-
-
 	int SpriteAnim_BindLua::SetRot(lua_State* L)
 	{
 		int argc = wi::lua::SGetArgCount(L);
@@ -95,6 +93,32 @@ namespace wi::lua
 		else
 		{
 			wi::lua::SError(L, "SetFade(float val) not enough arguments!");
+		}
+		return 0;
+	}
+	int SpriteAnim_BindLua::SetWobbleAnimAmount(lua_State* L) 
+	{
+		int argc = wi::lua::SGetArgCount(L);
+		if (argc > 0)
+		{
+			anim.wobbleAnim.amount = XMFLOAT2(wi::lua::SGetFloat(L, 1), wi::lua::SGetFloat(L, 1));
+		}
+		else
+		{
+			wi::lua::SError(L, "SetWobbleAnimAmount(float val) not enough arguments!");
+		}
+		return 0;
+	}
+	int SpriteAnim_BindLua::SetWobbleAnimSpeed(lua_State* L) 
+	{
+		int argc = wi::lua::SGetArgCount(L);
+		if (argc > 0)
+		{
+			anim.wobbleAnim.speed = wi::lua::SGetFloat(L, 1);
+		}
+		else
+		{
+			wi::lua::SError(L, "SetWobbleAnimSpeed(float val) not enough arguments!");
 		}
 		return 0;
 	}
@@ -227,7 +251,7 @@ namespace wi::lua
 	}
 	int SpriteAnim_BindLua::GetVelocity(lua_State* L)
 	{
-		Luna<Vector_BindLua>::push(L, new Vector_BindLua(XMLoadFloat3(&anim.vel)));
+		Luna<Vector_BindLua>::push(L, XMLoadFloat3(&anim.vel));
 		return 1;
 	}
 	int SpriteAnim_BindLua::GetScaleX(lua_State* L)
@@ -242,12 +266,12 @@ namespace wi::lua
 	}
 	int SpriteAnim_BindLua::GetMovingTexAnim(lua_State* L)
 	{
-		Luna<MovingTexAnim_BindLua>::push(L, new MovingTexAnim_BindLua(anim.movingTexAnim));
+		Luna<MovingTexAnim_BindLua>::push(L, anim.movingTexAnim);
 		return 1;
 	}
 	int SpriteAnim_BindLua::GetDrawRecAnim(lua_State* L)
 	{
-		Luna<DrawRectAnim_BindLua>::push(L, new DrawRectAnim_BindLua(anim.drawRectAnim));
+		Luna<DrawRectAnim_BindLua>::push(L, anim.drawRectAnim);
 		return 1;
 	}
 
@@ -265,8 +289,6 @@ namespace wi::lua
 
 
 
-
-	const char MovingTexAnim_BindLua::className[] = "MovingTexAnim";
 
 	Luna<MovingTexAnim_BindLua>::FunctionType MovingTexAnim_BindLua::methods[] = {
 		lunamethod(MovingTexAnim_BindLua, SetSpeedX),
@@ -343,8 +365,6 @@ namespace wi::lua
 	}
 
 
-
-	const char DrawRectAnim_BindLua::className[] = "DrawRecAnim";
 
 	Luna<DrawRectAnim_BindLua>::FunctionType DrawRectAnim_BindLua::methods[] = {
 		lunamethod(DrawRectAnim_BindLua, SetFrameRate),

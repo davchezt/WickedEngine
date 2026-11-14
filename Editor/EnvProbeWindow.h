@@ -1,6 +1,4 @@
 #pragma once
-#include "WickedEngine.h"
-
 class EditorComponent;
 
 class EnvProbeWindow : public wi::gui::Window
@@ -13,10 +11,17 @@ public:
 	void SetEntity(wi::ecs::Entity entity);
 
 	wi::gui::Label infoLabel;
+	wi::gui::Image preview;
 	wi::gui::CheckBox realTimeCheckBox;
 	wi::gui::CheckBox msaaCheckBox;
+	wi::gui::Slider realtimeFrameIntervalSlider;
+	wi::gui::Slider viewdistanceSlider;
+	wi::gui::Slider filterSlider;
 	wi::gui::Button refreshButton;
 	wi::gui::Button refreshAllButton;
+	wi::gui::Button importButton;
+	wi::gui::Button exportButton;
+	wi::gui::ComboBox resolutionCombo;
 
 	void ResizeLayout() override;
 };

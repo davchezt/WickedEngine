@@ -6,9 +6,10 @@
 #include "wiBacklog.h"
 #include "wiEventHandler.h"
 #include "wiTimer.h"
+#include "wiInput.h"
 
-using namespace wi::graphics;
 using namespace wi::enums;
+using namespace wi::graphics;
 
 namespace wi::image
 {
@@ -17,14 +18,8 @@ namespace wi::image
 	static Shader pixelShader;
 	static BlendState blendStates[BLENDMODE_COUNT];
 	static RasterizerState rasterizerState;
-	static DepthStencilState depthStencilStates[STENCILMODE_COUNT][STENCILREFMODE_COUNT];
-	enum STRIP_MODE
-	{
-		STRIP_OFF,
-		STRIP_ON,
-		STRIP_MODE_COUNT,
-	};
-	static PipelineState imagePSO[BLENDMODE_COUNT][STENCILMODE_COUNT][STENCILREFMODE_COUNT][STRIP_MODE_COUNT];
+	static DepthStencilState depthStencilStates[STENCILMODE_COUNT][STENCILREFMODE_COUNT][DEPTH_TEST_MODE_COUNT];
+	static PipelineState imagePSO[BLENDMODE_COUNT][STENCILMODE_COUNT][STENCILREFMODE_COUNT][DEPTH_TEST_MODE_COUNT];
 	static thread_local Texture backgroundTexture;
 	static thread_local wi::Canvas canvas;
 
@@ -75,11 +70,18 @@ namespace wi::image
 		ImageConstants image = {};
 		image.buffer_index = -1;
 		image.buffer_offset = 0;
-		image.texture_base_index = device->GetDescriptorIndex(texture, SubresourceType::SRV);
-		image.texture_mask_index = device->GetDescriptorIndex(params.maskMap, SubresourceType::SRV);
+		image.texture_base_index = device->GetDescriptorIndex(texture, SubresourceType::SRV, params.image_subresource);
+		image.texture_mask_index = device->GetDescriptorIndex(params.maskMap, SubresourceType::SRV, params.mask_subresource);
 		if (params.isBackgroundEnabled())
 		{
-			image.texture_background_index = device->GetDescriptorIndex(&backgroundTexture, SubresourceType::SRV);
+			if (params.backgroundMap != nullptr)
+			{
+				image.texture_background_index = device->GetDescriptorIndex(params.backgroundMap, SubresourceType::SRV, params.background_subresource);
+			}
+			else
+			{
+				image.texture_background_index = device->GetDescriptorIndex(&backgroundTexture, SubresourceType::SRV);
+			}
 		}
 		else
 		{
@@ -94,16 +96,25 @@ namespace wi::image
 		color.x *= darken;
 		color.y *= darken;
 		color.z *= darken;
+		color.x *= params.intensity;
+		color.y *= params.intensity;
+		color.z *= params.intensity;
 		color.w *= params.opacity;
 
-		XMHALF4 packed_color;
-		packed_color.x = XMConvertFloatToHalf(color.x);
-		packed_color.y = XMConvertFloatToHalf(color.y);
-		packed_color.z = XMConvertFloatToHalf(color.z);
-		packed_color.w = XMConvertFloatToHalf(color.w);
+		image.packed_color = wi::math::pack_half4(color);
 
-		image.packed_color.x = uint(packed_color.v);
-		image.packed_color.y = uint(packed_color.v >> 32ull);
+		if (params.angular_softness_outer_angle > 0)
+		{
+			const float innerConeAngleCos = std::cos(params.angular_softness_inner_angle);
+			const float outerConeAngleCos = std::cos(params.angular_softness_outer_angle);
+			// https://github.com/KhronosGroup/glTF/tree/main/extensions/2.0/Khronos/KHR_lights_punctual#inner-and-outer-cone-angles
+			const float lightAngleScale = 1.0f / std::max(0.001f, innerConeAngleCos - outerConeAngleCos);
+			const float lightAngleOffset = -outerConeAngleCos * lightAngleScale;
+			image.angular_softness_direction = wi::math::pack_half2(params.angular_softness_direction);
+			image.angular_softness_mad = wi::math::pack_half2(lightAngleScale, lightAngleOffset);
+		}
+
+		const float canvas_aspect = canvas.GetAspect();
 
 		image.flags = 0;
 		if (params.isExtractNormalMapEnabled())
@@ -117,23 +128,50 @@ namespace wi::image
 		if (params.isLinearOutputMappingEnabled())
 		{
 			image.flags |= IMAGE_FLAG_OUTPUT_COLOR_SPACE_LINEAR;
-			image.hdr_scaling = params.hdr_scaling;
 		}
 		if (params.isFullScreenEnabled())
 		{
 			image.flags |= IMAGE_FLAG_FULLSCREEN;
 		}
+		if (params.isAngularSoftnessDoubleSided())
+		{
+			image.flags |= IMAGE_FLAG_ANGULAR_DOUBLESIDED;
+		}
+		if (params.isAngularSoftnessInverse())
+		{
+			image.flags |= IMAGE_FLAG_ANGULAR_INVERSE;
+		}
+		if (params.isDistortionMaskEnabled())
+		{
+			image.flags |= IMAGE_FLAG_DISTORTION_MASK;
+		}
+		if (params.isHighlightEnabled())
+		{
+			image.flags |= IMAGE_FLAG_HIGHLIGHT;
+			image.highlight_xy = wi::math::pack_half2(params.highlight_pos.x * canvas_aspect, params.highlight_pos.y);
+			image.highlight_color_spread = wi::math::pack_half4(params.highlight_color.x, params.highlight_color.y, params.highlight_color.z, params.highlight_spread);
+		}
+		if (texture != nullptr && has_flag(texture->GetDesc().misc_flags, ResourceMiscFlag::TEXTURECUBE))
+		{
+			image.flags |= IMAGE_FLAG_CUBEMAP_BASE;
+		}
+		if (texture != nullptr && texture->GetDesc().type == TextureDesc::Type::TEXTURE_1D)
+		{
+			image.flags |= IMAGE_FLAG_TEXTURE1D_BASE;
+		}
 
-		image.border_soften = params.border_soften;
+		image.hdr_scaling_aspect = wi::math::pack_half2(params.hdr_scaling, canvas_aspect);
+		image.bordersoften_saturation = wi::math::pack_half2(params.border_soften, params.saturation);
+		image.mask_alpha_range = wi::math::pack_half2(params.mask_alpha_range_start, params.mask_alpha_range_end);
 
-		STRIP_MODE strip_mode = STRIP_ON;
-		uint32_t index_count = 0;
+		uint32_t vertex_count = 0;
 
 		if (params.isFullScreenEnabled())
 		{
 			// full screen triangle, no vertex buffer:
 			image.buffer_index = -1;
 			image.buffer_offset = 0;
+			vertex_count = 3;
 		}
 		else
 		{
@@ -172,72 +210,50 @@ namespace wi::image
 				XMStoreFloat4(corners + i, XMVector2Transform(V[i], M)); // division by w will happen on GPU
 			}
 
-			image.b0 = XMHALF2(corners[0].x, corners[0].y).v;
-			image.b1 = XMHALF2(corners[1].x - corners[0].x, corners[1].y - corners[0].y).v;
-			image.b2 = XMHALF2(corners[2].x - corners[0].x, corners[2].y - corners[0].y).v;
-			image.b3 = XMHALF2(corners[0].x - corners[1].x - corners[2].x + corners[3].x, corners[0].y - corners[1].y - corners[2].y + corners[3].y).v;
+			image.b0 = float2(corners[0].x, corners[0].y);
+			image.b1 = float2(corners[1].x - corners[0].x, corners[1].y - corners[0].y);
+			image.b2 = float2(corners[2].x - corners[0].x, corners[2].y - corners[0].y);
+			image.b3 = float2(corners[0].x - corners[1].x - corners[2].x + corners[3].x, corners[0].y - corners[1].y - corners[2].y + corners[3].y);
 
 			if (params.isCornerRoundingEnabled())
 			{
-				// The rounded corner mode will use a triangle fan structure (implemrnted by indexed triangle list):
-				strip_mode = STRIP_OFF;
+				// The rounded corner mode will use a triangle fan structure (implemented by triangle strip):
 				image.flags |= IMAGE_FLAG_CORNER_ROUNDING;
-				size_t vertex_count = 1; // start with center vertex
 				const int min_segment_count = 2;
+
+				uint32_t perimeter_count = 0;
 				for (int i = 0; i < arraysize(params.corners_rounding); ++i)
 				{
 					int segments = std::max(min_segment_count, params.corners_rounding[i].segments);
-					vertex_count += segments;
-					index_count += segments * 3;
+					perimeter_count += segments;
 				}
-				index_count += 3; // closing triangle
-				const size_t vb_size = sizeof(float4) * vertex_count;
-				const size_t ib_size = sizeof(uint16_t) * index_count;
-				GraphicsDevice::GPUAllocation mem = device->AllocateGPU(vb_size + ib_size, cmd);
+
+				vertex_count = 2 * perimeter_count + 1;
+				GraphicsDevice::GPUAllocation mem = device->AllocateGPU(sizeof(float4) * vertex_count, cmd);
 				image.buffer_index = device->GetDescriptorIndex(&mem.buffer, SubresourceType::SRV);
 				image.buffer_offset = (uint)mem.offset;
-				device->BindIndexBuffer(&mem.buffer, IndexBufferFormat::UINT16, mem.offset + vb_size, cmd);
-				float4* vertices = (float4*)mem.data;
-				uint16_t* indices = (uint16_t*)((uint8_t*)mem.data + vb_size);
-				uint32_t vi = 0;
-				uint32_t ii = 0;
-				XMStoreFloat4(vertices + vi, XMVector2Transform((V[0] + V[1] + V[2] + V[3]) * 0.25f, M)); // center vertex
-				vi++;
+				float4* strip = (float4*)mem.data;
+
+				float4 center;
+				XMStoreFloat4(&center, XMVector2Transform((V[0] + V[1] + V[2] + V[3]) * 0.25f, M));
+
+				float4 first_point;
+				uint32_t si = 0;
+				bool first = true;
 				for (int i = 0; i < arraysize(params.corners_rounding); ++i)
 				{
 					Params::Rounding rounding;
-					XMVECTOR A;
-					XMVECTOR B;
-					XMVECTOR C;
+					XMVECTOR A, B, C;
 					switch (i)
 					{
 					default:
-					case 0:
-						rounding = params.corners_rounding[0];
-						A = V[2];
-						B = V[0];
-						C = V[1];
-						break;
-					case 1:
-						rounding = params.corners_rounding[1];
-						A = V[0];
-						B = V[1];
-						C = V[3];
-						break;
-					case 2:
-						rounding = params.corners_rounding[3];
-						A = V[1];
-						B = V[3];
-						C = V[2];
-						break;
-					case 3:
-						rounding = params.corners_rounding[2];
-						A = V[3];
-						B = V[2];
-						C = V[0];
-						break;
+					case 0: rounding = params.corners_rounding[0]; A = V[2]; B = V[0]; C = V[1]; break;
+					case 1: rounding = params.corners_rounding[1]; A = V[0]; B = V[1]; C = V[3]; break;
+					case 2: rounding = params.corners_rounding[3]; A = V[1]; B = V[3]; C = V[2]; break;
+					case 3: rounding = params.corners_rounding[2]; A = V[3]; B = V[2]; C = V[0]; break;
 					}
 					rounding.segments = std::max(min_segment_count, rounding.segments);
+
 					const XMVECTOR BA = A - B;
 					const XMVECTOR BC = C - B;
 					const XMVECTOR BA_length = XMVector2Length(BA);
@@ -250,22 +266,26 @@ namespace wi::image
 					{
 						float t = float(j) / float(rounding.segments - 1);
 						XMVECTOR bezier = wi::math::GetQuadraticBezierPos(start, B, end, t);
-						XMStoreFloat4(vertices + vi, XMVector2Transform(bezier, M));
-						indices[ii++] = 0;
-						indices[ii++] = vi - 1;
-						indices[ii++] = vi;
-						vi++;
+						XMVECTOR pos = XMVector2Transform(bezier, M);
+
+						float4 point;
+						XMStoreFloat4(&point, pos);
+						if (first)
+						{
+							first_point = point;
+							first = false;
+						}
+						std::memcpy(&strip[si++], &point, sizeof(float4));
+						std::memcpy(&strip[si++], &center, sizeof(float4));
 					}
 				}
-				// closing the triangle fan:
-				indices[ii++] = 0;
-				indices[ii++] = vi - 1;
-				indices[ii++] = 1;
+				std::memcpy(&strip[si++], &first_point, sizeof(float4));
 			}
 			else
 			{
 				// Non rounded image will simply use a 4 vertex triangle strip (simple quad)
-				GraphicsDevice::GPUAllocation mem = device->AllocateGPU(sizeof(float4) * 4, cmd);
+				vertex_count = 4;
+				GraphicsDevice::GPUAllocation mem = device->AllocateGPU(sizeof(float4) * vertex_count, cmd);
 				image.buffer_index = device->GetDescriptorIndex(&mem.buffer, SubresourceType::SRV);
 				image.buffer_offset = (uint)mem.offset;
 				std::memcpy(mem.data, corners, sizeof(corners));
@@ -277,53 +297,70 @@ namespace wi::image
 			image.flags |= IMAGE_FLAG_MIRROR;
 		}
 
-		const TextureDesc& desc = texture->GetDesc();
-		const float inv_width = 1.0f / float(desc.width);
-		const float inv_height = 1.0f / float(desc.height);
+		float inv_width = 1.0f;
+		float inv_height = 1.0f;
+		if (texture != nullptr)
+		{
+			const TextureDesc& desc = texture->GetDesc();
+			inv_width = 1.0f / float(desc.width);
+			inv_height = 1.0f / float(desc.height);
+		}
 
-		XMFLOAT4 texMulAdd;
 		if (params.isDrawRectEnabled())
 		{
-			texMulAdd.x = params.drawRect.z * inv_width;	// drawRec.width: mul
-			texMulAdd.y = params.drawRect.w * inv_height;	// drawRec.heigh: mul
-			texMulAdd.z = params.drawRect.x * inv_width;	// drawRec.x: add
-			texMulAdd.w = params.drawRect.y * inv_height;	// drawRec.y: add
+			image.texMulAdd.x = params.drawRect.z * inv_width;	// drawRec.width: mul
+			image.texMulAdd.y = params.drawRect.w * inv_height;	// drawRec.heigh: mul
+			image.texMulAdd.z = params.drawRect.x * inv_width;	// drawRec.x: add
+			image.texMulAdd.w = params.drawRect.y * inv_height;	// drawRec.y: add
 		}
 		else
 		{
-			texMulAdd = XMFLOAT4(1, 1, 0, 0);	// disabled draw rect
+			image.texMulAdd = XMFLOAT4(1, 1, 0, 0);	// disabled draw rect
 		}
-		texMulAdd.z += params.texOffset.x * inv_width;	// texOffset.x: add
-		texMulAdd.w += params.texOffset.y * inv_height;	// texOffset.y: add
-		XMHALF4 half_texMulAdd;
-		half_texMulAdd.x = XMConvertFloatToHalf(texMulAdd.x);
-		half_texMulAdd.y = XMConvertFloatToHalf(texMulAdd.y);
-		half_texMulAdd.z = XMConvertFloatToHalf(texMulAdd.z);
-		half_texMulAdd.w = XMConvertFloatToHalf(texMulAdd.w);
-		image.texMulAdd.x = uint(half_texMulAdd.v);
-		image.texMulAdd.y = uint(half_texMulAdd.v >> 32ull);
+		image.texMulAdd.z += params.texOffset.x * inv_width;	// texOffset.x: add
+		image.texMulAdd.w += params.texOffset.y * inv_height;	// texOffset.y: add
+		image.texMulAdd.x *= params.texMulAdd.x;
+		image.texMulAdd.y *= params.texMulAdd.y;
+		image.texMulAdd.z += params.texMulAdd.z;
+		image.texMulAdd.w += params.texMulAdd.w;
 
-		XMFLOAT4 texMulAdd2;
 		if (params.isDrawRect2Enabled())
 		{
-			texMulAdd2.x = params.drawRect2.z * inv_width;	// drawRec.width: mul
-			texMulAdd2.y = params.drawRect2.w * inv_height;	// drawRec.heigh: mul
-			texMulAdd2.z = params.drawRect2.x * inv_width;	// drawRec.x: add
-			texMulAdd2.w = params.drawRect2.y * inv_height;	// drawRec.y: add
+			image.texMulAdd2.x = params.drawRect2.z * inv_width;	// drawRec.width: mul
+			image.texMulAdd2.y = params.drawRect2.w * inv_height;	// drawRec.heigh: mul
+			image.texMulAdd2.z = params.drawRect2.x * inv_width;	// drawRec.x: add
+			image.texMulAdd2.w = params.drawRect2.y * inv_height;	// drawRec.y: add
 		}
 		else
 		{
-			texMulAdd2 = XMFLOAT4(1, 1, 0, 0);	// disabled draw rect
+			image.texMulAdd2 = XMFLOAT4(1, 1, 0, 0);	// disabled draw rect
 		}
-		texMulAdd2.z += params.texOffset2.x * inv_width;	// texOffset.x: add
-		texMulAdd2.w += params.texOffset2.y * inv_height;	// texOffset.y: add
-		XMHALF4 half_texMulAdd2;
-		half_texMulAdd2.x = XMConvertFloatToHalf(texMulAdd2.x);
-		half_texMulAdd2.y = XMConvertFloatToHalf(texMulAdd2.y);
-		half_texMulAdd2.z = XMConvertFloatToHalf(texMulAdd2.z);
-		half_texMulAdd2.w = XMConvertFloatToHalf(texMulAdd2.w);
-		image.texMulAdd2.x = uint(half_texMulAdd2.v);
-		image.texMulAdd2.y = uint(half_texMulAdd2.v >> 32ull);
+		image.texMulAdd2.z += params.texOffset2.x * inv_width;	// texOffset.x: add
+		image.texMulAdd2.w += params.texOffset2.y * inv_height;	// texOffset.y: add
+		image.texMulAdd2.x *= params.texMulAdd2.x;
+		image.texMulAdd2.y *= params.texMulAdd2.y;
+		image.texMulAdd2.z += params.texMulAdd2.z;
+		image.texMulAdd2.w += params.texMulAdd2.w;
+
+		if (params.gradient != Params::Gradient::None)
+		{
+			switch (params.gradient)
+			{
+			default:
+			case Params::Gradient::Linear:
+				image.flags |= IMAGE_FLAG_GRADIENT_LINEAR;
+				break;
+			case Params::Gradient::LinearReflected:
+				image.flags |= IMAGE_FLAG_GRADIENT_LINEAR_REFLECTED;
+				break;
+			case Params::Gradient::Circular:
+				image.flags |= IMAGE_FLAG_GRADIENT_CIRCULAR;
+				break;
+			}
+			image.gradient_color = wi::math::pack_half4(params.gradient_color);
+			image.gradient_uv_start = wi::math::pack_half2(params.gradient_uv_start);
+			image.gradient_uv_end = wi::math::pack_half2(params.gradient_uv_end);
+		}
 
 		device->EventBegin("Image", cmd);
 
@@ -334,27 +371,11 @@ namespace wi::image
 		}
 		device->BindStencilRef(stencilRef, cmd);
 
-		device->BindPipelineState(&imagePSO[params.blendFlag][params.stencilComp][params.stencilRefMode][strip_mode], cmd);
+		device->BindPipelineState(&imagePSO[params.blendFlag][params.stencilComp][params.stencilRefMode][params.isDepthTestEnabled()], cmd);
 
 		device->BindDynamicConstantBuffer(image, CBSLOT_IMAGE, cmd);
 
-		if (params.isFullScreenEnabled())
-		{
-			device->Draw(3, 0, cmd); // full screen triangle
-		}
-		else
-		{
-			switch (strip_mode)
-			{
-			case wi::image::STRIP_OFF:
-				device->DrawIndexed(index_count, 0, 0, cmd); // corner rounding with indexed geometry
-				break;
-			case wi::image::STRIP_ON:
-			default:
-				device->Draw(4, 0, cmd); // simple quad
-				break;
-			}
-		}
+		device->Draw(vertex_count, 0, cmd);
 
 		device->EventEnd(cmd);
 	}
@@ -371,6 +392,7 @@ namespace wi::image
 		desc.vs = &vertexShader;
 		desc.ps = &pixelShader;
 		desc.rs = &rasterizerState;
+		desc.pt = PrimitiveTopology::TRIANGLESTRIP;
 
 		for (int j = 0; j < BLENDMODE_COUNT; ++j)
 		{
@@ -379,23 +401,11 @@ namespace wi::image
 			{
 				for (int m = 0; m < STENCILREFMODE_COUNT; ++m)
 				{
-					desc.dss = &depthStencilStates[k][m];
-
-					for (int n = 0; n < STRIP_MODE_COUNT; ++n)
+					for (int d = 0; d < DEPTH_TEST_MODE_COUNT; ++d)
 					{
-						switch (n)
-						{
-						default:
-						case STRIP_ON:
-							desc.pt = PrimitiveTopology::TRIANGLESTRIP;
-							break;
-						case STRIP_OFF:
-							desc.pt = PrimitiveTopology::TRIANGLELIST;
-							break;
-						}
-						device->CreatePipelineState(&desc, &imagePSO[j][k][m][n]);
+						desc.dss = &depthStencilStates[k][m][d];
+						device->CreatePipelineState(&desc, &imagePSO[j][k][m][d]);
 					}
-
 				}
 			}
 		}
@@ -424,59 +434,75 @@ namespace wi::image
 
 		for (int i = 0; i < STENCILREFMODE_COUNT; ++i)
 		{
-			DepthStencilState dsd;
-			dsd.depth_enable = false;
-			dsd.stencil_enable = false;
-			depthStencilStates[STENCILMODE_DISABLED][i] = dsd;
-
-			dsd.stencil_enable = true;
-			switch (i)
+			for (int d = 0; d < DEPTH_TEST_MODE_COUNT; ++d)
 			{
-			case STENCILREFMODE_ENGINE:
-				dsd.stencil_read_mask = STENCILREF_MASK_ENGINE;
-				break;
-			case STENCILREFMODE_USER:
-				dsd.stencil_read_mask = STENCILREF_MASK_USER;
-				break;
-			default:
-				dsd.stencil_read_mask = STENCILREF_MASK_ALL;
-				break;
+				DepthStencilState dsd;
+				dsd.depth_write_mask = DepthWriteMask::ZERO;
+
+				switch (d)
+				{
+				default:
+				case DEPTH_TEST_OFF:
+					dsd.depth_enable = false;
+					break;
+				case DEPTH_TEST_ON:
+					dsd.depth_enable = true;
+					dsd.depth_func = ComparisonFunc::GREATER_EQUAL;
+					break;
+				}
+
+				dsd.stencil_enable = false;
+				depthStencilStates[STENCILMODE_DISABLED][i][d] = dsd;
+
+				dsd.stencil_enable = true;
+				switch (i)
+				{
+				case STENCILREFMODE_ENGINE:
+					dsd.stencil_read_mask = STENCILREF_MASK_ENGINE;
+					break;
+				case STENCILREFMODE_USER:
+					dsd.stencil_read_mask = STENCILREF_MASK_USER;
+					break;
+				default:
+					dsd.stencil_read_mask = STENCILREF_MASK_ALL;
+					break;
+				}
+				dsd.stencil_write_mask = 0;
+				dsd.front_face.stencil_pass_op = StencilOp::KEEP;
+				dsd.front_face.stencil_fail_op = StencilOp::KEEP;
+				dsd.front_face.stencil_depth_fail_op = StencilOp::KEEP;
+				dsd.back_face.stencil_pass_op = StencilOp::KEEP;
+				dsd.back_face.stencil_fail_op = StencilOp::KEEP;
+				dsd.back_face.stencil_depth_fail_op = StencilOp::KEEP;
+
+				dsd.front_face.stencil_func = ComparisonFunc::EQUAL;
+				dsd.back_face.stencil_func = ComparisonFunc::EQUAL;
+				depthStencilStates[STENCILMODE_EQUAL][i][d] = dsd;
+
+				dsd.front_face.stencil_func = ComparisonFunc::LESS;
+				dsd.back_face.stencil_func = ComparisonFunc::LESS;
+				depthStencilStates[STENCILMODE_LESS][i][d] = dsd;
+
+				dsd.front_face.stencil_func = ComparisonFunc::LESS_EQUAL;
+				dsd.back_face.stencil_func = ComparisonFunc::LESS_EQUAL;
+				depthStencilStates[STENCILMODE_LESSEQUAL][i][d] = dsd;
+
+				dsd.front_face.stencil_func = ComparisonFunc::GREATER;
+				dsd.back_face.stencil_func = ComparisonFunc::GREATER;
+				depthStencilStates[STENCILMODE_GREATER][i][d] = dsd;
+
+				dsd.front_face.stencil_func = ComparisonFunc::GREATER_EQUAL;
+				dsd.back_face.stencil_func = ComparisonFunc::GREATER_EQUAL;
+				depthStencilStates[STENCILMODE_GREATEREQUAL][i][d] = dsd;
+
+				dsd.front_face.stencil_func = ComparisonFunc::NOT_EQUAL;
+				dsd.back_face.stencil_func = ComparisonFunc::NOT_EQUAL;
+				depthStencilStates[STENCILMODE_NOT][i][d] = dsd;
+
+				dsd.front_face.stencil_func = ComparisonFunc::ALWAYS;
+				dsd.back_face.stencil_func = ComparisonFunc::ALWAYS;
+				depthStencilStates[STENCILMODE_ALWAYS][i][d] = dsd;
 			}
-			dsd.stencil_write_mask = 0;
-			dsd.front_face.stencil_pass_op = StencilOp::KEEP;
-			dsd.front_face.stencil_fail_op = StencilOp::KEEP;
-			dsd.front_face.stencil_depth_fail_op = StencilOp::KEEP;
-			dsd.back_face.stencil_pass_op = StencilOp::KEEP;
-			dsd.back_face.stencil_fail_op = StencilOp::KEEP;
-			dsd.back_face.stencil_depth_fail_op = StencilOp::KEEP;
-
-			dsd.front_face.stencil_func = ComparisonFunc::EQUAL;
-			dsd.back_face.stencil_func = ComparisonFunc::EQUAL;
-			depthStencilStates[STENCILMODE_EQUAL][i] = dsd;
-
-			dsd.front_face.stencil_func = ComparisonFunc::LESS;
-			dsd.back_face.stencil_func = ComparisonFunc::LESS;
-			depthStencilStates[STENCILMODE_LESS][i] = dsd;
-
-			dsd.front_face.stencil_func = ComparisonFunc::LESS_EQUAL;
-			dsd.back_face.stencil_func = ComparisonFunc::LESS_EQUAL;
-			depthStencilStates[STENCILMODE_LESSEQUAL][i] = dsd;
-
-			dsd.front_face.stencil_func = ComparisonFunc::GREATER;
-			dsd.back_face.stencil_func = ComparisonFunc::GREATER;
-			depthStencilStates[STENCILMODE_GREATER][i] = dsd;
-
-			dsd.front_face.stencil_func = ComparisonFunc::GREATER_EQUAL;
-			dsd.back_face.stencil_func = ComparisonFunc::GREATER_EQUAL;
-			depthStencilStates[STENCILMODE_GREATEREQUAL][i] = dsd;
-
-			dsd.front_face.stencil_func = ComparisonFunc::NOT_EQUAL;
-			dsd.back_face.stencil_func = ComparisonFunc::NOT_EQUAL;
-			depthStencilStates[STENCILMODE_NOT][i] = dsd;
-
-			dsd.front_face.stencil_func = ComparisonFunc::ALWAYS;
-			dsd.back_face.stencil_func = ComparisonFunc::ALWAYS;
-			depthStencilStates[STENCILMODE_ALWAYS][i] = dsd;
 		}
 
 
@@ -520,8 +546,8 @@ namespace wi::image
 		blendStates[BLENDMODE_ADDITIVE] = bd;
 
 		bd.render_target[0].blend_enable = true;
-		bd.render_target[0].src_blend = Blend::ZERO;
-		bd.render_target[0].dest_blend = Blend::SRC_COLOR;
+		bd.render_target[0].src_blend = Blend::DEST_COLOR;
+		bd.render_target[0].dest_blend = Blend::ZERO;
 		bd.render_target[0].blend_op = BlendOp::ADD;
 		bd.render_target[0].src_blend_alpha = Blend::ZERO;
 		bd.render_target[0].dest_blend_alpha = Blend::SRC_ALPHA;
@@ -529,6 +555,17 @@ namespace wi::image
 		bd.render_target[0].render_target_write_mask = ColorWrite::ENABLE_ALL;
 		bd.independent_blend_enable = false;
 		blendStates[BLENDMODE_MULTIPLY] = bd;
+
+		bd.render_target[0].blend_enable = true;
+		bd.render_target[0].src_blend = Blend::INV_DEST_COLOR;
+		bd.render_target[0].dest_blend = Blend::ZERO;
+		bd.render_target[0].blend_op = BlendOp::ADD;
+		bd.render_target[0].src_blend_alpha = Blend::ZERO;
+		bd.render_target[0].dest_blend_alpha = Blend::SRC_ALPHA;
+		bd.render_target[0].blend_op_alpha = BlendOp::ADD;
+		bd.render_target[0].render_target_write_mask = ColorWrite::ENABLE_ALL;
+		bd.independent_blend_enable = false;
+		blendStates[BLENDMODE_INVERSE] = bd;
 
 		SamplerDesc samplerDesc;
 		samplerDesc.filter = Filter::MIN_MAG_MIP_LINEAR;
@@ -598,7 +635,12 @@ namespace wi::image
 		static wi::eventhandler::Handle handle = wi::eventhandler::Subscribe(wi::eventhandler::EVENT_RELOAD_SHADERS, [](uint64_t userdata) { LoadShaders(); });
 		LoadShaders();
 
-		wi::backlog::post("wi::image Initialized (" + std::to_string((int)std::round(timer.elapsed())) + " ms)");
+		wilog("wi::image Initialized (%d ms)", (int)std::round(timer.elapsed()));
+	}
+
+	const PipelineState* GetPSO(DEPTH_TEST_MODE depth_test_mode, wi::enums::BLENDMODE blend_mode, STENCILMODE stencil_mode, STENCILREFMODE stencil_ref_mode)
+	{
+		return &imagePSO[blend_mode][stencil_mode][stencil_ref_mode][depth_test_mode];
 	}
 
 }

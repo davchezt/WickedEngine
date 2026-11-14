@@ -244,6 +244,13 @@ end
 function math.lerp(a,b,t)
 	return (a + (b-a)*t);
 end
+-- inverse linear interpolation
+function math.inverse_lerp(value1,value2,pos)
+	return (pos - value1) / (value2 - value1);
+end
+function math.inverselerp(value1,value2,pos)
+	return (pos - value1) / (value2 - value1);
+end
 -- clamp number between min,max
 function math.clamp(x,min,max)
 	if(x < min) then
@@ -261,6 +268,17 @@ end
 -- round number to nearest integer
 function math.round(x)
 	return x + 0.5 - ( x + 0.5 ) % 1;
+end
+
+-- These are fallback for when the script was not executed with attached parameters (like binary script):
+function script_file()
+	return ""
+end
+function script_dir()
+	return ""
+end
+function script_pid()
+	return 0
 end
 
 )";

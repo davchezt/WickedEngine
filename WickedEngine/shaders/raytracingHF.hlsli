@@ -5,6 +5,12 @@
 #include "ShaderInterop_BVH.h"
 #include "brdf.hlsli"
 
+#ifdef __XBOX_SCARLETT
+#include "raytracingHF_XBOX.hlsli"
+#else
+#define wiRayQuery RayQuery<0>
+#endif // __XBOX_SCARLETT
+
 #ifdef HLSL5
 struct RayDesc
 {
@@ -15,18 +21,65 @@ struct RayDesc
 };
 #endif // HLSL5
 
+// Creates camera ray from clip space using the inverse projection matrix:
 inline RayDesc CreateCameraRay(float2 clipspace)
 {
-	float4 unprojected = mul(GetCamera().inverse_view_projection, float4(clipspace, 0, 1));
-	unprojected.xyz /= unprojected.w;
+	float4 unprojectedNEAR = mul(GetCamera().inverse_view_projection, float4(clipspace, 1, 1));
+	unprojectedNEAR.xyz /= unprojectedNEAR.w;
+	float4 unprojectedFAR = mul(GetCamera().inverse_view_projection, float4(clipspace, 0, 1));
+	unprojectedFAR.xyz /= unprojectedFAR.w;
 
 	RayDesc ray;
-	ray.Origin = GetCamera().position;
-	ray.Direction = normalize(unprojected.xyz - ray.Origin);
+	ray.Origin = unprojectedNEAR.xyz;
+	ray.Direction = normalize(unprojectedFAR.xyz - ray.Origin);
 	ray.TMin = 0.001;
 	ray.TMax = FLT_MAX;
 
 	return ray;
+}
+
+// Creates camera ray from pixel coordinate, not using inverse projection matrix, but frustum corners:
+inline RayDesc CreateCameraRay(uint2 pixel, float2 offset = 0)
+{
+	float4 svpos = float4(float2(pixel) + 0.5 + offset, 0, 0);
+	float3 near = GetCamera().screen_to_nearplane(svpos);
+	float3 far = GetCamera().screen_to_farplane(svpos);
+
+	RayDesc ray;
+	ray.Origin = near;
+	ray.Direction = normalize(far - ray.Origin);
+	ray.TMin = 0.001;
+	ray.TMax = FLT_MAX;
+
+	return ray;
+}
+
+void ray_clip_plane(inout RayDesc ray, float4 clip_plane)
+{
+	if(any(clip_plane))
+	{
+		float3 plane_normal = -clip_plane.xyz;
+		float3 plane_origin = plane_normal * clip_plane.w;
+		float t = trace_plane(ray.Origin, ray.Direction, plane_origin, plane_normal);
+		if(dot(float4(ray.Origin, 1), clip_plane) > 0)
+		{
+			if(t > 0)
+			{
+				ray.TMax = t;
+			}
+		}
+		else
+		{
+			if(t > 0)
+			{
+				ray.TMin = t;
+			}
+			else
+			{
+				ray.TMax = ray.TMin;
+			}
+		}
+	}
 }
 
 #ifndef RTAPI
@@ -38,12 +91,12 @@ inline RayDesc CreateCameraRay(float2 clipspace)
 
 // have the stack in shared memory instead of registers:
 #ifdef RAYTRACE_STACK_SHARED
-groupshared uint stack[RAYTRACE_STACKSIZE][RAYTRACING_LAUNCH_BLOCKSIZE * RAYTRACING_LAUNCH_BLOCKSIZE];
+groupshared uint stack[RAYTRACE_STACKSIZE][8 * 4];
 #endif // RAYTRACE_STACK_SHARED
 
-#define primitiveCounterBuffer bindless_buffers[GetScene().BVH_counter]
-#define bvhNodeBuffer bindless_buffers[GetScene().BVH_nodes]
-#define primitiveBuffer bindless_buffers[GetScene().BVH_primitives]
+#define primitiveCounterBuffer bindless_structured_uint[descriptor_index(GetScene().BVH_counter)]
+#define bvhNodeBuffer bindless_buffers[descriptor_index(GetScene().BVH_nodes)]
+#define primitiveBuffer bindless_buffers[descriptor_index(GetScene().BVH_primitives)]
 
 struct RayHit
 {
@@ -238,7 +291,7 @@ inline RayHit TraceRay_Closest(RayDesc ray, uint mask, inout RNG rng, uint group
 #endif // RAYTRACE_STACK_SHARED
 	uint stackpos = 0;
 
-	const uint primitiveCount = primitiveCounterBuffer.Load(0);
+	const uint primitiveCount = primitiveCounterBuffer[0];
 	const uint leafNodeOffset = primitiveCount - 1;
 
 	// push root node
@@ -299,8 +352,8 @@ inline bool TraceRay_Any(RayDesc ray, uint mask, inout RNG rng, uint groupIndex 
 	uint stack[RAYTRACE_STACKSIZE][1];
 #endif // RAYTRACE_STACK_SHARED
 	uint stackpos = 0;
-
-	const uint primitiveCount = primitiveCounterBuffer.Load(0);
+	
+	const uint primitiveCount = primitiveCounterBuffer[0];
 	const uint leafNodeOffset = primitiveCount - 1;
 
 	// push root node
@@ -364,8 +417,8 @@ inline uint TraceRay_DebugBVH(RayDesc ray)
 	// Emulated stack for tree traversal:
 	uint stack[RAYTRACE_STACKSIZE];
 	uint stackpos = 0;
-
-	const uint primitiveCount = primitiveCounterBuffer.Load(0);
+	
+	const uint primitiveCount = primitiveCounterBuffer[0];
 	const uint leafNodeOffset = primitiveCount - 1;
 
 	// push root node

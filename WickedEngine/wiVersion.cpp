@@ -7,9 +7,9 @@ namespace wi::version
 	// main engine core
 	const int major = 0;
 	// minor features, major updates, breaking compatibility changes
-	const int minor = 71;
+	const int minor = 72;
 	// minor bug fixes, alterations, refactors, updates
-	const int revision = 99;
+	const int revision = 150;
 
 	const std::string version_string = std::to_string(major) + "." + std::to_string(minor) + "." + std::to_string(revision);
 
@@ -30,100 +30,39 @@ namespace wi::version
 		return version_string.c_str();
 	}
 
+#define SUPPORTERS \
+"Nemerle, James Webb, Quifeng Jin, TheGameCreators, Joseph Goldin, Yuri, Sergey K, Yukawa Kanta, Dragon Josh, John, LurkingNinja, Bernardo Del Castillo, " \
+"Invictus, Scott Hunt, Yazan Altaki, Tuan NV, Robert MacGregor, cybernescence, Alexander Dahlin, blueapples, Delhills, NI NI, Sherief, ktopoet, Justin Macklin, " \
+"Cédric Fabre, TogetherTeam, Bartosz Boczula, Arne Koenig, Ivan Trajchev, nathants, Fahd Ahmed, Gabriel Jadderson, SAS_Controller, Dominik Madarász, Segfault, " \
+"Mike amanfo, Dennis Brakhane, rookie, Peter Moore, therealjtgill, Nicolas Embleton, Desuuc, radino1977, Anthony Curtis, manni heck, Matthias Hölzl, Phyffer, " \
+"Lucas Pinheiro, Tapkaara, gpman, Anthony Python, Gnowos, Klaus, slaughternaut, Paul Brain, Connor Greaves, Alexandr, Lee Bamber, MCAlarm MC2, Titoutan, Willow, " \
+"Aldo, lokimx, K. Osterman, Nomad, ykl, Alex Krokos, Timmy, Avaflow, mat, Hexegonel Samael Michael, Joe Spataro, soru, GeniokV, Mammoth, Ignacio, datae, Jason Rice, " \
+"MarsBEKET, Tim, Twisty, Zelf ieats kiezen, Romildo Franco, zNachoh, Dmitriy, Alex Minerva, Stefan Kent, Natty, Sunny Krishna, Vilmos Malárik, Ferrata, Rossakis, " \
+"Stefana Andrei, Taylor, Gunnar Kriik, 赟 杨, Rex, Lemon Brother, flxy, meta_leap, Edik, jusik5348, Agnares, Fred Naar, Saki Asui, DarkRaVen, Ray, Russell Searle, Alexandr Dem'yanenko, "\
+"Portaloffreedom, nxrighthere, わさび わさび, Durak, ipso, Frånken, Shryder, Patryk Bański, Marcus Nordenstam, Morty Karim, Jarrid Kamphenkel, Makario Gim, Filoteo Pasquini" \
+"Me, Xiu Shui, Antony K. Jones, Dark Basic Software, Fintan Killoran"
+
 	const char* GetCreditsString()
 	{
 		static const char* credits = R"(
 Credits
 -----------
-Created by Turánszki János | https://github.com/turanszkij
+Created by Turánszki János
 
-
-Contributors
-------------------
-- Silas Oler | https://github.com/Kliaxe
-	- Stochastic Screen Space Reflections
-	- Realistic Sky
-	- Volumetric clouds
-	- Exponential height fog
-- Matteo De Carlo | https://github.com/portaloffreedom
-	- Linux core systems
-	- Cmake
-- XThemeCore | https://github.com/XthemeCore
-	- Morph targets
-- Amer Koleci https://github.com/amerkoleci
-	- Windows Cmake
-	- Graphics API improvements
-	- Dear ImGui integration
-	- Refactors, fixes
-- James Webb | https://github.com/jdswebb
-	- Graphics API improvements
-	- Fixes
-- Ben Vinson | https://github.com/BenV
-	- Fixes
-- Alexander Weinrauch | https://github.com/AlexAUT
-	- Fixes
-- Eric Fedosejevs | https://github.com/efedo
-	- Fixes
-- Johan Aires Rastén | https://github.com/JohanAR
-	- Fixes
-- Megumumpkin | https://github.com/megumumpkin
-	- Linux audio implementation
-	- Linux controller implementation
-	- Linux network implementation
-	- ComponentLibrary implementation
-	- Lua property bindings support, improvements
-	- Fixes
-- Maeve Garside | https://github.com/MolassesLover
-	- Linux package files
-	- Visual Studio Code support improvement
-	- Linux template
-- Igor Alexey | https://github.com/sororfortuna
-	- QOI image loader integration
-- Eddie Ataberk | https://github.com/eddieataberk
-	- Physics improvements
-- Preben Eriksen | https://github.com/plemsoft
-	- Fixes
-	- Dear ImGui docking sample.
-- matpx | https://github.com/matpx
-	- Fixes
-- Dennis Brakhane | https://github.com/brakhane
-	- Added Liberation Sans default font
-- Cop46 | https://github.com/Cop46
-	- Brightness, Contrast, Saturation post process
+Contributors:
+---------------------------
+Silas Oler, Matteo De Carlo, Amer Koleci, James Webb, Megumumpkin, Preben Eriksen, Dennis Brakhane, Stanislav Denisov
+All contributors: https://github.com/turanszkij/WickedEngine/graphs/contributors
 
 Patreon supporters
 ---------------------------
-- Nemerle
-- James Webb
-- Quifeng Jin
-- TheGameCreators
-- Joseph Goldin
-- Yuri
-- Sergey K
-- Yukawa Kanta
-- Dragon Josh
-- John
-- LurkingNinja
-- Bernardo Del Castillo
-- Invictus
-- Scott Hunt
-- Yazan Altaki
-- Tuan NV
-- Robert MacGregor
-- cybernescence
-- Alexander Dahlin
-- blueapples
-- Delhills
-- NI NI
-- Sherief
-- ktopoet
-- Justin Macklin
-- Cédric Fabre
-- TogetherTeam
-- Bartosz Boczula
-		)";
+)" SUPPORTERS;
 
 		return credits;
+	}
+	const char* GetSupportersString()
+	{
+		return SUPPORTERS;
 	}
 
 }

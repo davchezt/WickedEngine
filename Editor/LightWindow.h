@@ -1,6 +1,4 @@
 #pragma once
-#include "WickedEngine.h"
-
 class EditorComponent;
 
 class LightWindow : public wi::gui::Window
@@ -16,19 +14,35 @@ public:
 
 	wi::gui::Slider intensitySlider;
 	wi::gui::Slider rangeSlider;
+	wi::gui::Slider radiusSlider;
+	wi::gui::Slider lengthSlider;
+	wi::gui::Slider heightSlider;
 	wi::gui::Slider outerConeAngleSlider;
 	wi::gui::Slider innerConeAngleSlider;
-	wi::gui::CheckBox	shadowCheckBox;
-	wi::gui::CheckBox	haloCheckBox;
-	wi::gui::CheckBox	volumetricsCheckBox;
-	wi::gui::CheckBox	staticCheckBox;
-	wi::gui::CheckBox	volumetricCloudsCheckBox;
+	wi::gui::Slider volumetricBoostSlider;
+	wi::gui::CheckBox shadowCheckBox;
+	wi::gui::CheckBox haloCheckBox;
+	wi::gui::CheckBox volumetricsCheckBox;
+	wi::gui::CheckBox staticCheckBox;
+	wi::gui::CheckBox volumetricCloudsCheckBox;
 	wi::gui::ColorPicker colorPicker;
 	wi::gui::ComboBox typeSelectorComboBox;
 	wi::gui::ComboBox shadowResolutionComboBox;
+	wi::gui::ComboBox cameraComboBox;
+
+	wi::gui::Label tipLabel;
 
 	wi::gui::Label lensflare_Label;
 	wi::gui::Button lensflare_Button[7];
+
+	struct CascadeConfig
+	{
+		wi::gui::Slider distanceSlider;
+		wi::gui::Button removeButton;
+	};
+	std::deque<CascadeConfig> cascades;
+	wi::gui::Button addCascadeButton;
+	void RefreshCascades();
 
 	void ResizeLayout() override;
 };

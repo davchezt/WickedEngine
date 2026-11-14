@@ -1,6 +1,9 @@
 #pragma once
 #include "CommonInclude.h"
 #include "wiMath.h"
+#include "wiVector.h"
+#include "wiApplication.h"
+#include "wiRenderPath.h"
 
 #include <string>
 
@@ -19,32 +22,20 @@ namespace wi::lua
 
 	lua_State* GetLuaState();
 
-	//check if the last call succeeded
-	bool Success();
-	//check if the last call failed
-	bool Failed();
-	//get error message for the last call
-	std::string GetErrorMsg();
-	//remove and get error message from stack
-	std::string PopErrorMsg();
-	//post error to backlog and/or debug output
-	void PostErrorMsg();
 	//run a script from file
-	bool RunFile(const std::string& filename);
+	bool RunFile(const char* filename);
+	inline bool RunFile(const std::string& filename) { return RunFile(filename.c_str()); }
+	//run a binary script from file
+	bool RunBinaryFile(const char* filename);
+	inline bool RunBinaryFile(const std::string& filename) { return RunBinaryFile(filename.c_str()); }
 	//run a script from param
-	bool RunText(const std::string& script);
+	bool RunText(const char* script);
+	inline bool RunText(const std::string& script) { return RunText(script.c_str()); }
+	//run binary script
+	bool RunBinaryData(const void* data, size_t size, const char* debugname = "");
 	//register function to use in scripts
-	bool RegisterFunc(const std::string& name, lua_CFunction function);
-	//register class
-	void RegisterLibrary(const std::string& tableName, const luaL_Reg* functions);
-	//register object
-	bool RegisterObject(const std::string& tableName, const std::string& name, void* object);
-	//add function to the previously registered object
-	void AddFunc(const std::string& name, lua_CFunction function);
-	//add function array to the previously registered object
-	void AddFuncArray(const luaL_Reg* functions);
-	//add int member to registered object
-	void AddInt(const std::string& name, int data);
+	void RegisterFunc(const char* name, lua_CFunction function);
+	inline void RegisterFunc(const std::string& name, lua_CFunction function) { RegisterFunc(name.c_str(), function); }
 
 	//set delta time to use with lua
 	void SetDeltaTime(double dt);
@@ -56,7 +47,8 @@ namespace wi::lua
 	void Render();
 
 	//send a signal to lua
-	void Signal(const std::string& name);
+	void Signal(const char* name);
+	inline void Signal(const std::string& name) { Signal(name.c_str()); }
 
 	//kill every running background task (coroutine)
 	void KillProcesses();
@@ -66,16 +58,26 @@ namespace wi::lua
 
 	// Adds some local management functions to the script
 	//	returns the PID
-	uint32_t AttachScriptParameters(std::string& script, const std::string& filename = "", uint32_t PID = GeneratePID(), const std::string& customparameters_prepend = "",  const std::string& customparameters_append = "");
+	uint32_t AttachScriptParameters(std::string& script, const std::string& filename = "", uint32_t PID = GeneratePID(), const std::string& customparameters_prepend = "", const std::string& customparameters_append = "");
 
 	//Following functions are "static", operating on specified lua state:
 
 	//get string from lua on stack position
-	std::string SGetString(lua_State* L, int stackpos);
-	//check if a value is string on the stack position
+	const char* SGetString(lua_State* L, int stackpos);
+	//check if a value is a string on the stack position
 	bool SIsString(lua_State* L, int stackpos);
-	//check if a value is number on the stack position
+	//check if a value is a number on the stack position
 	bool SIsNumber(lua_State* L, int stackpos);
+	//check if a value is a bool on the stack position
+	bool SIsBool(lua_State* L, int stackpos);
+	//check if a value is a c function on the stack position
+	bool SIsCFunction(lua_State* L, int stackpos);
+	//check if a value is a userdata on the stack position
+	bool SIsUserdata(lua_State* L, int stackpos);
+	//check if a value is nil on the stack position
+	bool SIsNil(lua_State* L, int stackpos);
+	//get lua.h type int on the stack position
+	int SGetType(lua_State* L, int stackpos);
 	//get int from lua on stack position
 	int SGetInt(lua_State* L, int stackpos);
 	//get long from lua on stack position
@@ -116,7 +118,8 @@ namespace wi::lua
 	//push double to lua stack
 	void SSetDouble(lua_State* L, double data);
 	//push string to lua stack
-	void SSetString(lua_State* L, const std::string& data);
+	void SSetString(lua_State* L, const char* data);
+	inline void SSetString(lua_State* L, const std::string& data) { SSetString(L, data.c_str()); }
 	//push bool to lua stack
 	void SSetBool(lua_State* L, bool data);
 	//push pointer (light userdata) to lua stack
@@ -191,7 +194,15 @@ namespace wi::lua
 	//throw error
 	void SError(lua_State* L, const std::string& error = "");
 	
-	//add new metatable
-	void SAddMetatable(lua_State* L, const std::string& name);
+	// Compiles text file containing LUA source code to binary LUA code
+	bool CompileFile(const char* filename, wi::vector<uint8_t>& dst);
+	inline bool CompileFile(const std::string& filename, wi::vector<uint8_t>& dst) { return CompileFile(filename.c_str(), dst); }
+	// Compiles LUA source code text into binary LUA code
+	bool CompileText(const char* script, wi::vector<uint8_t>& dst);
+	inline bool CompileText(const std::string& script, wi::vector<uint8_t>& dst) { return CompileText(script.c_str(), dst); }
+
+	// With this you can enable the IsThisEditor() and ReturnToEditor() functionality in lua scripts
+	//	This allows easier script testing with editor functionality instead of managing previous render paths yourself in scripts
+	void EnableEditorFunctionality(wi::Application* application, wi::RenderPath* renderpath);
 };
 

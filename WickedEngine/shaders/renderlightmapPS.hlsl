@@ -1,22 +1,129 @@
 #define RAY_BACKFACE_CULLING
+#define TEXTURE_SLOT_NONUNIFORM
 #include "globals.hlsli"
 #include "raytracingHF.hlsli"
 #include "lightingHF.hlsli"
 #include "stochasticSSRHF.hlsli"
 
+//#define DEBUG_CHARTS
+
 // This value specifies after which bounce the anyhit will be disabled:
-static const uint ANYTHIT_CUTOFF_AFTER_BOUNCE_COUNT = 1;
+static const uint ANYTHIT_CUTOFF_AFTER_BOUNCE_COUNT = 4;
 
 struct Input
 {
 	float4 pos : SV_POSITION;
-	float2 uv : TEXCOORD;
-	float3 pos3D : WORLDPOSITION;
-	float3 normal : NORMAL;
+	centroid float3 pos3D : WORLDPOSITION;
+	centroid float3 normal : NORMAL;
+
+#ifdef DEBUG_CHARTS
+	uint primitiveID : SV_PrimitiveID;
+#endif // DEBUG_CHARTS
 };
 
+static const float2 tangent_directions[] = {
+	float2(1, 0),
+	float2(-1, 0),
+	float2(0, 1),
+	float2(0, -1),
+};
+
+// Bakery pixel pushing: https://ndotl.wordpress.com/2018/08/29/baking-artifact-free-lightmaps/
+//	This can push position outside of enclosed area within a pixel to remove shadow leaks
+//	Instead the shadow texel reaching outside, this will make light go inside which is better in most cases
+void BakeryPixelPush(inout float3 P, in float3 N, in float2 UV, inout RNG rng, inout float bakerydebug)
+{
+	float3 dUV1 = max(abs(ddx(P)), abs(ddy(P)));
+	float dPos = max(max(dUV1.x, dUV1.y), dUV1.z);
+	dPos = dPos * SQRT2; // convert to diagonal (small overshoot)
+	
+	float3x3 TBN = compute_tangent_frame(N, P, UV);
+
+	bool valid = true; // AMD DX12 issue workaround for early break/return!
+	
+	for (uint i = 0; i < arraysize(tangent_directions) && WaveActiveAnyTrue(valid); ++i)
+	{
+		RayDesc ray;
+		ray.Origin = P + N * 0.001;
+		ray.Direction = normalize(mul(float3(tangent_directions[i], 1), TBN));
+		ray.TMin = 0.001;
+		ray.TMax = dPos;
+	
+		bool backface_hit = false;
+		float3 hit_pos = 0;
+		float3 hit_nor = 0;
+	
+		Surface surface;
+		surface.init();
+		surface.V = -ray.Direction;
+
+		valid = true;
+
+#ifdef RTAPI
+		uint flags = RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES;
+		flags |= RAY_FLAG_FORCE_OPAQUE;
+		flags |= RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH;
+		wiRayQuery q;
+		q.TraceRayInline(
+			scene_acceleration_structure,	// RaytracingAccelerationStructure AccelerationStructure
+			flags,							// uint RayFlags
+			xTraceUserData.y,				// uint InstanceInclusionMask
+			ray								// RayDesc Ray
+		);
+		while (q.Proceed());
+		if (q.CommittedStatus() == COMMITTED_TRIANGLE_HIT && !q.CommittedTriangleFrontFace())
+		{
+			backface_hit = true;
+			hit_pos = q.WorldRayOrigin() + q.WorldRayDirection() * q.CommittedRayT();
+		
+			PrimitiveID prim;
+			prim.init();
+			prim.primitiveIndex = q.CommittedPrimitiveIndex();
+			prim.instanceIndex = q.CommittedInstanceID();
+			prim.subsetIndex = q.CommittedGeometryIndex();
+
+			surface.SetBackface(!q.CommittedTriangleFrontFace());
+
+			surface.hit_depth = q.CommittedRayT();
+			if (!surface.load(prim, q.CommittedTriangleBarycentrics()))
+				valid = false;
+
+			hit_nor = surface.facenormal;
+		}
+#else
+		RayHit hit = TraceRay_Closest(ray, xTraceUserData.y, rng);
+		if (hit.distance < FLT_MAX && hit.is_backface)
+		{
+			backface_hit = true;
+			hit_pos = ray.Origin + ray.Direction * hit.distance;
+		
+			surface.SetBackface(hit.is_backface);
+
+			surface.hit_depth = hit.distance;
+			if (!surface.load(hit.primitiveID, hit.bary))
+				valid = false;
+
+			hit_nor = surface.facenormal;
+		}
+#endif // RTAPI
+
+		if (valid && backface_hit)
+		{
+			bakerydebug = 1;
+			P = hit_pos - hit_nor * 0.001;
+		}
+	}
+}
+
+[earlydepthstencil]
 float4 main(Input input) : SV_TARGET
 {
+#ifdef DEBUG_CHARTS
+	return float4(random_color(input.primitiveID), 1);
+#endif // DEBUG_CHARTS
+
+	float2 uv = input.pos.xy * xTraceResolution_rcp;
+
 	Surface surface;
 	surface.init();
 	surface.N = normalize(input.normal);
@@ -24,10 +131,14 @@ float4 main(Input input) : SV_TARGET
 	RNG rng;
 	rng.init((uint2)input.pos.xy, xTraceSampleIndex);
 
-	float2 uv = input.uv;
+	float3 P = input.pos3D;
+
+	float bakerydebug = 0;
+	BakeryPixelPush(P, surface.N, uv, rng, bakerydebug);
+	
 	RayDesc ray;
-	ray.Origin = input.pos3D;
-	ray.Direction = sample_hemisphere_cos(surface.N, rng);
+	ray.Origin = P + surface.N * 0.001;
+	ray.Direction = normalize(sample_hemisphere_cos(surface.N, rng));
 	ray.TMin = 0.001;
 	ray.TMax = FLT_MAX;
 	float3 result = 0;
@@ -37,20 +148,18 @@ float4 main(Input input) : SV_TARGET
 	for (uint bounce = 0; bounce < bounces; ++bounce)
 	{
 #ifdef RTAPI
-		RayQuery<
-			RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES
-		> q;
+		wiRayQuery q;
 #endif // RTAPI
 
 		surface.P = ray.Origin;
 
 		// Light sampling:
 		{
-			const uint light_count = GetFrame().lightarray_count;
-			const uint light_index = GetFrame().lightarray_offset + rng.next_uint(light_count);
+			const uint light_count = lights().item_count();
+			const uint light_index = lights().first_item() + rng.next_uint(light_count);
 			ShaderEntity light = load_entity(light_index);
 
-			if (light.GetFlags() & ENTITY_FLAG_LIGHT_STATIC) // dynamic lights will not be baked into lightmap
+			if (bounce > 0 || light.IsStaticLight()) // dynamic lights will not be baked into lightmap at first bounce
 			{
 				Lighting lighting;
 				lighting.create(0, 0, 0, 0);
@@ -66,6 +175,7 @@ float4 main(Input input) : SV_TARGET
 					dist = FLT_MAX;
 
 					L = light.GetDirection().xyz;
+					L += sample_hemisphere_cos(L, rng) * light.GetRadius();
 					NdotL = saturate(dot(L, surface.N));
 
 					[branch]
@@ -85,6 +195,8 @@ float4 main(Input input) : SV_TARGET
 				break;
 				case ENTITY_TYPE_POINTLIGHT:
 				{
+					light.position += light.GetDirection() * (rng.next_float() - 0.5) * light.GetLength();
+					light.position += sample_hemisphere_cos(normalize(light.position - surface.P), rng) * light.GetRadius();
 					L = light.position - surface.P;
 					const float dist2 = dot(L, L);
 					const float range = light.GetRange();
@@ -103,13 +215,21 @@ float4 main(Input input) : SV_TARGET
 							const float3 lightColor = light.GetColor().rgb;
 
 							lighting.direct.diffuse = lightColor;
-							lighting.direct.diffuse *= attenuation_pointlight(dist, dist2, range, range2);
+							lighting.direct.diffuse *= attenuation_pointlight(dist2, range, light.GetRange2Rcp());
 						}
 					}
 				}
 				break;
-				case ENTITY_TYPE_SPOTLIGHT:
+				case ENTITY_TYPE_RECTLIGHT:
 				{
+					const half4 quaternion = light.GetQuaternion();
+					const half3 right = rotate_vector(half3(1, 0, 0), quaternion);
+					const half3 up = rotate_vector(half3(0, 1, 0), quaternion);
+					const half3 forward = cross(up, right);
+					if (dot(surface.P - light.position, forward) <= 0)
+						break; // behind light
+					light.position += right * (rng.next_float() - 0.5) * light.GetLength();
+					light.position += up * (rng.next_float() - 0.5) * light.GetHeight();
 					L = light.position - surface.P;
 					const float dist2 = dot(L, L);
 					const float range = light.GetRange();
@@ -125,7 +245,34 @@ float4 main(Input input) : SV_TARGET
 						[branch]
 						if (NdotL > 0)
 						{
-							const float spot_factor = dot(L, light.GetDirection());
+							const float3 lightColor = light.GetColor().rgb;
+
+							lighting.direct.diffuse = lightColor;
+							lighting.direct.diffuse *= attenuation_pointlight(dist2, range, light.GetRange2Rcp());
+						}
+					}
+				}
+				break;
+				case ENTITY_TYPE_SPOTLIGHT:
+				{
+					float3 Loriginal = normalize(light.position - surface.P);
+					light.position += sample_hemisphere_cos(normalize(light.position - surface.P), rng) * light.GetRadius();
+					L = light.position - surface.P;
+					const float dist2 = dot(L, L);
+					const float range = light.GetRange();
+					const float range2 = range * range;
+
+					[branch]
+					if (dist2 < range2)
+					{
+						dist = sqrt(dist2);
+						L /= dist;
+						NdotL = saturate(dot(L, surface.N));
+
+						[branch]
+						if (NdotL > 0)
+						{
+							const float spot_factor = dot(Loriginal, light.GetDirection());
 							const float spot_cutoff = light.GetConeAngleCos();
 
 							[branch]
@@ -134,7 +281,7 @@ float4 main(Input input) : SV_TARGET
 								const float3 lightColor = light.GetColor().rgb;
 
 								lighting.direct.diffuse = lightColor;
-								lighting.direct.diffuse *= attenuation_spotlight(dist, dist2, range, range2, spot_factor, light.GetAngleScale(), light.GetAngleOffset());
+								lighting.direct.diffuse *= attenuation_spotlight(dist2, range, light.GetRange2Rcp(), spot_factor, light.GetAngleScale(), light.GetAngleOffset());
 							}
 						}
 					}
@@ -147,13 +294,13 @@ float4 main(Input input) : SV_TARGET
 					float3 shadow = energy;
 
 					RayDesc newRay;
-					newRay.Origin = surface.P;
-					newRay.Direction = normalize(lerp(L, sample_hemisphere_cos(L, rng), 0.025f));
+					newRay.Origin = surface.P + surface.N * 0.001;
 					newRay.TMin = 0.001;
 					newRay.TMax = dist;
+					newRay.Direction = normalize(L + max3(surface.sss));
 
 #ifdef RTAPI
-					uint flags = RAY_FLAG_CULL_FRONT_FACING_TRIANGLES;
+					uint flags = RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES | RAY_FLAG_CULL_FRONT_FACING_TRIANGLES;
 					if (bounce > ANYTHIT_CUTOFF_AFTER_BOUNCE_COUNT)
 					{
 						flags |= RAY_FLAG_FORCE_OPAQUE;
@@ -168,6 +315,7 @@ float4 main(Input input) : SV_TARGET
 					while (q.Proceed())
 					{
 						PrimitiveID prim;
+						prim.init();
 						prim.primitiveIndex = q.CandidatePrimitiveIndex();
 						prim.instanceIndex = q.CandidateInstanceID();
 						prim.subsetIndex = q.CandidateGeometryIndex();
@@ -218,7 +366,7 @@ float4 main(Input input) : SV_TARGET
 			xTraceUserData.y,				// uint InstanceInclusionMask
 			ray								// RayDesc Ray
 		);
-		q.Proceed();
+		while (q.Proceed());
 		if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT)
 #else
 		RayHit hit = TraceRay_Closest(ray, xTraceUserData.y, rng);
@@ -232,11 +380,11 @@ float4 main(Input input) : SV_TARGET
 			if (IsStaticSky())
 			{
 				// We have envmap information in a texture:
-				envColor = texture_globalenvmap.SampleLevel(sampler_linear_clamp, ray.Direction, 0).rgb;
+				envColor = GetStaticSkyColor(ray.Direction);
 			}
 			else
 			{
-				envColor = GetDynamicSkyColor(ray.Direction, true, true, false, true);
+				envColor = GetDynamicSkyColor(ray.Direction, true, false, true);
 			}
 			result += max(0, energy * envColor);
 			break;
@@ -247,9 +395,12 @@ float4 main(Input input) : SV_TARGET
 		ray.Origin = q.WorldRayOrigin() + q.WorldRayDirection() * q.CommittedRayT();
 
 		PrimitiveID prim;
+		prim.init();
 		prim.primitiveIndex = q.CommittedPrimitiveIndex();
 		prim.instanceIndex = q.CommittedInstanceID();
 		prim.subsetIndex = q.CommittedGeometryIndex();
+
+		surface.SetBackface(!q.CommittedTriangleFrontFace());
 
 		if (!surface.load(prim, q.CommittedTriangleBarycentrics()))
 			return 0;
@@ -257,6 +408,8 @@ float4 main(Input input) : SV_TARGET
 #else
 		// ray origin updated for next bounce:
 		ray.Origin = ray.Origin + ray.Direction * hit.distance;
+
+		surface.SetBackface(hit.is_backface);
 
 		if (!surface.load(hit.primitiveID, hit.bary))
 			return 0;
@@ -270,8 +423,9 @@ float4 main(Input input) : SV_TARGET
 		if (rng.next_float() < surface.transmission)
 		{
 			// Refraction
-			const float3 R = refract(ray.Direction, surface.N, 1 - surface.material.refraction);
-			ray.Direction = lerp(R, sample_hemisphere_cos(R, rng), surface.roughnessBRDF);
+			const float3 R = refract(ray.Direction, surface.N, 1 - surface.material.GetRefraction());
+			float roughnessBRDF = sqr(clamp(surface.roughness, min_roughness, 1));
+			ray.Direction = lerp(R, sample_hemisphere_cos(R, rng), roughnessBRDF);
 			energy *= surface.albedo / max(0.001, surface.transmission);
 
 			// Add a new bounce iteration, otherwise the transparent effect can disappear:
@@ -292,6 +446,8 @@ float4 main(Input input) : SV_TARGET
 				ray.Direction = sample_hemisphere_cos(surface.N, rng);
 				energy *= surface.albedo * (1 - surface.F) / max(0.001, 1 - specular_chance) / max(0.001, 1 - surface.transmission);
 			}
+			
+			ray.Origin += surface.facenormal * 0.001; // NOTE: TMin on AMD doesn't handle CommittedTriangleFrontFace correctly, so origin is updated instead!
 		}
 
 		// Terminate ray's path or apply inverse termination bias:
@@ -304,5 +460,8 @@ float4 main(Input input) : SV_TARGET
 
 	}
 
+	//if(bakerydebug > 0)
+	//	result = float3(1,0,0);
+	
 	return float4(result, xTraceAccumulationFactor);
 }

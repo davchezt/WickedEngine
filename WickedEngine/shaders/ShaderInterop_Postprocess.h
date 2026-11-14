@@ -43,6 +43,9 @@ struct Bloom
 static const uint SSR_TILESIZE = 32;
 #define ssr_roughness_cutoff postprocess.params0.z
 #define ssr_frame postprocess.params0.w
+#define ssr_ratiofactorx postprocess.params1.x
+#define ssr_ratiofactory postprocess.params1.y
+#define ssr_downscalefactor postprocess.params1.z
 
 #define ssao_range postprocess.params0.x
 #define ssao_samplecount postprocess.params0.y
@@ -51,12 +54,17 @@ static const uint SSR_TILESIZE = 32;
 #define rtao_range ssao_range
 #define rtao_power ssao_power
 
+#define rtshadow_denoise_lightindex postprocess.params0.y
+
 #define rtdiffuse_range ssao_range
 #define rtdiffuse_frame ssr_frame
+#define rtdiffuse_downscalefactor ssr_downscalefactor
+#define ssgi_frame ssr_frame
 
 #define rtreflection_range ssao_range
 #define rtreflection_roughness_cutoff ssr_roughness_cutoff
 #define rtreflection_frame ssr_frame
+#define rtreflection_downscalefactor ssr_downscalefactor
 
 static const uint POSTPROCESS_HBAO_THREADCOUNT = 320;
 #define hbao_direction postprocess.params0.xy
@@ -64,7 +72,7 @@ static const uint POSTPROCESS_HBAO_THREADCOUNT = 320;
 #define hbao_uv_to_view_A postprocess.params1.xy
 #define hbao_uv_to_view_B postprocess.params1.zw
 
-#define volumetricclouds_frame postprocess.params0.z
+#define volumetricclouds_frame postprocess.params1.x
 
 static const uint POSTPROCESS_MSAO_BLOCKSIZE = 16;
 struct MSAO
@@ -86,6 +94,7 @@ struct MSAO_UPSAMPLE
 	float StepSize;
 	float kBlurTolerance;
 	float kUpsampleTolerance;
+	int is_main_depth;
 };
 
 struct ShadingRateClassification
@@ -117,14 +126,17 @@ static const uint DEPTHOFFIELD_TILESIZE = 32;
 #define dof_cocscale postprocess.params0.x
 #define dof_maxcoc postprocess.params0.y
 
+enum TONEMAP_FLAGS
+{
+	TONEMAP_FLAG_DITHER = 1 << 0,
+	TONEMAP_FLAG_ACES = 1 << 1,
+	TONEMAP_FLAG_SRGB = 1 << 2,
+	TONEMAP_FLAG_UCHIMURA = 1 << 3,
+};
 struct PushConstantsTonemap
 {
 	float2 resolution_rcp;
-	float exposure;
-	float dither;
-	float brightness;
-	float contrast;
-	float saturation;
+	uint2 exposure_brightness_contrast_saturation;
 
 	int texture_input;
 	int buffer_input_luminance;
@@ -133,16 +145,16 @@ struct PushConstantsTonemap
 
 	int texture_bloom;
 	int texture_output;
-	uint display_colorspace;
+	int texture_input_distortion_overlay;
+	uint flags_hdrcalibration;
 };
 
-static const uint TILE_STATISTICS_OFFSET_EARLYEXIT = 0;
-static const uint TILE_STATISTICS_OFFSET_CHEAP = TILE_STATISTICS_OFFSET_EARLYEXIT + 4;
-static const uint TILE_STATISTICS_OFFSET_EXPENSIVE = TILE_STATISTICS_OFFSET_CHEAP + 4;
-static const uint INDIRECT_OFFSET_EARLYEXIT = TILE_STATISTICS_OFFSET_EXPENSIVE + 4;
-static const uint INDIRECT_OFFSET_CHEAP = INDIRECT_OFFSET_EARLYEXIT + 4 * 3;
-static const uint INDIRECT_OFFSET_EXPENSIVE = INDIRECT_OFFSET_CHEAP + 4 * 3;
-static const uint TILE_STATISTICS_CAPACITY = INDIRECT_OFFSET_EXPENSIVE + 4 * 3;
+struct PostprocessTileStatistics
+{
+	IndirectDispatchArgs dispatch_earlyexit;
+	IndirectDispatchArgs dispatch_cheap;
+	IndirectDispatchArgs dispatch_expensive;
+};
 
 
 #endif // WI_SHADERINTEROP_POSTPROCESS_H

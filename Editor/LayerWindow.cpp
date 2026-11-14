@@ -1,15 +1,13 @@
 #include "stdafx.h"
 #include "LayerWindow.h"
-#include "Editor.h"
 
 using namespace wi::ecs;
 using namespace wi::scene;
 
-
 void LayerWindow::Create(EditorComponent* _editor)
 {
 	editor = _editor;
-	wi::gui::Window::Create(ICON_LAYER " Layer", wi::gui::Window::WindowControls::COLLAPSE | wi::gui::Window::WindowControls::CLOSE);
+	wi::gui::Window::Create(ICON_LAYER " Layer", wi::gui::Window::WindowControls::COLLAPSE | wi::gui::Window::WindowControls::CLOSE | wi::gui::Window::WindowControls::FIT_ALL_WIDGETS_VERTICAL);
 	SetSize(XMFLOAT2(300, 350));
 
 	closeButton.SetTooltip("Delete LayerComponent");
@@ -23,77 +21,69 @@ void LayerWindow::Create(EditorComponent* _editor)
 
 		editor->RecordEntity(archive, entity);
 
-		editor->optionsWnd.RefreshEntityTree();
-		});
-
-	float x = 30;
-	float y = 0;
-	float step = 25;
-	float siz = 20;
-	float wid = 250;
+		editor->componentsWnd.RefreshEntityTree();
+	});
 
 	label.Create("LayerWindowLabel");
-	label.SetText("The layer is a 32-bit mask (uint32_t), which can be used for filtering by multiple systems (visibility, collision, picking, etc.).\n- If all bits are disabled, it means the layer will be inactive in most systems.\n- For ray tracing, the lower 8 bits will be used as instance inclusion mask.");
-	label.SetPos(XMFLOAT2(x, y));
-	label.SetSize(XMFLOAT2(wid, 100));
-	label.SetColor(wi::Color::Transparent());
+	label.SetText("The layer is a 32-bit mask (uint32_t), which can be used for filtering by multiple systems (visibility, collision, picking, scripts, etc.).\n- If all bits are disabled, it means the layer will be inactive in most systems.");
+	label.SetFitTextEnabled(true);
 	AddWidget(&label);
-	y += label.GetScale().y + 5;
 
 	for (uint32_t i = 0; i < arraysize(layers); ++i)
 	{
 		layers[i].Create("");
 		layers[i].SetText(std::to_string(i) + ": ");
-		layers[i].SetPos(XMFLOAT2(x + 20 + (i % 5) * 50, y + (i / 5) * step));
 		layers[i].OnClick([=](wi::gui::EventArgs args) {
-
-			LayerComponent* layer = editor->GetCurrentScene().layers.GetComponent(entity);
-			if (layer == nullptr)
+			wi::scene::Scene& scene = editor->GetCurrentScene();
+			for (auto& x : editor->translator.selected)
 			{
-				layer = &editor->GetCurrentScene().layers.Create(entity);
-			}
+				LayerComponent* layer = scene.layers.GetComponent(x.entity);
+				if (layer == nullptr)
+				{
+					layer = &editor->GetCurrentScene().layers.Create(x.entity);
+				}
 
-			if (args.bValue)
-			{
-				layer->layerMask |= 1 << i;
+				if (args.bValue)
+				{
+					layer->layerMask |= 1 << i;
+				}
+				else
+				{
+					layer->layerMask &= ~(1 << i);
+				}
 			}
-			else
-			{
-				layer->layerMask &= ~(1 << i);
-			}
-
-			});
+		});
 		AddWidget(&layers[i]);
 	}
 
-	y += step * 7;
+	auto forEachLayer = [this] (auto func) {
+		return [this, func] (auto args) {
+			wi::scene::Scene& scene = editor->GetCurrentScene();
+			for (auto& x : editor->translator.selected)
+			{
+				LayerComponent* layer = scene.layers.GetComponent(x.entity);
+				if (layer == nullptr)
+				{
+					layer = &editor->GetCurrentScene().layers.Create(x.entity);
+				}
+				if (layer != nullptr)
+				{
+					func(layer, args);
+				}
+			}
+		};
+	};
 
 	enableAllButton.Create("ALL " ICON_CHECK);
-	enableAllButton.SetPos(XMFLOAT2(x, y));
-	enableAllButton.OnClick([this](wi::gui::EventArgs args) {
-		LayerComponent* layer = editor->GetCurrentScene().layers.GetComponent(entity);
-		if (layer == nullptr)
-		{
-			layer = &editor->GetCurrentScene().layers.Create(entity);
-		}
-		if (layer == nullptr)
-			return;
+	enableAllButton.OnClick(forEachLayer([] (auto layer, auto args) {
 		layer->layerMask = ~0;
-	});
+	}));
 	AddWidget(&enableAllButton);
 
 	enableNoneButton.Create("NONE " ICON_DISABLED);
-	enableNoneButton.SetPos(XMFLOAT2(x + 120, y));
-	enableNoneButton.OnClick([this](wi::gui::EventArgs args) {
-		LayerComponent* layer = editor->GetCurrentScene().layers.GetComponent(entity);
-		if (layer == nullptr)
-		{
-			layer = &editor->GetCurrentScene().layers.Create(entity);
-		}
-		if (layer == nullptr)
-			return;
+	enableNoneButton.OnClick(forEachLayer([] (auto layer, auto args) {
 		layer->layerMask = 0;
-	});
+	}));
 	AddWidget(&enableNoneButton);
 
 	SetMinimized(true);
@@ -147,58 +137,26 @@ void LayerWindow::SetEntity(Entity entity)
 void LayerWindow::ResizeLayout()
 {
 	wi::gui::Window::ResizeLayout();
-	const float padding = 4;
-	const float width = GetWidgetAreaSize().x;
-	float y = padding;
-	float jump = 20;
+	layout.margin_left = 80;
 
-	auto add = [&](wi::gui::Widget& widget) {
-		if (!widget.IsVisible())
-			return;
-		const float margin_left = 80;
-		const float margin_right = 40;
-		widget.SetPos(XMFLOAT2(margin_left, y));
-		widget.SetSize(XMFLOAT2(width - margin_left - margin_right, widget.GetScale().y));
-		y += widget.GetSize().y;
-		y += padding;
-	};
-	auto add_right = [&](wi::gui::Widget& widget) {
-		if (!widget.IsVisible())
-			return;
-		const float margin_right = 40;
-		widget.SetPos(XMFLOAT2(width - margin_right - widget.GetSize().x, y));
-		y += widget.GetSize().y;
-		y += padding;
-	};
-	auto add_fullwidth = [&](wi::gui::Widget& widget) {
-		if (!widget.IsVisible())
-			return;
-		const float margin_left = padding;
-		const float margin_right = padding;
-		widget.SetPos(XMFLOAT2(margin_left, y));
-		widget.SetSize(XMFLOAT2(width - margin_left - margin_right, widget.GetScale().y));
-		y += widget.GetSize().y;
-		y += padding;
-	};
-
-	add_fullwidth(label);
-	enableAllButton.SetSize(XMFLOAT2(width * 0.5f - padding * 1.5f, enableAllButton.GetSize().y));
+	layout.add_fullwidth(label);
+	enableAllButton.SetSize(XMFLOAT2(layout.width * 0.5f - layout.padding * 1.5f, enableAllButton.GetSize().y));
 	enableNoneButton.SetSize(enableAllButton.GetSize());
-	enableNoneButton.SetPos(XMFLOAT2(width - padding - enableNoneButton.GetSize().x, y));
-	enableAllButton.SetPos(XMFLOAT2(enableNoneButton.GetPos().x - padding - enableAllButton.GetSize().x, y));
-	y += enableNoneButton.GetSize().y;
-	y += padding;
+	enableNoneButton.SetPos(XMFLOAT2(layout.width - layout.padding - enableNoneButton.GetSize().x, layout.y));
+	enableAllButton.SetPos(XMFLOAT2(enableNoneButton.GetPos().x - layout.padding - enableAllButton.GetSize().x, layout.y));
+	layout.y += enableNoneButton.GetSize().y;
+	layout.y += layout.padding;
 
-	float off_x = padding + 30;
+	float off_x = layout.padding + 30;
 	for (uint32_t i = 0; i < arraysize(layers); ++i)
 	{
-		layers[i].SetPos(XMFLOAT2(off_x, y));
+		layers[i].SetPos(XMFLOAT2(off_x, layout.y));
 		off_x += 50;
-		if (off_x + layers[i].GetSize().x > width - padding)
+		if (off_x + layers[i].GetSize().x > layout.width - layout.padding)
 		{
-			off_x = padding + 30;
-			y += layers[i].GetSize().y;
-			y += padding;
+			off_x = layout.padding + 30;
+			layout.y += layers[i].GetSize().y;
+			layout.y += layout.padding;
 		}
 	}
 

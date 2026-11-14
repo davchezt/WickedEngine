@@ -11,6 +11,30 @@
 #include "wiBacklog.h"
 
 #include <mutex>
+#include <string>
+#include <atomic>
+#include <deque>
+
+// This will do terrain rendering without sparse texture usage, with extra tile copies for block compression:
+//#define NOSPARSE
+
+#ifdef __APPLE__
+// On Apple Metal API the sparse texture doesn't seem to work with block compression aliasing, so use this mode as workaround:
+#define NOSPARSE
+#endif // __APPLE__
+
+// Logical texture resolution limits:
+const uint32_t min_virtual_resolution = SVT_TILE_SIZE;
+const uint32_t max_virtual_resolution = 65536u;
+
+#ifdef NOSPARSE
+// Try to account for memory increase in no-sparse mode, reduce atlas size:
+const uint32_t atlas_physical_width = 16384u;
+const uint32_t atlas_physical_height = 8192u;
+#else
+const uint32_t atlas_physical_width = 16384u;
+const uint32_t atlas_physical_height = 16384u;
+#endif // NOSPARSE
 
 using namespace wi::ecs;
 using namespace wi::scene;
@@ -169,16 +193,231 @@ namespace wi::terrain
 			}
 		}
 	};
-	static ChunkIndices chunk_indices;
+	inline ChunkIndices& chunk_indices()
+	{
+		static ChunkIndices state;
+		return state;
+	}
 
 	struct Generator
 	{
 		wi::scene::Scene scene; // The background generation thread can safely add things to this, it will be merged into the main scene when it is safe to do so
 		wi::jobsystem::context workload;
 		std::atomic_bool cancelled{ false };
+		wi::vector<SplineComponent> splines;
+		wi::vector<wi::ecs::Entity> spline_entities;
+		wi::vector<Chunk> removable_chunks; // chunks that were invalidated are regenerated on the generator thread. Before merging them with the scene, the previous version of them will need to be removed from the destination scene
+		std::deque<Chunk> priority_invalidation; // to not let invalidation stuck at same chunks every frame while editing splines, for more appealing visual feedback
+		wi::vector<Chunk> build_batch; // Reused each generation run (cleared, capacity kept) to avoid per-frame allocation
 	};
 
+	wi::jobsystem::context virtual_texture_ctx;
+
 	static std::mutex locker;
+
+	constexpr void weight_norm(XMFLOAT4& weights)
+	{
+		const float norm = 1.0f / (weights.x + weights.y + weights.z + weights.w);
+		weights.x *= norm;
+		weights.y *= norm;
+		weights.z *= norm;
+		weights.w *= norm;
+	};
+
+	inline int world_to_chunk_index(float world_pos, float scale, float scale_rcp)
+	{
+		return (int)std::floor((world_pos + chunk_half_width * scale) * chunk_width_rcp * scale_rcp);
+	}
+
+	inline void overlapped_chunk_range(float min_world, float max_world, float scale, float scale_rcp, int& index_min, int& index_max)
+	{
+		index_min = world_to_chunk_index(min_world, scale, scale_rcp);
+		const int end_index = world_to_chunk_index(max_world, scale, scale_rcp);
+		const float side = float(chunk_width - 1) * scale;
+		const float end_min = (float(end_index) - 0.5f) * side;
+		index_max = (max_world <= end_min) ? end_index - 1 : end_index;
+		if (index_max < index_min)
+		{
+			index_max = index_min;
+		}
+	}
+
+	inline int grass_cells_per_axis(float scale)
+	{
+		const int quads = chunk_width - 1;
+		int cells = (int)std::round(scale);
+		if (cells < 1)
+		{
+			cells = 1;
+		}
+		if (cells > quads)
+		{
+			cells = quads;
+		}
+		return cells;
+	}
+
+	constexpr void grass_cell_quads(int cell, int cells, int& q0, int& q1)
+	{
+		const int quads = chunk_width - 1;
+		q0 = (cell * quads) / cells;
+		q1 = ((cell + 1) * quads) / cells;
+	}
+
+	constexpr bool grass_rect_in_range(float min_x, float max_x, float min_z, float max_z, float eye_x, float eye_z, float view)
+	{
+		float dx = 0.0f;
+		if (eye_x < min_x)
+		{
+			dx = min_x - eye_x;
+		}
+		else if (eye_x > max_x)
+		{
+			dx = eye_x - max_x;
+		}
+		float dz = 0.0f;
+		if (eye_z < min_z)
+		{
+			dz = min_z - eye_z;
+		}
+		else if (eye_z > max_z)
+		{
+			dz = eye_z - max_z;
+		}
+		return dx * dx + dz * dz <= view * view;
+	}
+
+	constexpr float grass_spawn_distance(float view_distance, float length)
+	{
+		if (view_distance < 0.0f)
+			view_distance = 0.0f;
+		if (length < 0.0f)
+			length = 0.0f;
+		return view_distance * 1.2f + length; // 1.2: +20% dither fade
+	}
+
+	constexpr uint32_t grass_strand_count(uint32_t vertices, float scale, float density)
+	{
+		return uint32_t(float(vertices) * 3.0f * scale * scale * density);
+	}
+
+	inline uint32_t grass_patch_strand_count(const Terrain& terrain, uint32_t region, uint32_t owned, float scale)
+	{
+		uint32_t base = 0;
+		if (region < MATERIAL_COUNT)
+			base = terrain.grass_region_properties[region].strandCount;
+		if (base == 0)
+			base = grass_strand_count(owned, scale, 1.0f);
+		return uint32_t(float(base) * terrain.grass_density);
+	}
+
+	inline bool grass_mask_used(const wi::vector<float>& lengths)
+	{
+		for (float value : lengths)
+		{
+			if (value > 0.0f)
+				return true;
+		}
+		return false;
+	}
+
+	constexpr float grass_band_weight(float weight, float edge)
+	{
+		if (edge <= 0.0f)
+			return saturate(weight);
+		const float peak = smoothstep(0.0f, edge, 1.0f);
+		return peak > 0.0f ? saturate(weight / peak) : 0.0f;
+	}
+
+	inline void sync_grass(Terrain& terrain)
+	{
+		Scene* scene = terrain.scene;
+		if (scene == nullptr)
+			return;
+		for (int region = 0; region < MATERIAL_COUNT; ++region)
+		{
+			const Entity entity = terrain.grassEntities[region];
+			if (region == MATERIAL_BASE)
+			{
+				if (entity != INVALID_ENTITY && scene->hairs.Contains(entity))
+				{
+					terrain.grass_properties = *scene->hairs.GetComponent(entity);
+					terrain.grass_properties.SetDirty(false);
+				}
+				if (entity != INVALID_ENTITY && scene->materials.Contains(entity))
+				{
+					terrain.grass_material = *scene->materials.GetComponent(entity);
+					terrain.grass_material.SetDirty(false);
+				}
+				terrain.grass_region_properties[region] = terrain.grass_properties;
+				terrain.grass_region_materials[region] = terrain.grass_material;
+				continue;
+			}
+			if (entity == INVALID_ENTITY)
+				continue;
+			if (scene->hairs.Contains(entity))
+			{
+				terrain.grass_region_properties[region] = *scene->hairs.GetComponent(entity);
+				terrain.grass_region_properties[region].SetDirty(false);
+			}
+			if (scene->materials.Contains(entity))
+			{
+				terrain.grass_region_materials[region] = *scene->materials.GetComponent(entity);
+				terrain.grass_region_materials[region].SetDirty(false);
+			}
+		}
+	}
+
+	inline uint32_t count_grass_vertices(const wi::vector<float>& lengths, int x0, int z0, int x1, int z1)
+	{
+		if (lengths.size() != vertexCount || x1 <= x0 || z1 <= z0)
+			return 0;
+		const int vx1 = x1 + (x1 == (chunk_width - 1) ? 1 : 0);
+		const int vz1 = z1 + (z1 == (chunk_width - 1) ? 1 : 0);
+		uint32_t count = 0;
+		for (int z = z0; z < vz1; ++z)
+		{
+			const float* row = lengths.data() + z * chunk_width;
+			for (int x = x0; x < vx1; ++x)
+			{
+				if (row[x] > 0.0f)
+				{
+					++count;
+				}
+			}
+		}
+		return count;
+	}
+
+	inline void build_grass_index_range(wi::HairParticleSystem& grass, uint32_t x0, uint32_t z0, uint32_t x1, uint32_t z1)
+	{
+		grass.indices.clear();
+		if (grass.vertex_lengths.size() != vertexCount || x1 <= x0 || z1 <= z0)
+			return;
+		const ChunkIndices& table = chunk_indices();
+		const uint32_t lod_offset = table.lods[0].indexOffset;
+		const int quads = chunk_width - 1;
+		grass.indices.reserve((size_t)(x1 - x0) * (size_t)(z1 - z0) * 6);
+		for (uint32_t x = x0; x < x1; ++x)
+		{
+			for (uint32_t z = z0; z < z1; ++z)
+			{
+				const uint32_t base = lod_offset + (x * uint32_t(quads) + z) * 6;
+				for (uint32_t t = 0; t < 2; ++t)
+				{
+					const uint32_t i0 = table.indices[base + t * 3 + 0];
+					const uint32_t i1 = table.indices[base + t * 3 + 1];
+					const uint32_t i2 = table.indices[base + t * 3 + 2];
+					if (grass.vertex_lengths[i0] > 0.0f || grass.vertex_lengths[i1] > 0.0f || grass.vertex_lengths[i2] > 0.0f)
+					{
+						grass.indices.push_back(i0);
+						grass.indices.push_back(i1);
+						grass.indices.push_back(i2);
+					}
+				}
+			}
+		}
+	}
 
 
 	void VirtualTextureAtlas::Residency::init(uint32_t resolution)
@@ -205,12 +444,19 @@ namespace wi::terrain
 			td.width = granularity;
 			td.height = granularity;
 
-			td.format = Format::R32_UINT;
+			td.format = Format::R8G8B8A8_UINT;
 			td.bind_flags = BindFlag::SHADER_RESOURCE | BindFlag::UNORDERED_ACCESS;
 			td.usage = Usage::DEFAULT;
-			td.layout = ResourceState::SHADER_RESOURCE_COMPUTE;
+			td.layout = ResourceState::UNORDERED_ACCESS;
 			td.mip_levels = lod_count;
-			bool success = device->CreateTexture(&td, nullptr, &residencyMap);
+			wi::vector<uint32_t> default_data(td.width * td.height, 0xff);
+			wi::vector<SubresourceData> initdata(lod_count);
+			for (uint32_t lod = 0; lod < lod_count; ++lod)
+			{
+				initdata[lod].data_ptr = default_data.data();
+				initdata[lod].row_pitch = sizeof(uint32_t) * std::max(1u, td.width >> lod);
+			}
+			bool success = device->CreateTexture(&td, initdata.data(), &residencyMap);
 			assert(success);
 			device->SetName(&residencyMap, "VirtualTexture::residencyMap");
 
@@ -220,13 +466,12 @@ namespace wi::terrain
 				assert(subresource_index == i);
 			}
 
-
 			td.format = Format::R32_UINT; // shader atomic support needed
 			td.bind_flags = BindFlag::UNORDERED_ACCESS | BindFlag::SHADER_RESOURCE;
 			td.usage = Usage::DEFAULT;
-			td.layout = ResourceState::SHADER_RESOURCE_COMPUTE;
+			td.layout = ResourceState::UNORDERED_ACCESS;
 			td.mip_levels = 1;
-			success = device->CreateTexture(&td, nullptr, &feedbackMap);
+			success = device->CreateTexture(&td, initdata.data(), &feedbackMap);
 			assert(success);
 			device->SetName(&feedbackMap, "VirtualTexture::feedbackMap");
 
@@ -236,7 +481,7 @@ namespace wi::terrain
 				bd.usage = Usage::DEFAULT;
 				bd.bind_flags = BindFlag::UNORDERED_ACCESS;
 				bd.size = sizeof(uint32_t) * tile_count;
-				success = device->CreateBuffer(&bd, nullptr, &requestBuffer);
+				success = device->CreateBufferClearedWithType(&bd, 0x000000FFu, &requestBuffer);
 				assert(success);
 				device->SetName(&requestBuffer, "VirtualTexture::requestBuffer");
 			}
@@ -246,7 +491,8 @@ namespace wi::terrain
 				bd.usage = Usage::DEFAULT;
 				bd.bind_flags = BindFlag::UNORDERED_ACCESS;
 				bd.size = sizeof(uint32_t) * (tile_count + 1); // +1: atomic global counter
-				success = device->CreateBuffer(&bd, nullptr, &allocationBuffer);
+				wi::vector<uint32_t> data(tile_count + 1);
+				success = device->CreateBuffer(&bd, data.data(), &allocationBuffer);
 				assert(success);
 				device->SetName(&allocationBuffer, "VirtualTexture::allocationBuffer");
 
@@ -262,10 +508,10 @@ namespace wi::terrain
 			}
 			{
 				GPUBufferDesc bd;
-				bd.misc_flags = ResourceMiscFlag::BUFFER_RAW;
+				bd.format = Format::R16_UINT;
 				bd.usage = Usage::DEFAULT;
 				bd.bind_flags = BindFlag::SHADER_RESOURCE;
-				bd.size = sizeof(uint32_t) * tile_count;
+				bd.size = GetFormatStride(bd.format) * tile_count;
 				success = device->CreateBuffer(&bd, nullptr, &pageBuffer);
 				assert(success);
 				device->SetName(&pageBuffer, "VirtualTexture::pageBuffer");
@@ -305,7 +551,7 @@ namespace wi::terrain
 			lod_count++;
 		}
 
-		locker.lock();
+		std::scoped_lock lck(locker);
 		free(atlas);
 		if (tile_count > 1)
 		{
@@ -314,9 +560,7 @@ namespace wi::terrain
 			tile_count += 1; // packed mip chain
 			lod_count += 1; // packed mip chain
 			tiles.resize(tile_count);
-			tiles[tile_count - 1] = atlas.allocate_tile();
-			tiles[tile_count - 2] = atlas.allocate_tile();
-			if (tiles[tile_count - 1].IsValid())
+			if (atlas.allocate_tile(tiles[tile_count - 1]))
 			{
 				// packed mip tail update:
 				UpdateRequest& request = update_requests.emplace_back();
@@ -326,7 +570,7 @@ namespace wi::terrain
 				request.x = 0;
 				request.y = 0;
 			}
-			if (tiles[tile_count - 2].IsValid())
+			if (atlas.allocate_tile(tiles[tile_count - 2]))
 			{
 				// last nonpacked mip update:
 				UpdateRequest& request = update_requests.emplace_back();
@@ -341,8 +585,7 @@ namespace wi::terrain
 		{
 			// far away chunks only have 1 tile
 			tiles.resize(tile_count);
-			tiles.back() = atlas.allocate_tile();
-			if (tiles.back().IsValid())
+			if (atlas.allocate_tile(tiles.back()))
 			{
 				// update the only tile there is:
 				UpdateRequest& request = update_requests.emplace_back();
@@ -353,35 +596,50 @@ namespace wi::terrain
 				request.y = 0;
 			}
 		}
-		locker.unlock();
-
 	}
 
 	Terrain::Terrain()
 	{
 		weather.ambient = XMFLOAT3(0.4f, 0.4f, 0.4f);
 		weather.SetRealisticSky(true);
+		weather.SetRealisticSkyAerialPerspective(true);
 		weather.SetVolumetricClouds(true);
-		weather.volumetricCloudParameters.CoverageAmount = 0.65f;
-		weather.volumetricCloudParameters.CoverageMinimum = 0.15f;
-		weather.oceanParameters.waterHeight = -40;
-		weather.oceanParameters.wave_amplitude = 120;
-		weather.fogStart = 300;
-		weather.fogEnd = 100000;
+		weather.volumetricCloudParameters.layerFirst.extinctionCoefficient = XMFLOAT3(0.71f * 0.05f, 0.86f * 0.05f, 1.0f * 0.05f);
+		weather.volumetricCloudParameters.layerFirst.totalNoiseScale = 0.0009f;
+		weather.volumetricCloudParameters.layerFirst.curlScale = 0.15f;
+		weather.volumetricCloudParameters.layerFirst.detailNoiseModifier = 0.5;
+		weather.volumetricCloudParameters.layerFirst.weatherScale = 0.000035f;
+		weather.volumetricCloudParameters.layerFirst.coverageMinimum = 0.25f;
+		weather.volumetricCloudParameters.layerFirst.typeAmount = 0.0f;
+		weather.volumetricCloudParameters.layerFirst.typeMinimum = 0.0f;
+		weather.volumetricCloudParameters.layerFirst.rainAmount = 0.9f;
+		weather.volumetricCloudParameters.layerFirst.rainMinimum = 0.0f;
+		weather.volumetricCloudParameters.layerFirst.gradientSmall = XMFLOAT4(0.01f, 0.07f, 0.08f, 0.14f);
+		weather.volumetricCloudParameters.layerFirst.windSpeed = 20.0f;
+		weather.volumetricCloudParameters.layerFirst.coverageWindSpeed = 35.0f;
+		weather.volumetricCloudParameters.layerSecond.coverageAmount = 0.0f;
+		weather.oceanParameters.waterHeight = -10;
+		weather.oceanParameters.wave_amplitude = 1000;
+		weather.oceanParameters.patch_length = 20;
+		weather.fogStart = 0;
+		weather.fogDensity = 0.001f;
 		weather.SetHeightFog(true);
 		weather.fogHeightStart = 0;
-		weather.fogHeightEnd = 100;
+		weather.fogHeightEnd = 500;
 		weather.windDirection = XMFLOAT3(0.05f, 0.05f, 0.05f);
 		weather.windSpeed = 4;
 		weather.stars = 0.6f;
 
 		grass_properties.viewDistance = chunk_width;
 
-		generator = std::make_shared<Generator>();
+		generator = wi::allocator::make_shared_single<Generator>();
+
+		materialEntities.resize(MATERIAL_COUNT);
 	}
 	Terrain::~Terrain()
 	{
 		Generation_Cancel();
+		wi::jobsystem::Wait(virtual_texture_ctx);
 	}
 
 	void Terrain::Generation_Restart()
@@ -390,6 +648,19 @@ namespace wi::terrain
 		Generation_Cancel();
 		generator->scene.Clear();
 
+		// save material parameters:
+		materials.resize(materialEntities.size());
+		for (int i = 0; i < materialEntities.size(); ++i)
+		{
+			MaterialComponent* material = scene->materials.GetComponent(materialEntities[i]);
+			if (material == nullptr)
+				continue;
+			materials[i] = *material;
+			materials[i].SetDirty(false);
+		}
+
+		// save grass parameters:
+		sync_grass(*this);
 
 		for (auto it = chunks.begin(); it != chunks.end(); it++)
 		{
@@ -400,19 +671,12 @@ namespace wi::terrain
 			}
 		}
 		chunks.clear();
+		prop_chunks.clear();
+		virtual_textures_in_use.clear();
 
-		wi::vector<Entity> entities_to_remove;
-		for (size_t i = 0; i < scene->hierarchy.GetCount(); ++i)
+		if (chunkGroupEntity != INVALID_ENTITY)
 		{
-			const HierarchyComponent& hier = scene->hierarchy[i];
-			if (hier.parentID == terrainEntity)
-			{
-				entities_to_remove.push_back(scene->hierarchy.GetEntity(i));
-			}
-		}
-		for (Entity x : entities_to_remove)
-		{
-			scene->Entity_Remove(x);
+			scene->Entity_Remove(chunkGroupEntity);
 		}
 
 		perlin_noise.init(seed);
@@ -421,38 +685,528 @@ namespace wi::terrain
 			modifier->Seed(seed);
 		}
 
-		// Add some nice weather and lighting:
-		if (!scene->weathers.Contains(terrainEntity))
+		// Add some nice weather and lighting if there are no weathers in the scene yet:
+		bool created_terrain_weather = false;
+		if (scene->weathers.GetCount() == 0)
 		{
-			scene->weathers.Create(terrainEntity);
+			if (!scene->weathers.Contains(terrainEntity))
+			{
+				scene->weathers.Create(terrainEntity);
+				created_terrain_weather = true;
+			}
 		}
-		*scene->weathers.GetComponent(terrainEntity) = weather;
+		if (created_terrain_weather)
+		{
+			*scene->weathers.GetComponent(terrainEntity) = weather;
+		}
 		if (!weather.IsOceanEnabled())
 		{
 			scene->ocean = {};
 		}
 
+		// Restore surface source materials:
 		{
-			Entity sunEntity = scene->Entity_CreateLight("terrainSun");
-			scene->Component_Attach(sunEntity, terrainEntity);
-			LightComponent& light = *scene->lights.GetComponent(sunEntity);
-			light.SetType(LightComponent::LightType::DIRECTIONAL);
-			light.intensity = 16;
-			light.SetCastShadow(true);
-			TransformComponent& transform = *scene->transforms.GetComponent(sunEntity);
-			transform.RotateRollPitchYaw(XMFLOAT3(XM_PIDIV4, 0, XM_PIDIV4));
-			transform.Translate(XMFLOAT3(0, 4, 0));
+			// Clean up invalid material entities that no longer exist in the scene
+			for (size_t i = 0; i < materialEntities.size(); )
+			{
+				if (materialEntities[i] != INVALID_ENTITY && !scene->materials.Contains(materialEntities[i]))
+				{
+					materialEntities.erase(materialEntities.begin() + i);
+					if (i < materials.size())
+					{
+						materials.erase(materials.begin() + i);
+					}
+					continue;
+				}
+				++i;
+			}
+
+			// Restore valid materials
+			for (size_t i = 0; i < materialEntities.size(); ++i)
+			{
+				if (materialEntities[i] == INVALID_ENTITY)
+				{
+					materialEntities[i] = CreateEntity();
+				}
+				scene->Component_Attach(materialEntities[i], terrainEntity);
+				if (!scene->materials.Contains(materialEntities[i]))
+				{
+					scene->materials.Create(materialEntities[i]);
+				}
+				*scene->materials.GetComponent(materialEntities[i]) = materials[i];
+			}
 		}
+
+		// Restore grass parameters:
+		if (IsGrassEnabled()) {
+			Entity& base_grass = grassEntities[MATERIAL_BASE];
+			if (base_grass == INVALID_ENTITY)
+			{
+				base_grass = CreateEntity();
+			}
+			if (!scene->hairs.Contains(base_grass))
+			{
+				scene->hairs.Create(base_grass);
+			}
+			if (!scene->materials.Contains(base_grass))
+			{
+				scene->materials.Create(base_grass);
+			}
+			if (!scene->names.Contains(base_grass))
+			{
+				scene->names.Create(base_grass) = "grass";
+			}
+			*scene->hairs.GetComponent(base_grass) = grass_properties;
+			*scene->materials.GetComponent(base_grass) = grass_material;
+
+			for (int region = MATERIAL_SLOPE; region < MATERIAL_COUNT; ++region)
+			{
+				const Entity entity = grassEntities[region];
+				if (entity == INVALID_ENTITY)
+					continue;
+				if (!scene->hairs.Contains(entity))
+				{
+					scene->hairs.Create(entity) = grass_properties;
+				}
+				if (!scene->materials.Contains(entity))
+				{
+					scene->materials.Create(entity);
+				}
+			}
+			sync_grass(*this);
+		}
+
+		if (chunkGroupEntity == INVALID_ENTITY)
+		{
+			chunkGroupEntity = CreateEntity();
+		}
+		scene->Component_Attach(chunkGroupEntity, terrainEntity);
+		if (!scene->names.Contains(chunkGroupEntity))
+		{
+			scene->names.Create(chunkGroupEntity) = "chunks";
+		}
+	}
+
+	bool Terrain::RemovePropChunksOverlapping(const Chunk& terrain_chunk)
+	{
+		if (scene == nullptr)
+		{
+			return false;
+		}
+		const float half = chunk_half_width * chunk_scale;
+		const float pos_x = float(terrain_chunk.x * (chunk_width - 1)) * chunk_scale;
+		const float pos_z = float(terrain_chunk.z * (chunk_width - 1)) * chunk_scale;
+		int x0, x1, z0, z1;
+		overlapped_chunk_range(pos_x - half, pos_x + half, 1.0f, 1.0f, x0, x1);
+		overlapped_chunk_range(pos_z - half, pos_z + half, 1.0f, 1.0f, z0, z1);
+		bool removed = false;
+		for (int z = z0; z <= z1; ++z)
+		{
+			for (int x = x0; x <= x1; ++x)
+			{
+				Chunk prop_chunk;
+				prop_chunk.x = x;
+				prop_chunk.z = z;
+				auto it = prop_chunks.find(prop_chunk);
+				if (it == prop_chunks.end())
+				{
+					continue;
+				}
+				if (it->second.entity != INVALID_ENTITY)
+				{
+					scene->Entity_Remove(it->second.entity);
+					removed = true;
+				}
+				prop_chunks.erase(it);
+			}
+		}
+		return removed;
+	}
+
+	bool Terrain::PlacePropChunk(const Chunk& prop_chunk)
+	{
+		if (!(prop_density > 0.0f) || props.empty())
+		{
+			return false;
+		}
+		{
+			auto existing = prop_chunks.find(prop_chunk);
+			if (existing != prop_chunks.end() && existing->second.entity != INVALID_ENTITY)
+			{
+				return false;
+			}
+		}
+
+		// Prop gen is fixed at chunk_scale=1
+		const float prop_pos_x = float(prop_chunk.x * (chunk_width - 1));
+		const float prop_pos_z = float(prop_chunk.z * (chunk_width - 1));
+		const float prop_min_x = prop_pos_x - chunk_half_width;
+		const float prop_max_x = prop_pos_x + chunk_half_width;
+		const float prop_min_z = prop_pos_z - chunk_half_width;
+		const float prop_max_z = prop_pos_z + chunk_half_width;
+
+		int tx0, tx1, tz0, tz1;
+		overlapped_chunk_range(prop_min_x, prop_max_x, chunk_scale, chunk_scale_rcp, tx0, tx1);
+		overlapped_chunk_range(prop_min_z, prop_max_z, chunk_scale, chunk_scale_rcp, tz0, tz1);
+		for (int tz = tz0; tz <= tz1; ++tz)
+		{
+			for (int tx = tx0; tx <= tx1; ++tx)
+			{
+				Chunk terrain_chunk;
+				terrain_chunk.x = tx;
+				terrain_chunk.z = tz;
+				for (const Chunk& removable : generator->removable_chunks)
+				{
+					if (removable == terrain_chunk)
+					{
+						return false; // this chunk's mesh is replaced before the generator scene is merged
+					}
+				}
+				auto it = chunks.find(terrain_chunk);
+				if (it == chunks.end())
+				{
+					return false;
+				}
+				const ChunkData& chunk_data = it->second;
+				if (chunk_data.invalidated || chunk_data.mesh_vertex_positions == nullptr || chunk_data.blendmap_layers.size() < 4)
+				{
+					return false;
+				}
+				for (size_t layer = 0; layer < 4; ++layer)
+				{
+					if (chunk_data.blendmap_layers[layer].pixels.size() != vertexCount)
+					{
+						return false;
+					}
+				}
+				for (const BlendmapLayer& layer : chunk_data.spline_blendmap_layers)
+				{
+					if (layer.pixels.size() != vertexCount)
+					{
+						return false;
+					}
+				}
+			}
+		}
+
+		PropChunkData& prop_data = prop_chunks[prop_chunk];
+		prop_data.entity = CreateEntity();
+		prop_data.prop_density_current = prop_density;
+		TransformComponent& prop_transform = generator->scene.transforms.Create(prop_data.entity);
+		prop_transform.ClearTransform();
+		prop_transform.Translate(XMFLOAT3(prop_pos_x, 0.0f, prop_pos_z));
+		prop_transform.UpdateTransform();
+		generator->scene.names.Create(prop_data.entity) = "props";
+		generator->scene.Component_Attach(prop_data.entity, chunkGroupEntity);
+
+		auto mix_hash = [](uint64_t x) -> uint64_t
+		{
+			x += 0x9E3779B97F4A7C15ull;
+			x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+			x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+			return x ^ (x >> 31);
+		};
+		auto hash_u01 = [](uint64_t h) -> float
+		{
+			return float(h >> 40) * (1.0f / 16777216.0f);
+		};
+		auto region_at = [](const ChunkData& chunk_data, uint32_t index) -> XMFLOAT4
+		{
+			return wi::Color(
+				chunk_data.blendmap_layers[0].pixels[index],
+				chunk_data.blendmap_layers[1].pixels[index],
+				chunk_data.blendmap_layers[2].pixels[index],
+				chunk_data.blendmap_layers[3].pixels[index]
+			);
+		};
+		auto spline_at = [](const ChunkData& chunk_data, uint32_t index) -> float
+		{
+			if (chunk_data.spline_blendmap_layers.empty())
+			{
+				return 0.0f;
+			}
+			float factor = 0.0f;
+			for (auto& layer : chunk_data.spline_blendmap_layers)
+			{
+				factor += float(layer.pixels[index]) / 255.0f;
+			}
+			return factor / float(chunk_data.spline_blendmap_layers.size());
+		};
+
+		Chunk cached_chunk;
+		cached_chunk.raw = 0;
+		const ChunkData* cached = nullptr;
+		bool cache_valid = false;
+
+		for (size_t prop_index = 0; prop_index < props.size(); ++prop_index)
+		{
+			const Prop& prop = props[prop_index];
+			if (prop.data.empty())
+			{
+				continue;
+			}
+
+			const float mean_count = prop.density * prop_data.prop_density_current;
+			if (!(mean_count > 0.0f))
+			{
+				continue;
+			}
+
+			constexpr float chunk_side = float(chunk_width - 1);
+			constexpr float cell = chunk_side / 8.0f;
+			constexpr float cell_rcp = 1.0f / cell;
+			const float clump = saturate(prop.clumping);
+			const float spacing = std::max(prop.clump_spacing, 1.0f);
+			const float spacing_rcp = 1.0f / spacing;
+			const float radius_frac = lerp(1.0f, 0.28f, clump);
+			const float keep = mean_count * (1.0f / 64.0f);
+			int slot_count = 1;
+			if (keep > 1.0f)
+			{
+				slot_count = (int)std::ceil(std::min(keep, 16.0f));
+			}
+			const int cx0 = (int)std::floor(prop_min_x * cell_rcp) - 1;
+			const int cz0 = (int)std::floor(prop_min_z * cell_rcp) - 1;
+			const int cx1 = (int)std::ceil(prop_max_x * cell_rcp);
+			const int cz1 = (int)std::ceil(prop_max_z * cell_rcp);
+
+			for (int cz = cz0; cz <= cz1; ++cz)
+			{
+				for (int cx = cx0; cx <= cx1; ++cx)
+				{
+					for (int slot = 0; slot < slot_count; ++slot)
+					{
+						uint64_t h = mix_hash(uint64_t(uint32_t(cx)) | (uint64_t(uint32_t(cz)) << 32));
+						h = mix_hash(h ^ (uint64_t(prop.seed) * 0x9E3779B97F4A7C15ull + 1ull));
+						h = mix_hash(h ^ (uint64_t(uint32_t(slot)) * 0x9E3779B97F4A7C15ull + 1ull));
+						const float keep_roll = hash_u01(h);
+						if (!(keep_roll < saturate(keep - float(slot))))
+						{
+							continue;
+						}
+						h = mix_hash(h);
+						const float ju = hash_u01(h);
+						h = mix_hash(h);
+						const float jv = hash_u01(h);
+						h = mix_hash(h);
+						const float f0 = hash_u01(h);
+						h = mix_hash(h);
+						const float f1 = hash_u01(h);
+						h = mix_hash(h);
+						const float f2 = hash_u01(h);
+
+						const float world_x = (float(cx) + ju) * cell;
+						const float world_z = (float(cz) + jv) * cell;
+						if (world_x < prop_min_x || world_z < prop_min_z || world_x >= prop_max_x || world_z >= prop_max_z)
+						{
+							continue;
+						}
+						if (clump > 0.0f)
+						{
+							h = mix_hash(h);
+							const float edge = hash_u01(h);
+							float best_t = 2.0f;
+							const int grove_x = (int)std::floor(world_x * spacing_rcp);
+							const int grove_z = (int)std::floor(world_z * spacing_rcp);
+							int ring = (int)std::ceil(1.35f * radius_frac);
+							if (ring < 1)
+							{
+								ring = 1;
+							}
+							for (int oz = -ring; oz <= ring && best_t > 0.65f; ++oz)
+							{
+								for (int ox = -ring; ox <= ring; ++ox)
+								{
+									const int gx = grove_x + ox;
+									const int gz = grove_z + oz;
+									uint64_t gh = mix_hash(uint64_t(uint32_t(gx)) | (uint64_t(uint32_t(gz)) << 32));
+									gh = mix_hash(gh ^ (uint64_t(prop.seed) * 0x9E3779B97F4A7C15ull + 1ull));
+									gh = mix_hash(gh ^ 0xD1B54A32D192ED03ull);
+									if (hash_u01(gh) < 0.34f)
+									{
+										continue;
+									}
+									gh = mix_hash(gh);
+									const float cu = hash_u01(gh);
+									gh = mix_hash(gh);
+									const float cv = hash_u01(gh);
+									gh = mix_hash(gh);
+									const float size_u = hash_u01(gh);
+									gh = mix_hash(gh);
+									const float ax = hash_u01(gh) * 2.0f - 1.0f;
+									gh = mix_hash(gh);
+									const float az = hash_u01(gh) * 2.0f - 1.0f;
+									gh = mix_hash(gh);
+									const float stretch = lerp(0.55f, 1.0f, hash_u01(gh));
+									const float axis_len2 = ax * ax + az * az;
+									float dir_x = 1.0f;
+									float dir_z = 0.0f;
+									if (axis_len2 > 1.0e-4f)
+									{
+										const float inv = 1.0f / std::sqrt(axis_len2);
+										dir_x = ax * inv;
+										dir_z = az * inv;
+									}
+									const float px = world_x - (float(gx) + cu) * spacing;
+									const float pz = world_z - (float(gz) + cv) * spacing;
+									const float lx = px * dir_x + pz * dir_z;
+									const float lz = px * -dir_z + pz * dir_x;
+									const float dist = std::sqrt(lx * lx + (lz / stretch) * (lz / stretch));
+									const float t = dist / (spacing * radius_frac * lerp(0.62f, 1.0f, size_u));
+									if (t < best_t)
+									{
+										best_t = t;
+									}
+									if (best_t <= 0.65f)
+									{
+										break;
+									}
+								}
+							}
+							float admit = 0.0f;
+							if (best_t <= 0.65f)
+							{
+								admit = 1.0f;
+							}
+							else if (best_t < 1.0f)
+							{
+								admit = lerp(1.0f, 0.35f, (best_t - 0.65f) * (1.0f / 0.35f));
+							}
+							else if (best_t < 1.35f)
+							{
+								admit = lerp(0.35f, 0.0f, (best_t - 1.0f) * (1.0f / 0.35f)) * (1.0f - clump);
+							}
+							if (!(edge < admit))
+							{
+								continue;
+							}
+						}
+
+						Chunk terrain_chunk;
+						terrain_chunk.x = world_to_chunk_index(world_x, chunk_scale, chunk_scale_rcp);
+						terrain_chunk.z = world_to_chunk_index(world_z, chunk_scale, chunk_scale_rcp);
+						if (!cache_valid || !(cached_chunk == terrain_chunk))
+						{
+							auto it = chunks.find(terrain_chunk);
+							cache_valid = it != chunks.end();
+							cached_chunk = terrain_chunk;
+							cached = cache_valid ? &it->second : nullptr;
+						}
+						if (!cache_valid || cached->mesh_vertex_positions == nullptr)
+						{
+							continue;
+						}
+
+						const float vx = (world_x - cached->position.x) * chunk_scale_rcp + chunk_half_width;
+						const float vz = (world_z - cached->position.z) * chunk_scale_rcp + chunk_half_width;
+						if (vx < 0.0f || vz < 0.0f || vx >= float(chunk_width - 1) || vz >= float(chunk_width - 1))
+						{
+							continue;
+						}
+
+						const int ix = std::min(int(std::floor(vx)), chunk_width - 2);
+						const int iz = std::min(int(std::floor(vz)), chunk_width - 2);
+						const float tx = vx - float(ix);
+						const float tz = vz - float(iz);
+
+						const uint32_t i00 = uint32_t(ix + iz * chunk_width);
+						const uint32_t i10 = i00 + 1;
+						const uint32_t i01 = i00 + uint32_t(chunk_width);
+						const uint32_t i11 = i01 + 1;
+
+						uint32_t i0 = i00;
+						uint32_t i1 = i10;
+						uint32_t i2 = i01;
+						float w0 = 1.0f - tx - tz;
+						float w1 = tx;
+						float w2 = tz;
+						if (tx + tz > 1.0f)
+						{
+							i0 = i10;
+							i1 = i01;
+							i2 = i11;
+							w0 = 1.0f - tz;
+							w1 = 1.0f - tx;
+							w2 = tx + tz - 1.0f;
+						}
+
+						const XMFLOAT3& p0 = cached->mesh_vertex_positions[i0];
+						const XMFLOAT3& p1 = cached->mesh_vertex_positions[i1];
+						const XMFLOAT3& p2 = cached->mesh_vertex_positions[i2];
+						const XMFLOAT3 vertex_pos = XMFLOAT3(
+							p0.x * w0 + p1.x * w1 + p2.x * w2,
+							p0.y * w0 + p1.y * w1 + p2.y * w2,
+							p0.z * w0 + p1.z * w1 + p2.z * w2
+						);
+
+						const XMFLOAT4 r0 = region_at(*cached, i0);
+						const XMFLOAT4 r1 = region_at(*cached, i1);
+						const XMFLOAT4 r2 = region_at(*cached, i2);
+						XMFLOAT4 region = XMFLOAT4(
+							r0.x * w0 + r1.x * w1 + r2.x * w2,
+							r0.y * w0 + r1.y * w1 + r2.y * w2,
+							r0.z * w0 + r1.z * w1 + r2.z * w2,
+							r0.w * w0 + r1.w * w1 + r2.w * w2
+						);
+						weight_norm(region);
+						const float spline_factor = spline_at(*cached, i0) * w0 + spline_at(*cached, i1) * w1 + spline_at(*cached, i2) * w2;
+
+						const float region_weight = ((float*)&region)[clamp(prop.region, 0, 3)];
+						const float chance = (prop.region_power > 0 ? std::pow(region_weight, prop.region_power) : 1.0f) * (1.0f - saturate(spline_factor));
+						if (chance >= 0.5f)
+						{
+							wi::Archive archive = wi::Archive(prop.data.data(), prop.data.size());
+							EntitySerializer seri;
+							Entity entity = generator->scene.Entity_Serialize(
+								archive,
+								seri,
+								INVALID_ENTITY,
+								wi::scene::Scene::EntitySerializeFlags::RECURSIVE |
+								wi::scene::Scene::EntitySerializeFlags::KEEP_INTERNAL_ENTITY_REFERENCES
+							);
+							NameComponent* name = generator->scene.names.GetComponent(entity);
+							if (name != nullptr)
+							{
+								name->name += std::to_string(cx) + "_" + std::to_string(cz);
+								if (slot > 0)
+								{
+									name->name += "_" + std::to_string(slot);
+								}
+							}
+							TransformComponent* transform = generator->scene.transforms.GetComponent(entity);
+							if (transform == nullptr)
+							{
+								transform = &generator->scene.transforms.Create(entity);
+							}
+							transform->translation_local = XMFLOAT3(
+								cached->position.x + vertex_pos.x - prop_pos_x,
+								vertex_pos.y,
+								cached->position.z + vertex_pos.z - prop_pos_z
+							);
+							transform->translation_local.y += lerp(prop.min_y_offset, prop.max_y_offset, f0);
+							const float scaling = lerp(prop.min_size, prop.max_size, f1);
+							transform->Scale(XMFLOAT3(scaling, scaling, scaling));
+							transform->RotateRollPitchYaw(XMFLOAT3(0, XM_2PI * f2, 0));
+							transform->SetDirty();
+							transform->UpdateTransform();
+							generator->scene.Component_Attach(entity, prop_data.entity, true);
+						}
+					}
+				}
+			}
+		}
+		return true;
 	}
 
 	void Terrain::Generation_Update(const CameraComponent& camera)
 	{
-		// The generation task is always cancelled every frame so we are sure that generation is not running at this point
-		Generation_Cancel();
+		if (wi::jobsystem::IsBusy(generator->workload))
+			return; // updating can't run while generation is running. Note: we could cancel here, but it could take long until cancel request is fulfilled (happened with physics mesh creations)
 
+		bool restart_generation = false;
 		if (!IsGenerationStarted())
 		{
-			Generation_Restart();
+			restart_generation = true;
 		}
 
 		// Check whether any modifiers need to be removed, and we will really remove them here if so:
@@ -469,8 +1223,55 @@ namespace wi::terrain
 					}
 				}
 			}
-			Generation_Restart();
+			restart_generation = true;
 			modifiers_to_remove.clear();
+		}
+		for (wi::ecs::Entity entity : materialEntities)
+		{
+			MaterialComponent* material = scene->materials.GetComponent(entity);
+			if (material == nullptr)
+				continue;
+			if (material->IsDirty())
+			{
+				restart_generation = true;
+				break;
+			}
+		}
+		splineMaterialEntities.clear();
+		for (size_t i = 0; i < scene->splines.GetCount(); ++i)
+		{
+			const SplineComponent& spline = scene->splines[i];
+			if (spline.terrain_modifier_amount > 0 || spline.prev_terrain_modifier_amount > 0)
+			{
+				bool spline_terrain_invalidation = false;
+				if (spline.dirty_terrain)
+				{
+					spline.dirty_terrain = false;
+					spline_terrain_invalidation = true;
+					spline.prev_terrain_modifier_amount = spline.terrain_modifier_amount;
+					spline.prev_terrain_pushdown = spline.terrain_pushdown;
+					spline.prev_terrain_texture_falloff = spline.terrain_texture_falloff;
+					spline.prev_terrain_generation_nodes = (int)spline.spline_node_entities.size();
+				}
+				spline_terrain_invalidation |= spline.materialEntity != spline.materialEntity_terrainPrev;
+				const MaterialComponent* splineMaterial = scene->materials.GetComponent(spline.materialEntity);
+				if (splineMaterial != nullptr)
+				{
+					spline_terrain_invalidation |= splineMaterial->IsDirty();
+					splineMaterialEntities.push_back(spline.materialEntity);
+				}
+				spline.materialEntity_terrainPrev = spline.materialEntity;
+
+				if (spline_terrain_invalidation)
+				{
+					InvalidateChunksAtSpline(spline);
+				}
+			}
+		}
+
+		if (restart_generation)
+		{
+			Generation_Restart();
 		}
 
 		if (terrainEntity == INVALID_ENTITY)
@@ -484,7 +1285,14 @@ namespace wi::terrain
 				}
 			}
 			chunks.clear();
+			prop_chunks.clear();
+			virtual_textures_in_use.clear();
 			return;
+		}
+
+		if (chunkGroupEntity == INVALID_ENTITY)
+		{
+			chunkGroupEntity = terrainEntity;
 		}
 
 		WeatherComponent* weather_component = scene->weathers.GetComponent(terrainEntity);
@@ -493,15 +1301,42 @@ namespace wi::terrain
 			weather = *weather_component; // feedback default weather
 		}
 
-		// What was generated, will be merged in to the main scene
-		scene->Merge(generator->scene);
+		bool props_regenerated = false;
 
-		const float chunk_scale_rcp = 1.0f / chunk_scale;
+		// Invalidated chunks replacements, originals are removed before merging updated ones:
+		for (Chunk chunk : generator->removable_chunks)
+		{
+			auto it = chunks.find(chunk);
+			if (it != chunks.end())
+			{
+				ChunkData& chunk_data = it->second;
+				scene->Entity_Remove(chunk_data.entity);
+				chunk_data.props_entity_old = INVALID_ENTITY;
+				props_regenerated |= RemovePropChunksOverlapping(chunk);
+				if (chunk_data.vt != nullptr)
+				{
+					chunk_data.vt->invalidate();
+				}
+			}
+		}
+		generator->removable_chunks.clear();
+
+		// What was generated, will be merged in to the main scene
+		props_regenerated |= generator->scene.rigidbodies.GetCount() >= 1000;
+		scene->MergeFastInternal(generator->scene);
+
+		chunk_scale_rcp = 1.0f / chunk_scale;
+		cam_height = camera.Eye.y;
+		cam_x = camera.Eye.x;
+		cam_z = camera.Eye.z;
 
 		if (IsCenterToCamEnabled())
 		{
 			center_chunk.x = (int)std::floor((camera.Eye.x + chunk_half_width) * chunk_width_rcp * chunk_scale_rcp);
 			center_chunk.z = (int)std::floor((camera.Eye.z + chunk_half_width) * chunk_width_rcp * chunk_scale_rcp);
+			// Prop grid is chunk_scale 1, so the center uses the unscaled 66m formula.
+			prop_center_chunk.x = (int)std::floor((camera.Eye.x + chunk_half_width) * chunk_width_rcp);
+			prop_center_chunk.z = (int)std::floor((camera.Eye.z + chunk_half_width) * chunk_width_rcp);
 		}
 
 		const int removal_threshold = generation + 2;
@@ -509,35 +1344,54 @@ namespace wi::terrain
 
 		// Check whether there are any materials that would write to virtual textures:
 		bool virtual_texture_any = false;
-		bool virtual_texture_available[TEXTURESLOT_COUNT] = {};
-		MaterialComponent* virtual_materials[4] = {
-			&material_Base,
-			&material_Slope,
-			&material_LowAltitude,
-			&material_HighAltitude,
-		};
-		for (auto& material : virtual_materials)
+
+		if (scene->materials.GetCount() > 0)
 		{
-			for (int i = 0; i < TEXTURESLOT_COUNT; ++i)
+			for (wi::ecs::Entity entity : materialEntities)
 			{
-				virtual_texture_available[i] = false;
-				switch (i)
+				MaterialComponent* material = scene->materials.GetComponent(entity);
+				if (material == nullptr)
+					continue;
+
+				for (int i = 0; i < TEXTURESLOT_COUNT && !virtual_texture_any; ++i)
 				{
-				case MaterialComponent::BASECOLORMAP:
-				case MaterialComponent::NORMALMAP:
-				case MaterialComponent::SURFACEMAP:
-					if (material->textures[i].resource.IsValid())
+					switch (i)
 					{
-						virtual_texture_available[i] = true;
-						virtual_texture_any = true;
+					case MaterialComponent::BASECOLORMAP:
+					case MaterialComponent::NORMALMAP:
+					case MaterialComponent::SURFACEMAP:
+					case MaterialComponent::EMISSIVEMAP:
+						if (material->textures[i].resource.IsValid())
+						{
+							virtual_texture_any = true;
+						}
+						break;
+					default:
+						break;
 					}
-					break;
-				default:
-					break;
 				}
+
+				if (virtual_texture_any)
+					break;
 			}
 		}
-		virtual_texture_available[MaterialComponent::SURFACEMAP] = true; // this is always needed to bake individual material properties
+
+		sync_grass(*this);
+
+		const float chunk_span = float(chunk_width - 1) * chunk_scale;
+		float grass_length = grass_properties.length;
+		for (int region = 0; region < MATERIAL_COUNT; ++region)
+		{
+			if (region != MATERIAL_BASE && grassEntities[region] == INVALID_ENTITY)
+				continue;
+			grass_length = std::max(grass_length, grass_region_properties[region].length);
+		}
+		const float grass_spawn = grass_spawn_distance(grass_properties.viewDistance, grass_length);
+		grass_chunk_dist = 1;
+		if (chunk_span > 0.0f)
+		{
+			grass_chunk_dist = std::max(1, (int)std::ceil(grass_spawn / chunk_span));
+		}
 
 		for (auto it = chunks.begin(); it != chunks.end();)
 		{
@@ -545,18 +1399,6 @@ namespace wi::terrain
 			ChunkData& chunk_data = it->second;
 			chunk_data.visible = camera.frustum.CheckSphere(chunk_data.sphere.center, chunk_data.sphere.radius);
 			const int dist = std::max(std::abs(center_chunk.x - chunk.x), std::abs(center_chunk.z - chunk.z));
-
-			if (wi::renderer::GetOcclusionCullingEnabled())
-			{
-				size_t object_index = scene->objects.GetIndex(chunk_data.entity);
-				if (object_index < scene->occlusion_results_objects.size())
-				{
-					if (scene->occlusion_results_objects[object_index].IsOccluded())
-					{
-						chunk_data.visible = false;
-					}
-				}
-			}
 
 			// pointer refresh:
 			MeshComponent* chunk_mesh = scene->meshes.GetComponent(chunk_data.entity);
@@ -572,23 +1414,40 @@ namespace wi::terrain
 				{
 					chunk_mesh->tessellationFactor = 0;
 				}
-
-#if 0
-				// Test: remove off screen chunks
-				//	But the problem is that shadow casters shouldn't be removed outside view
-				if (chunk_visible && !chunk_mesh->generalBuffer.IsValid())
+				if (!chunk_mesh->bvh.IsValid())
 				{
-					chunk_mesh->CreateRenderData();
+					chunk_mesh->SetBVHEnabled(true);
 				}
-				else if (!chunk_visible && chunk_mesh->generalBuffer.IsValid())
-				{
-					chunk_mesh->DeleteRenderData();
-				}
-#endif
 			}
 			else
 			{
 				chunk_data.mesh_vertex_positions = nullptr;
+			}
+
+			ObjectComponent* chunk_object = scene->objects.GetComponent(chunk_data.entity);
+			if (chunk_object != nullptr)
+			{
+				if (wi::renderer::GetOcclusionCullingEnabled() && chunk_object->occlusion.IsOccluded())
+				{
+					chunk_data.visible = false;
+				}
+				chunk_object->SetWetmapEnabled(scene->IsWetmapProcessingRequired());
+				chunk_object->emissiveColor.w = virtual_texture_any ? 1.0f : 0.0f; // without virtual textures, emissive will be disabled on the object-level (most likely missing content)
+			}
+
+			// old prop remove:
+			if (chunk_data.props_entity_old != INVALID_ENTITY)
+			{
+				scene->Entity_Remove(chunk_data.props_entity_old);
+				chunk_data.props_entity_old = INVALID_ENTITY;
+				props_regenerated = true;
+			}
+
+			// remove old grass if exists:
+			if (chunk_data.grass_entity != INVALID_ENTITY)
+			{
+				scene->Entity_Remove(chunk_data.grass_entity);
+				chunk_data.grass_entity = INVALID_ENTITY;
 			}
 
 			// chunk removal:
@@ -600,38 +1459,134 @@ namespace wi::terrain
 					{
 						chunk_data.vt->free(atlas);
 					}
+					props_regenerated |= RemovePropChunksOverlapping(chunk);
 					scene->Entity_Remove(it->second.entity);
 					it = chunks.erase(it);
 					continue; // don't increment iterator
 				}
 				else
 				{
-					// Grass patch removal:
-					if (chunk_data.grass_entity != INVALID_ENTITY && (dist > 1 || !IsGrassEnabled()))
+					const int cells = grass_cells_per_axis(chunk_scale);
+					const float origin_x = chunk_data.position.x - chunk_half_width * chunk_scale;
+					const float origin_z = chunk_data.position.z - chunk_half_width * chunk_scale;
+					for (size_t patch_index = 0; patch_index < chunk_data.grass_patches.size();)
 					{
-						scene->Entity_Remove(chunk_data.grass_entity);
-						chunk_data.grass_entity = INVALID_ENTITY; // grass can be generated here by generation thread...
-					}
-
-					// Prop removal:
-					if (chunk_data.props_entity != INVALID_ENTITY && (dist > prop_generation || std::abs(chunk_data.prop_density_current - prop_density) > std::numeric_limits<float>::epsilon()))
-					{
-						scene->Entity_Remove(chunk_data.props_entity);
-						chunk_data.props_entity = INVALID_ENTITY; // prop can be generated here by generation thread...
+						ChunkData::GrassPatch& patch = chunk_data.grass_patches[patch_index];
+						const uint32_t region = patch.region < MATERIAL_COUNT ? patch.region : MATERIAL_BASE;
+						const bool region_active = region == MATERIAL_BASE || grassEntities[region] != INVALID_ENTITY;
+						const float view = grass_spawn_distance(grass_properties.viewDistance, grass_region_properties[region].length);
+						bool layout = false;
+						for (int cz = 0; cz < cells && !layout; ++cz)
+						{
+							int qz0 = 0;
+							int qz1 = 0;
+							grass_cell_quads(cz, cells, qz0, qz1);
+							if ((uint32_t)qz0 != patch.z0 || (uint32_t)qz1 != patch.z1)
+							{
+								continue;
+							}
+							for (int cx = 0; cx < cells; ++cx)
+							{
+								int qx0 = 0;
+								int qx1 = 0;
+								grass_cell_quads(cx, cells, qx0, qx1);
+								if ((uint32_t)qx0 == patch.x0 && (uint32_t)qx1 == patch.x1)
+								{
+									layout = true;
+									break;
+								}
+							}
+						}
+						const float min_x = origin_x + float(patch.x0) * chunk_scale;
+						const float max_x = origin_x + float(patch.x1) * chunk_scale;
+						const float min_z = origin_z + float(patch.z0) * chunk_scale;
+						const float max_z = origin_z + float(patch.z1) * chunk_scale;
+						const bool keep = IsGrassEnabled() && region_active && dist <= grass_chunk_dist && layout && grass_rect_in_range(min_x, max_x, min_z, max_z, cam_x, cam_z, view);
+						if (!keep)
+						{
+							if (patch.entity != INVALID_ENTITY)
+							{
+								scene->Entity_Remove(patch.entity);
+							}
+							patch = chunk_data.grass_patches.back(); // swap with back
+							chunk_data.grass_patches.pop_back();
+							continue;
+						}
+						++patch_index;
 					}
 				}
 			}
 
 			// Grass property update:
-			if (chunk_data.visible && chunk_data.grass_entity != INVALID_ENTITY)
+			if (chunk_data.visible && IsGrassEnabled())
 			{
-				wi::HairParticleSystem* grass = scene->hairs.GetComponent(chunk_data.grass_entity);
-				if (grass != nullptr)
+				chunk_data.grass_density_current = grass_density;
+				for (size_t patch_index = 0; patch_index < chunk_data.grass_patches.size();)
 				{
-					chunk_data.grass_density_current = grass_density;
-					grass->strandCount = uint32_t(chunk_data.grass.strandCount * chunk_data.grass_density_current);
-					grass->length = grass_properties.length;
+					ChunkData::GrassPatch& patch = chunk_data.grass_patches[patch_index];
+					wi::HairParticleSystem* grass = scene->hairs.GetComponent(patch.entity);
+					if (grass == nullptr)
+					{
+						++patch_index;
+						continue;
+					}
+					const uint32_t region = patch.region < MATERIAL_COUNT ? patch.region : MATERIAL_BASE;
+					const wi::HairParticleSystem& props = grassEntities[region] != INVALID_ENTITY ? grass_region_properties[region] : grass_properties;
+					const uint32_t span_x = patch.x1 > patch.x0 ? patch.x1 - patch.x0 : 0;
+					const uint32_t span_z = patch.z1 > patch.z0 ? patch.z1 - patch.z0 : 0;
+					const uint32_t index_limit = span_x * span_z * 6u;
+					bool refresh = (grass->_flags & wi::HairParticleSystem::REBUILD_BUFFERS) != 0 || grass->indices.empty() || grass->indices.size() > index_limit;
+					if (chunk_data.grass_region_lengths[region].size() == vertexCount && grass->vertex_lengths != chunk_data.grass_region_lengths[region])
+					{
+						grass->vertex_lengths = chunk_data.grass_region_lengths[region];
+						refresh = true;
+					}
+					if (refresh)
+					{
+						build_grass_index_range(*grass, patch.x0, patch.z0, patch.x1, patch.z1);
+						if (grass->indices.empty())
+						{
+							scene->Entity_Remove(patch.entity);
+							patch = chunk_data.grass_patches.back();
+							chunk_data.grass_patches.pop_back();
+							continue;
+						}
+					}
+					const wi::vector<float>* lengths = &grass->vertex_lengths;
+					if (lengths->size() != vertexCount)
+					{
+						lengths = &chunk_data.grass_region_lengths[region];
+					}
+					const uint32_t owned = count_grass_vertices(*lengths, (int)patch.x0, (int)patch.z0, (int)patch.x1, (int)patch.z1);
+					patch.base_strand_count = grass_strand_count(owned, chunk_scale, 1.0f);
+					const uint32_t strand_count = grass_patch_strand_count(*this, region, owned, chunk_scale);
+					if (grass->strandCount != strand_count)
+					{
+						grass->strandCount = strand_count;
+					}
+					grass->length = props.length;
+					grass->randomness = props.randomness;
+					grass->randomSeed = props.randomSeed;
+					grass->stiffness = props.stiffness;
+					grass->width = props.width;
+					grass->uniformity = props.uniformity;
+					grass->atlas_rects = props.atlas_rects;
+					grass->segmentCount = props.segmentCount;
+					grass->billboardCount = props.billboardCount;
+					grass->drag = props.drag;
+					grass->gravityPower = props.gravityPower;
 					grass->viewDistance = grass_properties.viewDistance;
+
+					MaterialComponent* chunkGrassMaterial = scene->materials.GetComponent(patch.entity);
+					if (chunkGrassMaterial != nullptr)
+					{
+						*chunkGrassMaterial = grassEntities[region] != INVALID_ENTITY ? grass_region_materials[region] : grass_material;
+					}
+					if (refresh)
+					{
+						grass->CreateRenderData();
+					}
+					++patch_index;
 				}
 			}
 
@@ -639,38 +1594,25 @@ namespace wi::terrain
 			if (IsPhysicsEnabled())
 			{
 				const ObjectComponent* object = scene->objects.GetComponent(chunk_data.entity);
-				const int lod_required = object == nullptr ? 0 : object->lod;
 
-				if (rigidbody != nullptr)
+				if (dist < physics_generation)
 				{
-					if (rigidbody->mesh_lod != lod_required)
+					if (rigidbody == nullptr)
 					{
-						rigidbody->mesh_lod = lod_required;
-						rigidbody->physicsobject = {}; // will be recreated
+						RigidBodyPhysicsComponent& newrigidbody = scene->rigidbodies.Create(chunk_data.entity);
+						newrigidbody.shape = RigidBodyPhysicsComponent::HEIGHTFIELD;
+						newrigidbody.mass = 0; // terrain chunks are static
+						newrigidbody.friction = 0.8f;
+						//newrigidbody.mesh_lod = 2;
 					}
 					else
 					{
-						if (dist < physics_generation)
-						{
-							wi::physics::SetActivationState(*rigidbody, wi::physics::ActivationState::Active);
-						}
-						else
-						{
-							//scene->rigidbodies.Remove(chunk_data.entity);
-							wi::physics::SetActivationState(*rigidbody, wi::physics::ActivationState::Inactive);
-						}
+						rigidbody->shape = RigidBodyPhysicsComponent::HEIGHTFIELD;
 					}
 				}
-				else
+				else if(rigidbody != nullptr)
 				{
-					if (dist < physics_generation)
-					{
-						RigidBodyPhysicsComponent& newrigidbody = scene->rigidbodies.Create(chunk_data.entity);
-						newrigidbody.shape = RigidBodyPhysicsComponent::TRIANGLE_MESH;
-						//newrigidbody.SetDisableDeactivation(true);
-						newrigidbody.SetKinematic(true);
-						newrigidbody.mesh_lod = lod_required;
-					}
+					scene->rigidbodies.Remove(chunk_data.entity);
 				}
 			}
 			else
@@ -684,33 +1626,143 @@ namespace wi::terrain
 			it++;
 		}
 
+		// Prop chunks stream on the 66m grid, with the same distance and density test terrain chunks used at chunk_scale 1.
+		if (IsRemovalEnabled())
+		{
+			for (auto prop_it = prop_chunks.begin(); prop_it != prop_chunks.end();)
+			{
+				const Chunk& prop_chunk = prop_it->first;
+				PropChunkData& prop_data = prop_it->second;
+				const int prop_dist = std::max(std::abs(prop_center_chunk.x - prop_chunk.x), std::abs(prop_center_chunk.z - prop_chunk.z));
+				if (prop_dist > prop_generation || std::abs(prop_data.prop_density_current - prop_density) > std::numeric_limits<float>::epsilon())
+				{
+					if (prop_data.entity != INVALID_ENTITY)
+					{
+						scene->Entity_Remove(prop_data.entity);
+						props_regenerated = true;
+					}
+					prop_it = prop_chunks.erase(prop_it);
+					continue;
+				}
+				++prop_it;
+			}
+		}
+
+		if (props_regenerated)
+		{
+			wi::physics::OptimizeBroadPhase(*scene);
+		}
+
 		if (virtual_texture_any)
 		{
 			UpdateVirtualTexturesCPU();
 		}
+		else
+		{
+			virtual_textures_in_use.clear();
+		}
+
+		const uint64_t required_chunk_buffer_size = sizeof(ShaderTerrainChunk) * (chunk_buffer_range * 2 + 1) * (chunk_buffer_range * 2 + 1);
+		if (chunk_buffer.desc.size < required_chunk_buffer_size)
+		{
+			GPUBufferDesc desc;
+			desc.usage = Usage::DEFAULT;
+			desc.size = required_chunk_buffer_size;
+			desc.bind_flags = BindFlag::SHADER_RESOURCE;
+			desc.misc_flags = ResourceMiscFlag::BUFFER_STRUCTURED;
+			desc.stride = sizeof(ShaderTerrainChunk);
+			bool success = device->CreateBuffer(&desc, nullptr, &chunk_buffer);
+			assert(success);
+			device->SetName(&chunk_buffer, "wi::terrain::Terrain::chunk_buffer");
+		}
 
 		// Start the generation on a background thread and keep it running until the next frame
-		wi::jobsystem::Execute(generator->workload, [=](wi::jobsystem::JobArgs args) {
+		generator->cancelled.store(false);
+		generator->workload.priority = wi::jobsystem::Priority::Low;
+		size_t terrain_spline_count_scene = 0; // Count the current terrain modifier splines in scene
+		for (size_t i = 0; i < scene->splines.GetCount(); ++i)
+		{
+			const SplineComponent& spline = scene->splines[i];
+			if (spline.terrain_modifier_amount > 0)
+			{
+				terrain_spline_count_scene++;
+			}
+		}
+		// Check mismatches between current and previous slines (removal, undo, etc.)
+		for (size_t i = 0; i < generator->splines.size(); ++i)
+		{
+			const SplineComponent& spline = generator->splines[i];
+			Entity entity = generator->spline_entities[i];
+			bool invalidation_required = false;
+			invalidation_required |= !scene->splines.Contains(entity); // no longer exists in scene, was deleted
+			if (!invalidation_required)
+			{
+				// If spline exists in scene, need to compare for changes:
+				const SplineComponent& other = *scene->splines.GetComponent(entity);
+				invalidation_required |= spline.width != other.width;
+				invalidation_required |= spline.rotation != other.rotation;
+				invalidation_required |= spline.terrain_modifier_amount != other.terrain_modifier_amount;
+				invalidation_required |= spline.terrain_pushdown != other.terrain_pushdown;
+				invalidation_required |= spline.terrain_texture_falloff != other.terrain_texture_falloff;
+				invalidation_required |= spline.spline_node_transforms.size() != other.spline_node_transforms.size();
+				if (!invalidation_required)
+				{
+					// Last resort compare whole node transform array:
+					invalidation_required |= std::memcmp(spline.spline_node_transforms.data(), other.spline_node_transforms.data(), spline.spline_node_transforms.size() * sizeof(TransformComponent)) != 0;
+				}
+			}
+			if (invalidation_required)
+			{
+				InvalidateChunksAtSpline(spline);
+			}
+		}
+		generator->splines.clear();
+		generator->spline_entities.clear();
+		for (size_t i = 0; i < scene->splines.GetCount(); ++i)
+		{
+			const SplineComponent& spline = scene->splines[i];
+			if (spline.terrain_modifier_amount > 0)
+			{
+				generator->splines.push_back(spline);
+				generator->spline_entities.push_back(scene->splines.GetEntity(i));
+			}
+		}
+		wi::jobsystem::Execute(generator->workload, [this](wi::jobsystem::JobArgs a) {
 
 			wi::Timer timer;
 			bool generated_something = false;
 
-			auto request_chunk = [&](int offset_x, int offset_z)
+			// Allocate the chunk's entity + components in the generator scene and size its
+			// CPU buffers. This mutates the scene component managers, so it must run
+			// serially (before the build_chunk() jobs, which only read those components).
+			auto setup_chunk = [&](const Chunk& chunk)
 			{
-				Chunk chunk = center_chunk;
-				chunk.x += offset_x;
-				chunk.z += offset_z;
-				auto it = chunks.find(chunk);
-				if (it == chunks.end() || it->second.entity == INVALID_ENTITY)
 				{
-					// Generate a new chunk:
 					ChunkData& chunk_data = chunks[chunk];
 
-					chunk_data.entity = generator->scene.Entity_CreateObject("chunk_" + std::to_string(chunk.x) + "_" + std::to_string(chunk.z));
+					std::string chunk_name = "chunk_" + std::to_string(chunk.x) + "_" + std::to_string(chunk.z);
+					if (chunk_data.entity == INVALID_ENTITY)
+					{
+						chunk_data.entity = generator->scene.Entity_CreateObject(chunk_name);
+					}
+					else
+					{
+						// replacement will be made instead of simple merge, entity ID can be reused:
+						if (!generator->scene.names.Contains(chunk_data.entity)) generator->scene.names.Create(chunk_data.entity) = std::move(chunk_name);
+						if (!generator->scene.layers.Contains(chunk_data.entity)) generator->scene.layers.Create(chunk_data.entity);
+						if (!generator->scene.transforms.Contains(chunk_data.entity)) generator->scene.transforms.Create(chunk_data.entity);
+						if (!generator->scene.objects.Contains(chunk_data.entity)) generator->scene.objects.Create(chunk_data.entity);
+						generator->scene.materials.Remove(chunk_data.entity);
+						generator->scene.meshes.Remove(chunk_data.entity);
+						generator->removable_chunks.push_back(chunk);
+						chunk_data.grass_entity = INVALID_ENTITY;
+						chunk_data.grass_patches.clear();
+					}
 					ObjectComponent& object = *generator->scene.objects.GetComponent(chunk_data.entity);
-					object.lod_distance_multiplier = lod_multiplier;
+					object.lod_bias = lod_bias;
 					object.filterMask |= wi::enums::FILTER_NAVIGATION_MESH;
-					generator->scene.Component_Attach(chunk_data.entity, terrainEntity);
+					object.filterMask |= wi::enums::FILTER_TERRAIN;
+					generator->scene.Component_Attach(chunk_data.entity, chunkGroupEntity);
 
 					TransformComponent& transform = *generator->scene.transforms.GetComponent(chunk_data.entity);
 					transform.ClearTransform();
@@ -721,14 +1773,17 @@ namespace wi::terrain
 					MaterialComponent& material = generator->scene.materials.Create(chunk_data.entity);
 					// material params will be 1 because they will be created from only texture maps
 					//	because region materials are blended together into one texture
+					material.SetInternal();
 					material.SetRoughness(1);
 					material.SetMetalness(1);
 					material.SetReflectance(1);
+					material.SetEmissiveStrength(100);
 
 					MeshComponent& mesh = generator->scene.meshes.Create(chunk_data.entity);
+					mesh.SetQuantizedPositionsDisabled(true); // connecting meshes quantization is not correct because mismatching AABBs
 					object.meshID = chunk_data.entity;
-					mesh.indices = chunk_indices.indices;
-					for (auto& lod : chunk_indices.lods)
+					mesh.indices = chunk_indices().indices;
+					for (auto& lod : chunk_indices().lods)
 					{
 						mesh.subsets.emplace_back();
 						mesh.subsets.back().materialID = chunk_data.entity;
@@ -738,14 +1793,45 @@ namespace wi::terrain
 					mesh.subsets_per_lod = 1;
 					mesh.vertex_positions.resize(vertexCount);
 					mesh.vertex_normals.resize(vertexCount);
+					mesh.vertex_tangents.resize(vertexCount);
 					mesh.vertex_uvset_0.resize(vertexCount);
-					chunk_data.region_weights.resize(vertexCount);
+
+					chunk_data.blendmap_layers.resize(4);
+					for (auto& x : chunk_data.blendmap_layers)
+					{
+						x.pixels.resize(vertexCount);
+					}
+
+					chunk_data.spline_blendmap_layers.resize(splineMaterialEntities.size());
+					for (auto& x : chunk_data.spline_blendmap_layers)
+					{
+						x.pixels.resize(vertexCount);
+					}
 
 					chunk_data.mesh_vertex_positions = mesh.vertex_positions.data();
 
-					wi::HairParticleSystem grass = grass_properties;
-					grass.vertex_lengths.resize(vertexCount);
-					std::atomic<uint32_t> grass_valid_vertex_count{ 0 };
+					chunk_data.heightmap_data.resize(vertexCount);
+
+					// Mark clean now that it is being (re)generated, so a
+					// budget-limited placement pass can't leave a freshly built
+					// chunk flagged for rebuild:
+					chunk_data.invalidated = false;
+				}
+			};
+
+			// Build the mesh, textures, grass and physics shape for a chunk
+			// that setup_chunk() has already created. Heavy and
+			// parallelism-friendly: it only reads shared generation parameters
+			// and writes this chunk's own data, so many chunks can build
+			// concurrently. No scene component is created here, so the
+			// component managers stay stable while these jobs run.
+			auto build_chunk = [&](const Chunk& chunk)
+			{
+				{
+					ChunkData& chunk_data = chunks.find(chunk)->second;
+					ObjectComponent& object = *generator->scene.objects.GetComponent(chunk_data.entity);
+					TransformComponent& transform = *generator->scene.transforms.GetComponent(chunk_data.entity);
+					MeshComponent& mesh = *generator->scene.meshes.GetComponent(chunk_data.entity);
 
 					// Shadow casting will only be enabled for sloped terrain chunks:
 					std::atomic_bool slope_cast_shadow;
@@ -753,78 +1839,163 @@ namespace wi::terrain
 
 					// Do a parallel for loop over all the chunk's vertices and compute their properties:
 					wi::jobsystem::context ctx;
-					wi::jobsystem::Dispatch(ctx, vertexCount, chunk_width, [&](wi::jobsystem::JobArgs args) {
-						uint32_t index = args.jobIndex;
-						const float x = (float(index % chunk_width) - chunk_half_width) * chunk_scale;
-						const float z = (float(index / chunk_width) - chunk_half_width) * chunk_scale;
-						XMVECTOR corners[3];
-						XMFLOAT2 corner_offsets[3] = {
-							XMFLOAT2(0, 0),
-							XMFLOAT2(1, 0),
-							XMFLOAT2(0, 1),
-						};
-						for (int i = 0; i < arraysize(corners); ++i)
+					ctx.priority = wi::jobsystem::Priority::Low;
+
+					// Preload height grid with padding, because neighbors will need to be accessed to determine slopes:
+					constexpr int chunk_width_padded = chunk_width + 1;
+					constexpr uint32_t vertexCount_padded = chunk_width_padded * chunk_width_padded;
+					float heights_padded[chunk_width_padded * chunk_width_padded];
+					const XMVECTOR UP = XMVectorSet(0, 1, 0, 0);
+					wi::jobsystem::Dispatch(ctx, vertexCount_padded, chunk_width_padded * 4, [&](wi::jobsystem::JobArgs args) {
+						const uint32_t index = args.jobIndex;
+						const XMUINT2 coord = XMUINT2(index % chunk_width_padded, index / chunk_width_padded);
+						const float x = (float(coord.x) - chunk_half_width) * chunk_scale;
+						const float z = (float(coord.y) - chunk_half_width) * chunk_scale;
+
+						float height = 0;
+						const XMFLOAT2 world_pos = XMFLOAT2(chunk_data.position.x + x, chunk_data.position.z + z);
+						for (auto& modifier : modifiers)
 						{
-							float height = 0;
-							const XMFLOAT2 world_pos = XMFLOAT2(chunk_data.position.x + x + corner_offsets[i].x, chunk_data.position.z + z + corner_offsets[i].y);
-							for (auto& modifier : modifiers)
-							{
-								modifier->Apply(world_pos, height);
-							}
-							height = wi::math::Lerp(bottomLevel, topLevel, height);
-							corners[i] = XMVectorSet(world_pos.x, height, world_pos.y, 0);
+							modifier->Apply(world_pos, height);
 						}
-						const float height = XMVectorGetY(corners[0]);
-						const XMVECTOR T = XMVectorSubtract(corners[2], corners[1]);
-						const XMVECTOR B = XMVectorSubtract(corners[1], corners[0]);
+						height = lerp(bottomLevel, topLevel, height);
+
+						const bool is_real_vertex = coord.x < chunk_width && coord.y < chunk_width;
+						const uint32_t real_index = coord.x + coord.y * chunk_width;
+
+						// Apply splines to height only:
+						const XMVECTOR P = XMVectorSet(world_pos.x, -100000, world_pos.y, 0);
+						const wi::primitive::Ray ray(P, UP);
+						int splinematerialcnt = -1;
+						for (size_t j = 0; j < generator->splines.size(); ++j)
+						{
+							const SplineComponent& spline = generator->splines[j];
+							if (spline.materialEntity != INVALID_ENTITY)
+								splinematerialcnt++;
+							if (!spline.bvh.IntersectsFirst(ray, [&](uint32_t index) { return spline.precomputed_aabbs[index].intersects(ray); }))
+								continue;
+							XMVECTOR S = spline.TraceSplinePlane(P, UP, 4);
+							S = spline.ClosestPointOnSpline(S, 4);
+							const float splineheight = XMVectorGetY(S);
+							const float splinedist = wi::math::Distance(XMVectorSetY(P, splineheight), S);
+							const float splinefactor = 1.0f - smoothstep(0.0f, 1.0f, saturate(splinedist * sqr(spline.terrain_modifier_amount)));
+							if (is_real_vertex && spline.materialEntity != INVALID_ENTITY)
+							{
+								chunk_data.spline_blendmap_layers[splinematerialcnt].pixels[real_index] = uint8_t(smoothstep(clamp(spline.terrain_texture_falloff, 0.0f, 0.999f), 1.0f, splinefactor) * 255);
+							}
+							height = lerp(height, splineheight - spline.terrain_pushdown, splinefactor);
+						}
+
+						heights_padded[coord.x + coord.y * chunk_width_padded] = height;
+					});
+					wi::jobsystem::Wait(ctx);
+
+					// Each assigned grass entity gets a length mask from that region index only.
+					bool region_grass_enabled[MATERIAL_COUNT] = {};
+					wi::vector<float> region_lengths[MATERIAL_COUNT];
+					for (int region = 0; region < MATERIAL_COUNT; ++region)
+					{
+						region_grass_enabled[region] = grassEntities[region] != INVALID_ENTITY;
+						if (region_grass_enabled[region])
+						{
+							region_lengths[region].resize(vertexCount);
+						}
+					}
+
+					wi::jobsystem::Dispatch(ctx, vertexCount, chunk_width * 4, [&](wi::jobsystem::JobArgs args) {
+						const uint32_t index = args.jobIndex;
+						const XMUINT2 coord = XMUINT2(index % chunk_width, index / chunk_width);
+						const float x = (float(coord.x) - chunk_half_width) * chunk_scale;
+						const float z = (float(coord.y) - chunk_half_width) * chunk_scale;
+						const float height = heights_padded[coord.x + coord.y * chunk_width_padded];
+						const XMVECTOR corners[3] = {
+							XMVectorSet(chunk_data.position.x + x, height, chunk_data.position.z + z, 0),
+							XMVectorSet(chunk_data.position.x + x + chunk_scale, heights_padded[coord.x + 1 + coord.y * chunk_width_padded], chunk_data.position.z + z, 0),
+							XMVectorSet(chunk_data.position.x + x, heights_padded[coord.x + (coord.y + 1) * chunk_width_padded], chunk_data.position.z + z + chunk_scale, 0),
+						};
+						const XMVECTOR T = XMVectorSubtract(corners[1], corners[2]);
+						const XMVECTOR B = XMVectorSubtract(corners[0], corners[1]);
 						const XMVECTOR N = XMVector3Normalize(XMVector3Cross(T, B));
 						XMFLOAT3 normal;
 						XMStoreFloat3(&normal, N);
 
-						const float slope_amount = 1.0f - wi::math::saturate(normal.y);
+						const float slope_amount = 1.0f - saturate(normal.y);
 						if (slope_amount > 0.1f)
 							slope_cast_shadow.store(true);
 
-						const float region_base = 1;
-						const float region_slope = std::pow(slope_amount, region1);
-						const float region_low_altitude = bottomLevel == 0 ? 0 : std::pow(wi::math::saturate(wi::math::InverseLerp(0, bottomLevel, height)), region2);
-						const float region_high_altitude = topLevel == 0 ? 0 : std::pow(wi::math::saturate(wi::math::InverseLerp(0, topLevel, height)), region3);
+						float region_base = 1;
+						float region_slope = region1 == 0 ? 1 : smoothstep(0.0f, region1, slope_amount);
+						float region_low_altitude = region2 == 0 ? 1 : smoothstep(0.0f, region2, wi::math::InverseLerp(0, bottomLevel, height));
+						float region_high_altitude = region3 == 0 ? 1 : smoothstep(0.0f, region3, wi::math::InverseLerp(0, topLevel, height));
 
-						XMFLOAT4 materialBlendWeights(region_base, 0, 0, 0);
-						materialBlendWeights = wi::math::Lerp(materialBlendWeights, XMFLOAT4(0, 1, 0, 0), region_slope);
-						materialBlendWeights = wi::math::Lerp(materialBlendWeights, XMFLOAT4(0, 0, 1, 0), region_low_altitude);
-						materialBlendWeights = wi::math::Lerp(materialBlendWeights, XMFLOAT4(0, 0, 0, 1), region_high_altitude);
-						const float weight_norm = 1.0f / (materialBlendWeights.x + materialBlendWeights.y + materialBlendWeights.z + materialBlendWeights.w);
-						materialBlendWeights.x *= weight_norm;
-						materialBlendWeights.y *= weight_norm;
-						materialBlendWeights.z *= weight_norm;
-						materialBlendWeights.w *= weight_norm;
+						region_low_altitude = saturate(region_low_altitude - region_slope);
+						region_high_altitude = saturate(region_high_altitude - region_slope);
 
-						chunk_data.region_weights[index] = wi::Color::fromFloat4(materialBlendWeights);
+						XMFLOAT4 materialBlendWeights(region_base, region_slope, region_low_altitude, region_high_altitude);
+
+						chunk_data.blendmap_layers[0].pixels[index] = uint8_t(materialBlendWeights.x * 255);
+						chunk_data.blendmap_layers[1].pixels[index] = uint8_t(materialBlendWeights.y * 255);
+						chunk_data.blendmap_layers[2].pixels[index] = uint8_t(materialBlendWeights.z * 255);
+						chunk_data.blendmap_layers[3].pixels[index] = uint8_t(materialBlendWeights.w * 255);
+
+						// Normalize after store, blending shader wants unnormalized!
+						weight_norm(materialBlendWeights);
 
 						mesh.vertex_positions[index] = XMFLOAT3(x, height, z);
 						mesh.vertex_normals[index] = normal;
+						XMStoreFloat4(&mesh.vertex_tangents[index], T);
+						mesh.vertex_tangents[index].w = 1;
 						const XMFLOAT2 uv = XMFLOAT2(x * chunk_scale_rcp * chunk_width_rcp + 0.5f, z * chunk_scale_rcp * chunk_width_rcp + 0.5f);
 						mesh.vertex_uvset_0[index] = uv;
 
 						XMFLOAT3 vertex_pos(chunk_data.position.x + x, height, chunk_data.position.z + z);
 
+						float spline_factor = 0;
+						if (!chunk_data.spline_blendmap_layers.empty())
+						{
+							for (auto& y : chunk_data.spline_blendmap_layers)
+							{
+								spline_factor += float(y.pixels[index]) / 255.0f;
+							}
+							spline_factor /= float(chunk_data.spline_blendmap_layers.size());
+						}
+
 						const float grass_noise_frequency = 0.1f;
 						const float grass_noise = perlin_noise.compute(vertex_pos.x * grass_noise_frequency, vertex_pos.y * grass_noise_frequency, vertex_pos.z * grass_noise_frequency) * 0.5f + 0.5f;
-						const float region_grass = std::pow(materialBlendWeights.x * (1 - materialBlendWeights.w), 8.0f) * grass_noise;
-						if (region_grass > 0.1f)
+						const float spline_suppress = 1.0f - saturate(spline_factor);
+						const float slope_g = grass_band_weight(region_slope, region1);
+						const float low_g = grass_band_weight(region_low_altitude, region2);
+						const float high_g = grass_band_weight(region_high_altitude, region3);
+						const float region_weights[MATERIAL_COUNT] = { saturate(1.0f - slope_g - low_g - high_g), slope_g, low_g, high_g, };
+						// Pow8 where this grass meets a region that has none. Linear where it meets other grass, so a shared boundary does not open a gap.
+						float grassy_weight = 0.0f;
+						float total_weight = 0.0f;
+						float weights[MATERIAL_COUNT];
+						for (int region = 0; region < MATERIAL_COUNT; ++region)
 						{
-							grass_valid_vertex_count.fetch_add(1);
-							grass.vertex_lengths[index] = region_grass;
+							weights[region] = saturate(region_weights[region]);
+							total_weight += weights[region];
+							if (region_grass_enabled[region])
+							{
+								grassy_weight += weights[region];
+							}
 						}
-						else
+						for (int region = 0; region < MATERIAL_COUNT; ++region)
 						{
-							grass.vertex_lengths[index] = 0;
+							if (!region_grass_enabled[region])
+								continue;
+							const float other = total_weight - weights[region];
+							const float grassy_other = grassy_weight - weights[region];
+							const float grassy_frac = other > 0.0001f ? saturate(grassy_other / other) : 0.0f;
+							const float shaped = lerp(pow8(weights[region]), weights[region], grassy_frac);
+							const float region_grass = shaped * grass_noise * spline_suppress;
+							region_lengths[region][index] = region_grass > 0.1f ? region_grass : 0.0f;
 						}
-						});
+						chunk_data.heightmap_data[index] = uint16_t(inverse_lerp(bottomLevel, topLevel, height) * 65535);
+					});
 					wi::jobsystem::Wait(ctx); // wait until chunk's vertex buffer is fully generated
 
-					material.SetCastShadow(slope_cast_shadow.load());
+					object.SetCastShadow(slope_cast_shadow.load());
 					mesh.SetDoubleSidedShadow(slope_cast_shadow.load());
 
 					wi::jobsystem::Execute(ctx, [&](wi::jobsystem::JobArgs args) {
@@ -834,196 +2005,403 @@ namespace wi::terrain
 						chunk_data.sphere.center.y += chunk_data.position.y;
 						chunk_data.sphere.center.z += chunk_data.position.z;
 						chunk_data.sphere.radius = mesh.aabb.getRadius();
-						});
+						mesh.SetBVHEnabled(true);
+					});
 
-					// If there were any vertices in this chunk that could be valid for grass, store the grass particle system:
-					if (grass_valid_vertex_count.load() > 0)
+					for (int region = 0; region < MATERIAL_COUNT; ++region)
 					{
-						chunk_data.grass = std::move(grass); // the grass will be added to the scene later, only when the chunk is close to the camera (center chunk's neighbors)
-						chunk_data.grass.meshID = chunk_data.entity;
-						chunk_data.grass.strandCount = uint32_t(grass_valid_vertex_count.load() * 3 * chunk_scale * chunk_scale); // chunk_scale * chunk_scale : grass density increases with squared amount with chunk scale (x*z)
-					}
-
-					// Create the textures for virtual texture update:
-					CreateChunkRegionTexture(chunk_data);
-
-					wi::jobsystem::Wait(ctx); // wait until mesh.CreateRenderData() async task finishes
-					generated_something = true;
-				}
-
-				const int dist = std::max(std::abs(center_chunk.x - chunk.x), std::abs(center_chunk.z - chunk.z));
-
-				// Grass patch placement:
-				if (dist <= 1 && IsGrassEnabled())
-				{
-					it = chunks.find(chunk);
-					if (it != chunks.end() && it->second.entity != INVALID_ENTITY)
-					{
-						ChunkData& chunk_data = it->second;
-						if (chunk_data.grass_entity == INVALID_ENTITY && chunk_data.grass.meshID != INVALID_ENTITY)
+						if (region_grass_enabled[region] && grass_mask_used(region_lengths[region]))
 						{
-							// add patch for this chunk
-							chunk_data.grass_entity = CreateEntity();
-							wi::HairParticleSystem& grass = generator->scene.hairs.Create(chunk_data.grass_entity);
-							grass = chunk_data.grass;
-							chunk_data.grass_density_current = grass_density;
-							grass.strandCount = uint32_t(grass.strandCount * chunk_data.grass_density_current);
-							generator->scene.materials.Create(chunk_data.grass_entity) = material_GrassParticle;
-							generator->scene.transforms.Create(chunk_data.grass_entity);
-							generator->scene.names.Create(chunk_data.grass_entity) = "grass";
-							generator->scene.Component_Attach(chunk_data.grass_entity, chunk_data.entity, true);
-							generated_something = true;
+							chunk_data.grass_region_lengths[region] = std::move(region_lengths[region]);
+						}
+						else
+						{
+							chunk_data.grass_region_lengths[region].clear();
 						}
 					}
-				}
 
-				// Prop placement:
-				if (dist <= prop_generation)
+					if (IsPhysicsEnabled())
+					{
+						wi::jobsystem::Execute(
+							ctx,
+							[&](wi::jobsystem::JobArgs args)
+						{
+							RigidBodyPhysicsComponent& newrigidbody = mesh.precomputed_rigidbody_physics_shape;
+							newrigidbody.shape = RigidBodyPhysicsComponent::HEIGHTFIELD;
+							newrigidbody.mass = 0; // terrain chunks are static
+							newrigidbody.friction = 0.8f;
+							//newrigidbody.mesh_lod = 2;
+							wi::physics::CreateRigidBodyShape(newrigidbody, transform.scale_local, &mesh);
+						});
+					}
+
+					chunk_data.heightmap = {};
+					chunk_data.blendmap  = {};
+					CreateChunkRegionTexture(chunk_data);
+
+					wi::jobsystem::Wait(ctx);
+				}
+			};
+
+			// Place grass on a finished chunk and clear its invalidated flag.
+			// Mutates the generator scene (creates grass entities), so it runs
+			// serially after the chunk's build_chunk() job has completed.
+			// Props are placed on their own grid, not here.
+			auto place_chunk = [&](const Chunk& chunk)
+			{
+				const int dist = std::max(std::abs(center_chunk.x - chunk.x), std::abs(center_chunk.z - chunk.z));
+				auto it = chunks.find(chunk);
+
+				// Grass patch placement:
+				if (dist <= grass_chunk_dist && IsGrassEnabled())
 				{
 					it = chunks.find(chunk);
 					if (it != chunks.end() && it->second.entity != INVALID_ENTITY)
 					{
 						ChunkData& chunk_data = it->second;
-
-						if (chunk_data.props_entity == INVALID_ENTITY && chunk_data.mesh_vertex_positions != nullptr)
+						// Multiple grass chunks can be placed onto 1 terrain chunk, important for large terrain chunks to not blow up VRAM usage with large grass particle system:
+						const int cells = grass_cells_per_axis(chunk_scale);
+						const float origin_x = chunk_data.position.x - chunk_half_width * chunk_scale;
+						const float origin_z = chunk_data.position.z - chunk_half_width * chunk_scale;
+						bool budget_hit = false;
+						for (int region = 0; region < MATERIAL_COUNT && !budget_hit; ++region)
 						{
-							chunk_data.props_entity = CreateEntity();
-							generator->scene.transforms.Create(chunk_data.props_entity);
-							generator->scene.names.Create(chunk_data.props_entity) = "props";
-							generator->scene.Component_Attach(chunk_data.props_entity, chunk_data.entity, true);
-							chunk_data.prop_density_current = prop_density;
-
-							std::mt19937 prop_rand;
-							prop_rand.seed((uint32_t)chunk.compute_hash() ^ seed);
-
-							for (const auto& prop : props)
+							if (grassEntities[region] == INVALID_ENTITY)
+								continue;
+							const wi::vector<float>& lengths = chunk_data.grass_region_lengths[region];
+							if (lengths.size() != vertexCount)
+								continue;
+							const float view = grass_spawn_distance(grass_properties.viewDistance, grass_region_properties[region].length);
+							const bool height_ok = cam_height - view < chunk_data.sphere.center.y + chunk_data.sphere.radius;
+							if (!height_ok)
+								continue;
+							for (int cz = 0; cz < cells && !budget_hit; ++cz)
 							{
-								if (prop.data.empty())
-									continue;
-								std::uniform_int_distribution<uint32_t> gen_distr(
-									uint32_t(prop.min_count_per_chunk * chunk_data.prop_density_current),
-									uint32_t(prop.max_count_per_chunk * chunk_data.prop_density_current)
-								);
-								int gen_count = gen_distr(prop_rand);
-								for (int i = 0; i < gen_count; ++i)
+								int z0 = 0;
+								int z1 = 0;
+								grass_cell_quads(cz, cells, z0, z1);
+								const float min_z = origin_z + float(z0) * chunk_scale;
+								const float max_z = origin_z + float(z1) * chunk_scale;
+								for (int cx = 0; cx < cells; ++cx)
 								{
-									std::uniform_real_distribution<float> float_distr(0.0f, 1.0f);
-									std::uniform_int_distribution<uint32_t> ind_distr(0, chunk_indices.lods[0].indexCount / 3 - 1);
-									uint32_t tri = ind_distr(prop_rand); // random triangle on the chunk mesh
-									uint32_t ind0 = chunk_indices.indices[tri * 3 + 0];
-									uint32_t ind1 = chunk_indices.indices[tri * 3 + 1];
-									uint32_t ind2 = chunk_indices.indices[tri * 3 + 2];
-									const XMFLOAT3& pos0 = chunk_data.mesh_vertex_positions[ind0];
-									const XMFLOAT3& pos1 = chunk_data.mesh_vertex_positions[ind1];
-									const XMFLOAT3& pos2 = chunk_data.mesh_vertex_positions[ind2];
-									const XMFLOAT4 region0 = chunk_data.region_weights[ind0];
-									const XMFLOAT4 region1 = chunk_data.region_weights[ind1];
-									const XMFLOAT4 region2 = chunk_data.region_weights[ind2];
-									// random barycentric coords on the triangle:
-									float f = float_distr(prop_rand);
-									float g = float_distr(prop_rand);
-									if (f + g > 1)
+									int x0 = 0;
+									int x1 = 0;
+									grass_cell_quads(cx, cells, x0, x1);
+									const float min_x = origin_x + float(x0) * chunk_scale;
+									const float max_x = origin_x + float(x1) * chunk_scale;
+									if (!grass_rect_in_range(min_x, max_x, min_z, max_z, cam_x, cam_z, view))
+										continue;
+									bool exists = false;
+									for (const ChunkData::GrassPatch& patch : chunk_data.grass_patches)
 									{
-										f = 1 - f;
-										g = 1 - g;
+										if (patch.region == (uint32_t)region && patch.x0 == (uint32_t)x0 && patch.z0 == (uint32_t)z0)
+										{
+											exists = true;
+											break;
+										}
 									}
-									XMFLOAT3 vertex_pos;
-									vertex_pos.x = pos0.x + f * (pos1.x - pos0.x) + g * (pos2.x - pos0.x);
-									vertex_pos.y = pos0.y + f * (pos1.y - pos0.y) + g * (pos2.y - pos0.y);
-									vertex_pos.z = pos0.z + f * (pos1.z - pos0.z) + g * (pos2.z - pos0.z);
-									XMFLOAT4 region;
-									region.x = region0.x + f * (region1.x - region0.x) + g * (region2.x - region0.x);
-									region.y = region0.y + f * (region1.y - region0.y) + g * (region2.y - region0.y);
-									region.z = region0.z + f * (region1.z - region0.z) + g * (region2.z - region0.z);
-									region.w = region0.w + f * (region1.w - region0.w) + g * (region2.w - region0.w);
+									if (exists)
+										continue;
+									const uint32_t base = count_grass_vertices(lengths, x0, z0, x1, z1);
+									if (base == 0)
+										continue;
 
-									const float noise = std::pow(perlin_noise.compute((vertex_pos.x + chunk_data.position.x) * prop.noise_frequency, vertex_pos.y * prop.noise_frequency, (vertex_pos.z + chunk_data.position.z) * prop.noise_frequency) * 0.5f + 0.5f, prop.noise_power);
-									const float chance = std::pow(((float*)&region)[prop.region], prop.region_power) * noise;
-									if (chance > prop.threshold)
+									ChunkData::GrassPatch& patch = chunk_data.grass_patches.emplace_back();
+									patch.region = (uint32_t)region;
+									patch.x0 = (uint32_t)x0;
+									patch.z0 = (uint32_t)z0;
+									patch.x1 = (uint32_t)x1;
+									patch.z1 = (uint32_t)z1;
+									patch.base_strand_count = grass_strand_count(base, chunk_scale, 1.0f);
+									patch.entity = CreateEntity();
+
+									wi::HairParticleSystem& grass = generator->scene.hairs.Create(patch.entity);
+									grass = grass_region_properties[region];
+									grass.viewDistance = grass_properties.viewDistance;
+									grass.meshID = chunk_data.entity;
+									grass.vertex_lengths = lengths;
+									grass.indices.clear();
+									grass.strandCount = 0;
+									chunk_data.grass_density_current = grass_density;
+									build_grass_index_range(grass, patch.x0, patch.z0, patch.x1, patch.z1);
+									if (grass.indices.empty())
 									{
-										wi::Archive archive = wi::Archive(prop.data.data());
-										EntitySerializer seri;
-										Entity entity = generator->scene.Entity_Serialize(
-											archive,
-											seri,
-											INVALID_ENTITY,
-											wi::scene::Scene::EntitySerializeFlags::RECURSIVE |
-											wi::scene::Scene::EntitySerializeFlags::KEEP_INTERNAL_ENTITY_REFERENCES
-										);
-										NameComponent* name = generator->scene.names.GetComponent(entity);
-										if (name != nullptr)
-										{
-											name->name += std::to_string(i);
-										}
-										TransformComponent* transform = generator->scene.transforms.GetComponent(entity);
-										if (transform == nullptr)
-										{
-											transform = &generator->scene.transforms.Create(entity);
-										}
-										transform->translation_local = vertex_pos;
-										transform->translation_local.y += wi::math::Lerp(prop.min_y_offset, prop.max_y_offset, float_distr(prop_rand));
-										const float scaling = wi::math::Lerp(prop.min_size, prop.max_size, float_distr(prop_rand));
-										transform->Scale(XMFLOAT3(scaling, scaling, scaling));
-										transform->RotateRollPitchYaw(XMFLOAT3(0, XM_2PI * float_distr(prop_rand), 0));
-										transform->SetDirty();
-										transform->UpdateTransform();
-										generator->scene.Component_Attach(entity, chunk_data.props_entity, true);
-										generated_something = true;
+										generator->scene.Entity_Remove(patch.entity);
+										patch.entity = INVALID_ENTITY;
+										patch.base_strand_count = 0;
+										continue;
+									}
+									grass.strandCount = grass_patch_strand_count(*this, (uint32_t)region, base, chunk_scale);
+									grass.CreateRenderData();
+									generator->scene.materials.Create(patch.entity) = grass_region_materials[region];
+									generator->scene.transforms.Create(patch.entity);
+									generator->scene.names.Create(patch.entity) = "grass_" + std::to_string(region) + "_" + std::to_string(x0) + "_" + std::to_string(z0);
+									generator->scene.Component_Attach(patch.entity, chunk_data.entity, true);
+									generated_something = true;
+									if (timer.elapsed_milliseconds() > generation_time_budget_milliseconds)
+									{
+										budget_hit = true;
+										break;
 									}
 								}
 							}
-							if (!IsPhysicsEnabled())
-							{
-								generator->scene.rigidbodies.Clear();
-							}
 						}
 					}
 				}
 
+
+				it = chunks.find(chunk); // re-query!
+				if (it != chunks.end() && it->second.entity != INVALID_ENTITY)
+				{
+					ChunkData& chunk_data = it->second;
+					chunk_data.invalidated = false;
+				}
+			};
+
+			// Generate chunks in batches so several build concurrently across
+			//  the job pool. setup_chunk() (which mutates the scene) runs
+			//  serially up front for the whole batch, so the component managers
+			//  stay stable while the build jobs run; the batch is then placed
+			//  (grass) before moving on.
+			//  generator->build_batch is reused across runs: clear() keeps its
+			//  capacity, so after the first run it never reallocates.
+			const uint32_t batch_capacity = std::max(
+				1u,
+				wi::jobsystem::GetThreadCount(wi::jobsystem::Priority::Low)
+			);
+			generator->build_batch.clear();
+			generator->build_batch.reserve(batch_capacity);
+
+			wi::jobsystem::context build_ctx;
+			build_ctx.priority = wi::jobsystem::Priority::Low;
+
+			// Set up and build every chunk queued in the batch, then clear it.
+			// Returns false if the per-frame time budget was exceeded (the
+			// caller should stop).
+			auto flush_build_batch = [&]() -> bool {
+				if (generator->build_batch.empty())
+				{
+					return true;
+				}
+
+				for (const Chunk& chunk : generator->build_batch)
+				{
+					setup_chunk(chunk);
+				}
+
+				wi::jobsystem::Dispatch(
+					build_ctx,
+					uint32_t(generator->build_batch.size()),
+					1,
+					[&](wi::jobsystem::JobArgs args)
+				{
+					build_chunk(generator->build_batch[args.jobIndex]);
+				});
+
+				wi::jobsystem::Wait(build_ctx);
+				generated_something = true;
+
+				// Place grass on the chunks we just built:
+				for (const Chunk& chunk : generator->build_batch)
+				{
+					place_chunk(chunk);
+				}
+
+				generator->build_batch.clear();
+
+				if (timer.elapsed_milliseconds() > generation_time_budget_milliseconds)
+				{
+					generator->cancelled.store(true);
+
+					return false;
+				}
+
+				return true;
+			};
+
+			auto request_chunk = [&](int offset_x, int offset_z) -> bool {
+				Chunk chunk = center_chunk;
+				chunk.x += offset_x;
+				chunk.z += offset_z;
+				auto it = chunks.find(chunk);
+
+				if (it == chunks.end()
+					|| it->second.entity == INVALID_ENTITY
+					|| it->second.invalidated
+				) {
+					for (const Chunk& queued : generator->build_batch)
+					{
+						if (queued == chunk)
+						{
+							return true;
+						}
+					}
+					generator->build_batch.push_back(chunk);
+
+					if (generator->build_batch.size() >= batch_capacity)
+					{
+						return flush_build_batch();
+					}
+
+					return true;
+				}
+
+				// Already generated: place grass now, within the time budget.
+				place_chunk(chunk);
 				if (generated_something && timer.elapsed_milliseconds() > generation_time_budget_milliseconds)
 				{
 					generator->cancelled.store(true);
+
+					return false;
 				}
 
+				return true;
+			};
+			auto request_props = [&](int offset_x, int offset_z) -> bool {
+				Chunk prop_chunk = prop_center_chunk;
+				prop_chunk.x += offset_x;
+				prop_chunk.z += offset_z;
+				if (PlacePropChunk(prop_chunk))
+				{
+					generated_something = true;
+					if (timer.elapsed_milliseconds() > generation_time_budget_milliseconds)
+					{
+						generator->cancelled.store(true);
+						return false;
+					}
+				}
+				return !generator->cancelled.load();
 			};
 
-			// generate center chunk first:
-			request_chunk(0, 0);
-			if (generator->cancelled.load()) return;
+			auto request_chunk_spiral = [&](int start, int radius) {
+				if (generator->cancelled.load())
+					return;
+				if (!request_chunk(0, 0))
+					return;
 
-			// then generate neighbor chunks in outward spiral:
-			for (int growth = 0; growth < generation; ++growth)
+				for (int growth = start; growth < radius; ++growth)
+				{
+					const int side = 2 * (growth + 1);
+					int x = -growth - 1;
+					int z = -growth - 1;
+					for (int i = 0; i < side; ++i)
+					{
+						if (!request_chunk(x, z))
+						{
+							return;
+						}
+						x++;
+					}
+					for (int i = 0; i < side; ++i)
+					{
+						if (!request_chunk(x, z))
+						{
+							return;
+						}
+						z++;
+					}
+					for (int i = 0; i < side; ++i)
+					{
+						if (!request_chunk(x, z))
+						{
+							return;
+						}
+						x--;
+					}
+					for (int i = 0; i < side; ++i)
+					{
+						if (!request_chunk(x, z))
+						{
+							return;
+						}
+						z--;
+					}
+				}
+				flush_build_batch();
+			};
+
+			auto request_prop_spiral = [&](int start, int radius) {
+				if (generator->cancelled.load())
+					return;
+				if (!(prop_density > 0.0f) || props.empty())
+					return;
+				if (!request_props(0, 0))
+					return;
+
+				for (int growth = start; growth < radius; ++growth)
+				{
+					const int side = 2 * (growth + 1);
+					int x = -growth - 1;
+					int z = -growth - 1;
+					for (int i = 0; i < side; ++i)
+					{
+						if (!request_props(x, z))
+						{
+							return;
+						}
+						x++;
+					}
+					for (int i = 0; i < side; ++i)
+					{
+						if (!request_props(x, z))
+						{
+							return;
+						}
+						z++;
+					}
+					for (int i = 0; i < side; ++i)
+					{
+						if (!request_props(x, z))
+						{
+							return;
+						}
+						x--;
+					}
+					for (int i = 0; i < side; ++i)
+					{
+						if (!request_props(x, z))
+						{
+							return;
+						}
+						z--;
+					}
+				}
+			};
+
+			// priority invalidation queue:
+			//	This doesn't necessarily finish every frame, that's why it's a queue, next frame will pick up earlier requests before newer ones
+			while (!generator->priority_invalidation.empty())
 			{
-				const int side = 2 * (growth + 1);
-				int x = -growth - 1;
-				int z = -growth - 1;
-				for (int i = 0; i < side; ++i)
+				Chunk chunk = generator->priority_invalidation.front();
+				generator->priority_invalidation.pop_front();
+				auto it = chunks.find(chunk);
+				if (it != chunks.end() && it->second.invalidated) // Check here too in this special case, because multiple of the same entries can easily exist on the queue. Already refreshes chunks will not be refreshed again
 				{
-					request_chunk(x, z);
-					if (generator->cancelled.load()) return;
-					x++;
-				}
-				for (int i = 0; i < side; ++i)
-				{
-					request_chunk(x, z);
-					if (generator->cancelled.load()) return;
-					z++;
-				}
-				for (int i = 0; i < side; ++i)
-				{
-					request_chunk(x, z);
-					if (generator->cancelled.load()) return;
-					x--;
-				}
-				for (int i = 0; i < side; ++i)
-				{
-					request_chunk(x, z);
-					if (generator->cancelled.load()) return;
-					z--;
+					if (!request_chunk(chunk.x - center_chunk.x, chunk.z - center_chunk.z))
+					{
+						return;
+					}
 				}
 			}
 
-			});
+			const int gen_loop = std::max(generation, prop_generation);
+			for (int i = 0; i < gen_loop; ++i)
+			{
+				if (generator->cancelled.load())
+					return;
+
+				if (i < generation)
+				{
+					request_chunk_spiral(i, i + 1);
+				}
+
+				if (i < prop_generation)
+				{
+					request_prop_spiral(i, i + 1);
+				}
+			}
+
+		});
 
 	}
 
@@ -1036,46 +2414,86 @@ namespace wi::terrain
 		generator->cancelled.store(false); // the next generation can run
 	}
 
+	bool Terrain::IsGenerationBusy() const
+	{
+		if (generator == nullptr)
+			return false;
+		return wi::jobsystem::IsBusy(generator->workload);
+	}
+
 	void Terrain::CreateChunkRegionTexture(ChunkData& chunk_data)
 	{
-		if (!chunk_data.region_weights_texture.IsValid())
+		GraphicsDevice* device = GetDevice();
+
+		if (!chunk_data.heightmap.IsValid() && !chunk_data.heightmap_data.empty())
 		{
-			GraphicsDevice* device = GetDevice();
 			TextureDesc desc;
 			desc.width = (uint32_t)chunk_width;
 			desc.height = (uint32_t)chunk_width;
-			desc.format = Format::R8G8B8A8_UNORM;
+			desc.format = Format::R16_UNORM;
 			desc.bind_flags = BindFlag::SHADER_RESOURCE;
+
 			SubresourceData data;
-			data.data_ptr = chunk_data.region_weights.data();
-			data.row_pitch = chunk_width * sizeof(chunk_data.region_weights[0]);
-			bool success = device->CreateTexture(&desc, &data, &chunk_data.region_weights_texture);
+			data.data_ptr = chunk_data.heightmap_data.data();
+			data.row_pitch = chunk_width * sizeof(uint16_t);
+
+			bool success = device->CreateTexture(&desc, &data, &chunk_data.heightmap);
 			assert(success);
+			device->SetName(&chunk_data.heightmap, "wi::terrain::ChunkData::heightmap");
+		}
+
+		const uint32_t required_layers = uint32_t(chunk_data.blendmap_layers.size() + chunk_data.spline_blendmap_layers.size());
+		if (!chunk_data.blendmap.IsValid() || chunk_data.blendmap.desc.array_size != required_layers)
+		{
+			TextureDesc desc;
+			desc.width = (uint32_t)chunk_width;
+			desc.height = (uint32_t)chunk_width;
+			desc.array_size = required_layers;
+			desc.format = Format::R8_UNORM;
+			desc.bind_flags = BindFlag::SHADER_RESOURCE;
+
+			wi::vector<SubresourceData> data(required_layers);
+			for (size_t i = 0; i < chunk_data.blendmap_layers.size(); ++i)
+			{
+				data[i].data_ptr = chunk_data.blendmap_layers[i].pixels.data();
+				data[i].row_pitch = chunk_width * sizeof(uint8_t);
+			}
+			const size_t offset = chunk_data.blendmap_layers.size();
+			for (size_t i = 0; i < chunk_data.spline_blendmap_layers.size(); ++i)
+			{
+				data[offset + i].data_ptr = chunk_data.spline_blendmap_layers[i].pixels.data();
+				data[offset + i].row_pitch = chunk_width * sizeof(uint8_t);
+			}
+
+			bool success = device->CreateTexture(&desc, data.data(), &chunk_data.blendmap);
+			assert(success);
+			device->SetName(&chunk_data.blendmap, "wi::terrain::ChunkData::blendmap");
 		}
 	}
 
 	void Terrain::UpdateVirtualTexturesCPU()
 	{
+		wi::jobsystem::Wait(virtual_texture_ctx);
+		virtual_texture_ctx.priority = wi::jobsystem::Priority::Low;
+
 		GraphicsDevice* device = GetDevice();
 		virtual_textures_in_use.clear();
-		virtual_texture_barriers_before_update.clear();
-		virtual_texture_barriers_after_update.clear();
-		virtual_texture_barriers_before_allocation.clear();
-		virtual_texture_barriers_after_allocation.clear();
 
 		if (!sampler.IsValid())
 		{
 			SamplerDesc samplerDesc;
 			samplerDesc.filter = Filter::ANISOTROPIC;
-			samplerDesc.max_anisotropy = 8; // The atlas tile border can take up to 8x anisotropic
-			samplerDesc.address_u = TextureAddressMode::CLAMP;
-			samplerDesc.address_v = TextureAddressMode::CLAMP;
-			samplerDesc.address_w = TextureAddressMode::CLAMP;
+			samplerDesc.max_anisotropy = 4;
+			// Note: using wrap mode by intention!
+			//	Terrain itself doesn't need wrap mode, but decals will reuse the base material's sampler
+			//	and decals can use wrapped textures (texmuladd)
+			samplerDesc.address_u = TextureAddressMode::WRAP;
+			samplerDesc.address_v = TextureAddressMode::WRAP;
+			samplerDesc.address_w = TextureAddressMode::WRAP;
 			bool success = device->CreateSampler(&samplerDesc, &sampler);
 			assert(success);
 		}
 
-		wi::jobsystem::context ctx;
 		for (auto& it : chunks)
 		{
 			const Chunk& chunk = it.first;
@@ -1093,16 +2511,16 @@ namespace wi::terrain
 
 			if (!atlas.IsValid())
 			{
-				const uint32_t physical_width = 16384u;
-				const uint32_t physical_height = 8192u;
 				GPUBufferDesc tile_pool_desc;
 
 				for (uint32_t map_type = 0; map_type < arraysize(atlas.maps); ++map_type)
 				{
 					TextureDesc desc;
-					desc.width = physical_width;
-					desc.height = physical_height;
+					desc.width = atlas_physical_width;
+					desc.height = atlas_physical_height;
+#ifndef NOSPARSE
 					desc.misc_flags = ResourceMiscFlag::SPARSE;
+#endif // NOSPARSE
 					desc.bind_flags = BindFlag::SHADER_RESOURCE;
 					desc.mip_levels = 1;
 					desc.layout = ResourceState::SHADER_RESOURCE_COMPUTE;
@@ -1116,12 +2534,18 @@ namespace wi::terrain
 					switch (map_type)
 					{
 					default:
+					case MaterialComponent::BASECOLORMAP:
+					case MaterialComponent::EMISSIVEMAP:
 						desc.format = Format::BC1_UNORM_SRGB;
 						desc_raw_block.format = Format::R32G32_UINT;
 						break;
 					case MaterialComponent::NORMALMAP:
 						desc.format = Format::BC5_UNORM;
 						desc_raw_block.format = Format::R32G32B32A32_UINT;
+						desc.swizzle.r = ComponentSwizzle::R;
+						desc.swizzle.g = ComponentSwizzle::G;
+						desc.swizzle.b = ComponentSwizzle::ONE;
+						desc.swizzle.a = ComponentSwizzle::ONE;
 						break;
 					case MaterialComponent::SURFACEMAP:
 						desc.format = Format::BC3_UNORM;
@@ -1131,15 +2555,19 @@ namespace wi::terrain
 
 					bool success = device->CreateTexture(&desc, nullptr, &atlas.maps[map_type].texture);
 					assert(success);
+					device->SetName(&atlas.maps[map_type].texture, "VirtualTextureAtlas::texture");
 
 					success = device->CreateTexture(&desc_raw_block, nullptr, &atlas.maps[map_type].texture_raw_block);
 					assert(success);
+					device->SetName(&atlas.maps[map_type].texture_raw_block, "VirtualTextureAtlas::texture_raw_block");
 
+#ifndef NOSPARSE
 					assert(atlas.maps[map_type].texture.sparse_properties->total_tile_count == atlas.maps[map_type].texture_raw_block.sparse_properties->total_tile_count);
 					assert(atlas.maps[map_type].texture.sparse_page_size == atlas.maps[map_type].texture_raw_block.sparse_page_size);
 
 					tile_pool_desc.size += atlas.maps[map_type].texture.sparse_properties->total_tile_count * atlas.maps[map_type].texture.sparse_page_size;
 					tile_pool_desc.alignment = std::max(tile_pool_desc.alignment, atlas.maps[map_type].texture.sparse_page_size);
+#endif // NOSPARSE
 
 					for (uint32_t i = 0; i < atlas.maps[map_type].texture_raw_block.desc.mip_levels; ++i)
 					{
@@ -1148,25 +2576,31 @@ namespace wi::terrain
 					}
 				}
 
-				tile_pool_desc.misc_flags = ResourceMiscFlag::SPARSE_TILE_POOL_TEXTURE_NON_RT_DS;
+#ifndef NOSPARSE
+				tile_pool_desc.misc_flags = ResourceMiscFlag::ALIASING_TEXTURE_NON_RT_DS;
 				bool success = device->CreateBuffer(&tile_pool_desc, nullptr, &atlas.tile_pool);
 				assert(success);
+#endif // NOSPARSE
 
-				const uint32_t physical_tile_count_x = physical_width / SVT_TILE_SIZE_PADDED;
-				const uint32_t physical_tile_count_y = physical_height / SVT_TILE_SIZE_PADDED;
+				atlas.physical_tile_count_x = uint8_t(atlas_physical_width / SVT_TILE_SIZE_PADDED);
+				atlas.physical_tile_count_y = uint8_t(atlas_physical_height / SVT_TILE_SIZE_PADDED);
+				atlas.physical_tiles.resize(size_t(atlas.physical_tile_count_x) * size_t(atlas.physical_tile_count_y));
 
+				uint64_t init_frames = 0;
 				atlas.free_tiles.clear();
-				atlas.free_tiles.reserve(physical_tile_count_x * physical_tile_count_y);
-				for (uint8_t y = 0; y < physical_tile_count_y; ++y)
+				atlas.free_tiles.reserve(atlas.physical_tile_count_x * atlas.physical_tile_count_y);
+				for (uint8_t y = 0; y < atlas.physical_tile_count_y; ++y)
 				{
-					for (uint8_t x = 0; x < physical_tile_count_x; ++x)
+					for (uint8_t x = 0; x < atlas.physical_tile_count_x; ++x)
 					{
 						VirtualTextureAtlas::Tile& tile = atlas.free_tiles.emplace_back();
 						tile.x = x;
 						tile.y = y;
+						atlas.physical_tiles[x + y * atlas.physical_tile_count_x].free_frames = ++init_frames;
 					}
 				}
 
+#ifndef NOSPARSE
 				uint32_t offset = 0;
 				for (uint32_t map_type = 0; map_type < arraysize(atlas.maps); ++map_type)
 				{
@@ -1190,20 +2624,19 @@ namespace wi::terrain
 					commands[0].range_tile_counts = &count;
 					commands[1] = commands[0];
 					commands[1].sparse_resource = &atlas.maps[map_type].texture_raw_block;
-					device->SparseUpdate(QUEUE_COPY, commands, arraysize(commands));
+					device->SparseUpdate(QUEUE_COMPUTE, commands, arraysize(commands));
 					offset += count;
 				}
+#endif // NOSPARSE
 			}
 
 			if (chunk_data.vt == nullptr)
 			{
-				chunk_data.vt = std::make_shared<VirtualTexture>();
+				chunk_data.vt = wi::allocator::make_shared<VirtualTexture>();
 			}
 			VirtualTexture& vt = *chunk_data.vt;
 
-			const uint32_t min_resolution = SVT_TILE_SIZE;
-			const uint32_t max_resolution = 65536u;
-			const uint32_t required_resolution = dist < 2 ? max_resolution : min_resolution;
+			const uint32_t required_resolution = dist < 2 ? max_virtual_resolution : min_virtual_resolution;
 			//const uint32_t required_resolution = std::max(min_resolution, max_resolution >> std::min(7, std::max(0, dist - 1)));
 
 			if (vt.resolution != required_resolution)
@@ -1216,6 +2649,7 @@ namespace wi::terrain
 					if (vt.residency != nullptr)
 					{
 						material->texMulAdd = XMFLOAT4(1, 1, 0, 0);
+						material->textures[map_type].virtual_anisotropy = sampler.desc.max_anisotropy;
 						material->textures[map_type].sparse_residencymap_descriptor = device->GetDescriptorIndex(&vt.residency->residencyMap, SubresourceType::SRV);
 						if (map_type == 0)
 						{
@@ -1226,6 +2660,7 @@ namespace wi::terrain
 						{
 							material->textures[map_type].sparse_feedbackmap_descriptor = -1;
 						}
+						material->textures[map_type].resource.SetTextureVirtual(atlas.tile_pool, vt.residency->residencyMap, vt.residency->feedbackMap);
 					}
 					else
 					{
@@ -1244,36 +2679,57 @@ namespace wi::terrain
 						}
 						material->textures[map_type].sparse_residencymap_descriptor = -1;
 						material->textures[map_type].sparse_feedbackmap_descriptor = -1;
+						material->textures[map_type].resource.SetTextureVirtual(atlas.tile_pool, Texture(), Texture());
 					}
 					material->textures[map_type].lod_clamp = (float)vt.lod_count - 2;
 				}
-				vt.region_weights_texture = chunk_data.region_weights_texture;
+				vt.blendmap = chunk_data.blendmap;
 			}
 
 			virtual_textures_in_use.push_back(&vt);
 
-
 			if (vt.residency == nullptr)
 				continue;
+		}
 
-			// Process each virtual texture on a background thread:
-			wi::jobsystem::Execute(ctx, [this, &vt](wi::jobsystem::JobArgs args) {
+		wi::jobsystem::Execute(virtual_texture_ctx, [this](wi::jobsystem::JobArgs args) {
 
-				const uint32_t width = vt.residency->feedbackMap.desc.width;
-				const uint32_t height = vt.residency->feedbackMap.desc.height;
+			// Update state of physical tiles:
+			//	Potentially each physical tile is getting marked as unused here (free_frames > 0), unless GPU requested them to be resident
+			for (auto& x : atlas.physical_tiles)
+			{
+				x.free_frames++;
+			}
+
+			// Process GPU allocation requests from last frame:
+			//	GPU writes allocation requests by virtualTextureTileAllocateCS.hlsl compute shader
+			for (VirtualTexture* vt : virtual_textures_in_use)
+			{
+				// Last two tiles (last non-packed and packed mips) always kept resident:
+				if (vt->tiles.size() > 0)
+				{
+					atlas.request_residency(vt->tiles[vt->tiles.size() - 1]);
+					if (vt->tiles.size() > 1)
+					{
+						atlas.request_residency(vt->tiles[vt->tiles.size() - 2]);
+					}
+				}
+				if (vt->residency == nullptr)
+					continue;
+
+				const uint32_t width = vt->residency->feedbackMap.desc.width;
+				const uint32_t height = vt->residency->feedbackMap.desc.height;
 
 				// We must only access persistently mapped resources by CPU that the GPU is not using currently:
-				vt.residency->cpu_resource_id = (vt.residency->cpu_resource_id + 1) % arraysize(vt.residency->allocationBuffer_CPU_readback);
-				const bool data_available_CPU = vt.residency->data_available_CPU[vt.residency->cpu_resource_id]; // indicates whether any GPU data is readable at this point or not
-				vt.residency->data_available_CPU[vt.residency->cpu_resource_id] = true;
+				vt->residency->cpu_resource_id = (vt->residency->cpu_resource_id + 1) % arraysize(vt->residency->allocationBuffer_CPU_readback);
+				const bool data_available_CPU = vt->residency->data_available_CPU[vt->residency->cpu_resource_id]; // indicates whether any GPU data is readable at this point or not
+				vt->residency->data_available_CPU[vt->residency->cpu_resource_id] = true;
 
-				// Perform the allocations and deallocations:
-				//	GPU writes allocation requests by virtualTextureTileAllocateCS.hlsl compute shader
-				if (vt.residency->data_available_CPU)
+				if (data_available_CPU)
 				{
 					uint32_t page_count = 0;
 					uint32_t lod_offsets[10] = {};
-					for (uint32_t i = 0; i < vt.lod_count; ++i)
+					for (uint32_t i = 0; i < vt->lod_count; ++i)
 					{
 						const uint32_t l_width = std::max(1u, width >> i);
 						const uint32_t l_height = std::max(1u, height >> i);
@@ -1281,19 +2737,16 @@ namespace wi::terrain
 						page_count += l_width * l_height;
 					}
 
-					uint32_t allocation_count = *(const uint32_t*)vt.residency->allocationBuffer_CPU_readback[vt.residency->cpu_resource_id].mapped_data;
-					allocation_count = std::min(uint32_t(vt.tiles.size() - 1), allocation_count);
-					//allocation_count = std::min(100u, allocation_count);
-					const uint32_t* allocation_requests = ((const uint32_t*)vt.residency->allocationBuffer_CPU_readback[vt.residency->cpu_resource_id].mapped_data) + 1; // +1 offset of the allocation counter
+					uint32_t allocation_count = *(const uint32_t*)vt->residency->allocationBuffer_CPU_readback[vt->residency->cpu_resource_id].mapped_data;
+					allocation_count = std::min(uint32_t(vt->tiles.size() - 1), allocation_count);
+					const uint32_t* allocation_requests = ((const uint32_t*)vt->residency->allocationBuffer_CPU_readback[vt->residency->cpu_resource_id].mapped_data) + 1; // +1 offset of the allocation counter
 					for (uint32_t i = 0; i < allocation_count; ++i)
 					{
 						const uint32_t allocation_request = allocation_requests[i];
 						const uint8_t x = (allocation_request >> 24u) & 0xFF;
 						const uint8_t y = (allocation_request >> 16u) & 0xFF;
 						const uint8_t lod = (allocation_request >> 8u) & 0xFF;
-						const bool allocate = allocation_request & 0x1;
-						const bool must_be_always_resident = (int)lod >= ((int)vt.lod_count - 2);
-						if (lod >= vt.lod_count)
+						if (lod >= vt->lod_count)
 							continue;
 						const uint32_t l_offset = lod_offsets[lod];
 						const uint32_t l_width = std::max(1u, width >> lod);
@@ -1301,80 +2754,92 @@ namespace wi::terrain
 						const uint32_t l_index = l_offset + x + y * l_width;
 						if (x >= l_width || y >= l_height)
 							continue;
-						VirtualTextureAtlas::Tile& tile = vt.tiles[l_index];
 
-						if (allocate)
+						VirtualTextureAtlas::Tile& tile = vt->tiles[l_index];
+						if (!atlas.request_residency(tile))
 						{
-							if (tile.IsValid())
-							{
-								continue;
-							}
-							locker.lock();
-							tile = atlas.allocate_tile();
-							locker.unlock();
-
-							if (tile.IsValid())
-							{
-								VirtualTexture::UpdateRequest& request = vt.update_requests.emplace_back();
-								request.x = x;
-								request.y = y;
-								request.lod = lod;
-								request.tile_x = tile.x;
-								request.tile_y = tile.y;
-							}
-						}
-						else if (!must_be_always_resident)
-						{
-							if (!tile.IsValid())
-							{
-								continue;
-							}
-							locker.lock();
-							atlas.free_tile(tile);
-							locker.unlock();
+							// The request_residency returned false, meaning it is not resident, so it will need to be allocated
+							//	Allocation can be made only after all GPU requests have been processed, because some of them will
+							//	remain resident, and those occupied tiles shoudln't be given out right now
+							VirtualTexture::AllocationRequest& request = vt->allocation_requests.emplace_back();
+							request.x = x;
+							request.y = y;
+							request.lod = lod;
+							request.tile_index = l_index;
 						}
 					}
 				}
+			}
+
+			// Determine reusable tiles:
+			//	After all GPU requests were processed, we can make the unused tiles available for allocations
+			atlas.free_tiles.clear();
+			for (uint8_t y = 0; y < atlas.physical_tile_count_y; ++y)
+			{
+				for (uint8_t x = 0; x < atlas.physical_tile_count_x; ++x)
+				{
+					if (atlas.physical_tiles[x + y * atlas.physical_tile_count_x].free_frames > 0)
+					{
+						VirtualTextureAtlas::Tile& tile = atlas.free_tiles.emplace_back();
+						tile.x = x;
+						tile.y = y;
+					}
+				}
+			}
+			// Sort them by unused frame counts, this will make them be given out in least recently used (LRU) order:
+			std::sort(atlas.free_tiles.begin(), atlas.free_tiles.end(), [&](const VirtualTextureAtlas::Tile& a, const VirtualTextureAtlas::Tile& b) {
+				return atlas.get_tile_frames(a) < atlas.get_tile_frames(b);
+			});
+
+			// Fulfill new allocation requests:
+			for (VirtualTexture* vt : virtual_textures_in_use)
+			{
+				for (auto& alloc_request : vt->allocation_requests)
+				{
+					VirtualTextureAtlas::Tile& tile = vt->tiles[alloc_request.tile_index];
+					if (atlas.allocate_tile(tile))
+					{
+						VirtualTexture::UpdateRequest& request = vt->update_requests.emplace_back();
+						request.x = (uint16_t)alloc_request.x;
+						request.y = (uint16_t)alloc_request.y;
+						request.lod = (uint16_t)alloc_request.lod;
+						request.tile_x = tile.x;
+						request.tile_y = tile.y;
+					}
+				}
+				vt->allocation_requests.clear();
+			}
+
+			for (VirtualTexture* vt : virtual_textures_in_use)
+			{
+				if (vt->residency == nullptr)
+					continue;
 
 				// Update page buffer for GPU:
-				uint32_t* page_buffer = (uint32_t*)vt.residency->pageBuffer_CPU_upload[vt.residency->cpu_resource_id].mapped_data;
-				for (size_t i = 0; i < vt.tiles.size(); ++i)
+				//	This must be after VirtualTextureAtlas::physical_tiles is no longer being updated
+				uint16_t* page_buffer = (uint16_t*)vt->residency->pageBuffer_CPU_upload[vt->residency->cpu_resource_id].mapped_data;
+				for (size_t i = 0; i < vt->tiles.size(); ++i)
 				{
-					uint32_t page = uint32_t(uint32_t(vt.tiles[i].x) | (uint32_t(vt.tiles[i].y) << 8u));
+					if (!atlas.check_tile_resident(vt->tiles[i]))
+					{
+						vt->tiles[i] = {};
+					}
+					uint16_t page = vt->tiles[i];
 					// force memcpy into uncached memory to avoid read stall by mistake:
 					std::memcpy(page_buffer + i, &page, sizeof(page));
 				}
-
-			});
-
-			virtual_texture_barriers_before_update.push_back(GPUBarrier::Buffer(&vt.residency->pageBuffer, ResourceState::COPY_DST, ResourceState::SHADER_RESOURCE_COMPUTE));
-			virtual_texture_barriers_before_update.push_back(GPUBarrier::Image(&vt.residency->feedbackMap, vt.residency->feedbackMap.desc.layout, ResourceState::UNORDERED_ACCESS));
-			virtual_texture_barriers_before_update.push_back(GPUBarrier::Image(&vt.residency->residencyMap, vt.residency->residencyMap.desc.layout, ResourceState::UNORDERED_ACCESS));
-			virtual_texture_barriers_after_update.push_back(GPUBarrier::Image(&vt.residency->residencyMap, ResourceState::UNORDERED_ACCESS, vt.residency->residencyMap.desc.layout));
-			virtual_texture_barriers_before_allocation.push_back(GPUBarrier::Image(&vt.residency->feedbackMap, ResourceState::UNORDERED_ACCESS, vt.residency->feedbackMap.desc.layout));
-			virtual_texture_barriers_after_allocation.push_back(GPUBarrier::Buffer(&vt.residency->allocationBuffer, ResourceState::UNORDERED_ACCESS, ResourceState::COPY_SRC));
-		}
-		wi::jobsystem::Wait(ctx);
+			}
+		});
 	}
 
 	void Terrain::UpdateVirtualTexturesGPU(CommandList cmd) const
 	{
+		wi::jobsystem::Wait(virtual_texture_ctx);
 		GraphicsDevice* device = GetDevice();
 		device->EventBegin("Terrain - UpdateVirtualTexturesGPU", cmd);
 		auto range = wi::profiler::BeginRangeGPU("Terrain - UpdateVirtualTexturesGPU", cmd);
 
-		device->Barrier(virtual_texture_barriers_before_update.data(), (uint32_t)virtual_texture_barriers_before_update.size(), cmd);
-
-		device->EventBegin("Clear Metadata", cmd);
-		for (const VirtualTexture* vt : virtual_textures_in_use)
-		{
-			if (vt->residency == nullptr)
-				continue;
-			device->ClearUAV(&vt->residency->feedbackMap, 0xFF, cmd);
-			device->ClearUAV(&vt->residency->requestBuffer, 0xFF, cmd);
-			device->ClearUAV(&vt->residency->allocationBuffer, 0, cmd);
-		}
-		device->EventEnd(cmd);
+		device->Barrier(GPUBarrier::Memory(), cmd); // on Apple this fixes corruption so better be safe on all platforms, do not remove
 
 		device->EventBegin("Update Residency Maps", cmd);
 		device->BindComputeShader(wi::renderer::GetShader(wi::enums::CSTYPE_VIRTUALTEXTURE_RESIDENCYUPDATE), cmd);
@@ -1410,37 +2875,66 @@ namespace wi::terrain
 		device->EventEnd(cmd);
 
 		device->EventBegin("Render Tile Regions", cmd);
-
-		ShaderMaterial materials[4];
-		material_Base.WriteShaderMaterial(&materials[0]);
-		material_Slope.WriteShaderMaterial(&materials[1]);
-		material_LowAltitude.WriteShaderMaterial(&materials[2]);
-		material_HighAltitude.WriteShaderMaterial(&materials[3]);
-		device->BindDynamicConstantBuffer(materials, 0, cmd);
-
-		for (uint32_t map_type = 0; map_type < 3; map_type++)
+		wi::renderer::BindCommonResources(cmd);
+		for (const VirtualTexture* vt : virtual_textures_in_use)
 		{
-			switch (map_type)
+			if (vt->update_requests.empty())
+				continue;
+			for (uint32_t map_type = 0; map_type < arraysize(atlas.maps); map_type++)
 			{
-			case MaterialComponent::BASECOLORMAP:
-				device->BindComputeShader(wi::renderer::GetShader(wi::enums::CSTYPE_TERRAIN_VIRTUALTEXTURE_UPDATE_BASECOLORMAP), cmd);
-				device->BindUAV(&atlas.maps[MaterialComponent::BASECOLORMAP].texture_raw_block, 0, cmd);
-				break;
-			case MaterialComponent::NORMALMAP:
-				device->BindComputeShader(wi::renderer::GetShader(wi::enums::CSTYPE_TERRAIN_VIRTUALTEXTURE_UPDATE_NORMALMAP), cmd);
-				device->BindUAV(&atlas.maps[MaterialComponent::NORMALMAP].texture_raw_block, 0, cmd);
-				break;
-			case MaterialComponent::SURFACEMAP:
-				device->BindComputeShader(wi::renderer::GetShader(wi::enums::CSTYPE_TERRAIN_VIRTUALTEXTURE_UPDATE_SURFACEMAP), cmd);
-				device->BindUAV(&atlas.maps[MaterialComponent::SURFACEMAP].texture_raw_block, 0, cmd);
-				break;
-			default:
-				assert(0);
-				break;
-			}
+				TerrainVirtualTexturePush push = {};
 
-			for (const VirtualTexture* vt : virtual_textures_in_use)
-			{
+				switch (map_type)
+				{
+				case MaterialComponent::BASECOLORMAP:
+					device->BindComputeShader(wi::renderer::GetShader(wi::enums::CSTYPE_TERRAIN_VIRTUALTEXTURE_UPDATE_BASECOLORMAP), cmd);
+					push.output_texture = device->GetDescriptorIndex(&atlas.maps[MaterialComponent::BASECOLORMAP].texture_raw_block, SubresourceType::UAV);
+					break;
+				case MaterialComponent::NORMALMAP:
+					device->BindComputeShader(wi::renderer::GetShader(wi::enums::CSTYPE_TERRAIN_VIRTUALTEXTURE_UPDATE_NORMALMAP), cmd);
+					push.output_texture = device->GetDescriptorIndex(&atlas.maps[MaterialComponent::NORMALMAP].texture_raw_block, SubresourceType::UAV);
+					break;
+				case MaterialComponent::SURFACEMAP:
+					device->BindComputeShader(wi::renderer::GetShader(wi::enums::CSTYPE_TERRAIN_VIRTUALTEXTURE_UPDATE_SURFACEMAP), cmd);
+					push.output_texture = device->GetDescriptorIndex(&atlas.maps[MaterialComponent::SURFACEMAP].texture_raw_block, SubresourceType::UAV);
+					break;
+				case MaterialComponent::EMISSIVEMAP:
+					device->BindComputeShader(wi::renderer::GetShader(wi::enums::CSTYPE_TERRAIN_VIRTUALTEXTURE_UPDATE_EMISSIVEMAP), cmd);
+					push.output_texture = device->GetDescriptorIndex(&atlas.maps[MaterialComponent::EMISSIVEMAP].texture_raw_block, SubresourceType::UAV);
+					break;
+				default:
+					assert(0);
+					break;
+				}
+				if (push.output_texture < 0)
+					continue;
+
+				push.blendmap_texture = device->GetDescriptorIndex(&vt->blendmap, SubresourceType::SRV);
+				push.blendmap_layers = vt->blendmap.desc.array_size;
+				if (push.blendmap_texture < 0)
+					continue;
+
+				auto mem = device->AllocateGPU(sizeof(uint) * push.blendmap_layers, cmd);
+				const uint splineMaterialCount = (uint)splineMaterialEntities.size();
+				const uint baseMaterialCount = push.blendmap_layers - splineMaterialCount;
+				for (uint i = 0; i < splineMaterialCount; ++i)
+				{
+					const Entity entity = splineMaterialEntities[i];
+					const uint material_index = (uint)scene->materials.GetIndex(entity);
+					std::memcpy((uint*)mem.data + baseMaterialCount + i, &material_index, sizeof(uint)); // force memcpy to avoid uncached read from GPU pointer!
+				}
+				for (uint i = 0; i < baseMaterialCount; ++i)
+				{
+					const Entity entity = materialEntities[i];
+					const uint material_index = (uint)scene->materials.GetIndex(entity);
+					std::memcpy((uint*)mem.data + i, &material_index, sizeof(uint)); // force memcpy to avoid uncached read from GPU pointer!
+				}
+
+				push.blendmap_buffer = device->GetDescriptorIndex(&mem.buffer, SubresourceType::SRV);
+				if (push.blendmap_buffer < 0)
+					continue;
+				push.blendmap_buffer_offset = (uint)mem.offset;
+
 				for (auto& request : vt->update_requests)
 				{
 					uint request_lod_resolution = std::max(1u, vt->resolution >> request.lod);
@@ -1449,17 +2943,14 @@ namespace wi::terrain
 						request.tile_y * SVT_TILE_SIZE_PADDED / 4
 					);
 
-					TerrainVirtualTexturePush push;
 					push.offset = int2(
 						int(request.x * SVT_TILE_SIZE) - int(SVT_TILE_BORDER),
 						int(request.y * SVT_TILE_SIZE) - int(SVT_TILE_BORDER)
 					);
-					push.region_weights_textureRO = device->GetDescriptorIndex(&vt->region_weights_texture, SubresourceType::SRV);
 
 					if (request_lod_resolution < SVT_TILE_SIZE)
 					{
 						// packed mips
-
 						uint32_t tail_mip_idx = 0;
 						while (request_lod_resolution >= 4u)
 						{
@@ -1495,16 +2986,55 @@ namespace wi::terrain
 							cmd
 						);
 					}
+
+#ifdef NOSPARSE
+					push.write_offset = write_offset_original;
+					push.write_size = SVT_TILE_SIZE_PADDED / 4u;
+					NoSparseCopy nosparse;
+					nosparse.texture_src = &atlas.maps[map_type].texture_raw_block;
+					nosparse.texture_dst = &atlas.maps[map_type].texture;
+					nosparse.srcbox.left = push.write_offset.x;
+					nosparse.srcbox.right = nosparse.srcbox.left + push.write_size;
+					nosparse.srcbox.top = push.write_offset.y;
+					nosparse.srcbox.bottom = nosparse.srcbox.top + push.write_size;
+					nosparse.srcbox.back = 1;
+					nosparse_copies.push_back(nosparse);
+#endif // NOSPARSE
 				}
 			}
-		}
-		for (const VirtualTexture* vt : virtual_textures_in_use)
-		{
 			vt->update_requests.clear();
 		}
+		device->Barrier(GPUBarrier::Memory(), cmd);
 		device->EventEnd(cmd);
 
-		device->Barrier(virtual_texture_barriers_after_update.data(), (uint32_t)virtual_texture_barriers_after_update.size(), cmd);
+#ifdef NOSPARSE
+		device->EventBegin("Terrain - Nosparse Copies", cmd);
+		// Batch all of the Block compression copies after the region updating when sparse texture is disabled:
+		for (auto& map : atlas.maps)
+		{
+			if (!map.texture.IsValid())
+				continue;
+			wi::renderer::PushBarrier(GPUBarrier::Image(&map.texture, ResourceState::SHADER_RESOURCE, ResourceState::COPY_DST));
+			wi::renderer::PushBarrier(GPUBarrier::Image(&map.texture_raw_block, ResourceState::UNORDERED_ACCESS, ResourceState::COPY_SRC));
+		}
+		wi::renderer::FlushBarriers(cmd);
+
+		for (auto& x : nosparse_copies)
+		{
+			device->CopyTexture(x.texture_dst, x.srcbox.left * 4, x.srcbox.top * 4, 0, 0, 0, x.texture_src, 0, 0, cmd, &x.srcbox);
+		}
+		nosparse_copies.clear();
+
+		for (auto& map : atlas.maps)
+		{
+			if (!map.texture.IsValid())
+				continue;
+			wi::renderer::PushBarrier(GPUBarrier::Image(&map.texture, ResourceState::COPY_DST, ResourceState::SHADER_RESOURCE));
+			wi::renderer::PushBarrier(GPUBarrier::Image(&map.texture_raw_block, ResourceState::COPY_SRC, ResourceState::UNORDERED_ACCESS));
+		}
+		wi::renderer::FlushBarriers(cmd);
+		device->EventEnd(cmd);
+#endif // NOSPARSE
 
 		wi::profiler::EndRange(range);
 		device->EventEnd(cmd);
@@ -1512,6 +3042,7 @@ namespace wi::terrain
 
 	void Terrain::CopyVirtualTexturePageStatusGPU(CommandList cmd) const
 	{
+		wi::jobsystem::Wait(virtual_texture_ctx);
 		GraphicsDevice* device = GetDevice();
 		device->EventBegin("Terrain - CopyVirtualTexturePageStatusGPU", cmd);
 		for (const VirtualTexture* vt : virtual_textures_in_use)
@@ -1521,14 +3052,45 @@ namespace wi::terrain
 			device->CopyResource(&vt->residency->pageBuffer, &vt->residency->pageBuffer_CPU_upload[vt->residency->cpu_resource_id], cmd);
 		}
 		device->EventEnd(cmd);
+
+		if (chunk_buffer.IsValid())
+		{
+			device->EventBegin("Update chunk buffer", cmd);
+			auto mem = device->AllocateGPU(chunk_buffer.desc.size, cmd);
+			ShaderTerrainChunk* shader_chunks = (ShaderTerrainChunk*)mem.data;
+			for (int y = -chunk_buffer_range; y <= chunk_buffer_range; ++y)
+			{
+				for (int x = -chunk_buffer_range; x <= chunk_buffer_range; ++x)
+				{
+					ShaderTerrainChunk shader_chunk;
+					shader_chunk.init();
+
+					auto chunk = center_chunk;
+					chunk.x += x;
+					chunk.z += y;
+					auto it = chunks.find(chunk);
+					if (it != chunks.end())
+					{
+						const auto& chunk_data = it->second;
+						shader_chunk.heightmap = device->GetDescriptorIndex(&chunk_data.heightmap, SubresourceType::SRV);
+						shader_chunk.materialID = (uint)scene->materials.GetIndex(chunk_data.entity);
+					}
+
+					const uint idx = (x + chunk_buffer_range) + (y + chunk_buffer_range) * (chunk_buffer_range * 2 + 1);
+					std::memcpy(shader_chunks + idx, &shader_chunk, sizeof(shader_chunk));
+				}
+			}
+			device->CopyBuffer(&chunk_buffer, 0, &mem.buffer, mem.offset, chunk_buffer.desc.size, cmd);
+			device->EventEnd(cmd);
+		}
 	}
 
 	void Terrain::AllocateVirtualTextureTileRequestsGPU(CommandList cmd) const
 	{
+		wi::jobsystem::Wait(virtual_texture_ctx);
 		GraphicsDevice* device = GetDevice();
 
 		device->EventBegin("Terrain - AllocateVirtualTextureTileRequestsGPU", cmd);
-		device->Barrier(virtual_texture_barriers_before_allocation.data(), (uint32_t)virtual_texture_barriers_before_allocation.size(), cmd);
 
 		{
 			device->EventBegin("Tile Requests", cmd);
@@ -1541,7 +3103,7 @@ namespace wi::terrain
 				push.lodCount = vt->lod_count;
 				push.width = vt->residency->feedbackMap.desc.width;
 				push.height = vt->residency->feedbackMap.desc.height;
-				push.feedbackTextureRO = device->GetDescriptorIndex(&vt->residency->feedbackMap, SubresourceType::SRV);
+				push.feedbackTextureRW = device->GetDescriptorIndex(&vt->residency->feedbackMap, SubresourceType::UAV);
 				push.requestBufferRW = device->GetDescriptorIndex(&vt->residency->requestBuffer, SubresourceType::UAV);
 				device->PushConstants(&push, sizeof(push), cmd);
 
@@ -1555,8 +3117,7 @@ namespace wi::terrain
 			device->EventEnd(cmd);
 		}
 
-		GPUBarrier memory_barrier = GPUBarrier::Memory();
-		device->Barrier(&memory_barrier, 1, cmd);
+		device->Barrier(GPUBarrier::Memory(), cmd);
 
 		{
 			device->EventBegin("Tile Allocation Requests", cmd);
@@ -1585,13 +3146,12 @@ namespace wi::terrain
 			device->EventEnd(cmd);
 		}
 
-		device->Barrier(virtual_texture_barriers_after_allocation.data(), (uint32_t)virtual_texture_barriers_after_allocation.size(), cmd);
-
 		device->EventEnd(cmd);
 	}
 
 	void Terrain::WritebackTileRequestsGPU(CommandList cmd) const
 	{
+		wi::jobsystem::Wait(virtual_texture_ctx);
 		GraphicsDevice* device = GetDevice();
 
 		device->EventBegin("Terrain - WritebackTileRequestsGPU", cmd);
@@ -1601,20 +3161,102 @@ namespace wi::terrain
 			if (vt->residency == nullptr)
 				continue;
 			device->CopyResource(&vt->residency->allocationBuffer_CPU_readback[vt->residency->cpu_resource_id], &vt->residency->allocationBuffer, cmd);
+			wi::renderer::PushBarrier(GPUBarrier::Buffer(&vt->residency->allocationBuffer, ResourceState::COPY_SRC, ResourceState::COPY_DST));
 		}
 
+		wi::renderer::FlushBarriers(cmd);
+
 		device->EventEnd(cmd);
+
+		device->EventBegin("Clear Metadata", cmd);
+		for (const VirtualTexture* vt : virtual_textures_in_use)
+		{
+			if (vt->residency == nullptr)
+				continue;
+
+			// Note: instead of ClearUAV, we use copies from default initialized resources
+			//	With this it can be put on the async copy queue
+			//	Also, using the ClearUAV was having a very bad performance especially with DX12
+			static wi::unordered_map<uint32_t, VirtualTextureAtlas::Residency> clear_residencies;
+			VirtualTextureAtlas::Residency& clear = clear_residencies[vt->resolution];
+			if (clear.resolution != vt->resolution)
+			{
+				clear.init(vt->resolution);
+			}
+			device->CopyResource(&vt->residency->feedbackMap, &clear.feedbackMap, cmd);
+			device->CopyResource(&vt->residency->requestBuffer, &clear.requestBuffer, cmd);
+			device->CopyResource(&vt->residency->allocationBuffer, &clear.allocationBuffer, cmd);
+
+			wi::renderer::PushBarrier(GPUBarrier::Image(&vt->residency->residencyMap, ResourceState::COPY_DST, ResourceState::COPY_SRC));
+		}
+		wi::renderer::FlushBarriers(cmd);
+		device->EventEnd(cmd);
+	}
+
+	ShaderTerrain Terrain::GetShaderTerrain() const
+	{
+		GraphicsDevice* device = GetDevice();
+
+		ShaderTerrain shader_terrain;
+		shader_terrain.init();
+
+		auto it = chunks.find(center_chunk);
+		if (it != chunks.end())
+		{
+			const auto& chunk_data = it->second;
+			shader_terrain.chunk_size = chunk_half_width * 2 * chunk_scale;
+			shader_terrain.center_chunk_pos.x = center_chunk.x * shader_terrain.chunk_size - shader_terrain.chunk_size * 0.5f;
+			shader_terrain.center_chunk_pos.y = 0;
+			shader_terrain.center_chunk_pos.z = center_chunk.z * shader_terrain.chunk_size - shader_terrain.chunk_size * 0.5f;
+			shader_terrain.chunk_buffer = device->GetDescriptorIndex(&chunk_buffer, SubresourceType::SRV);
+			shader_terrain.chunk_buffer_range = chunk_buffer_range;
+			shader_terrain.min_height = bottomLevel;
+			shader_terrain.max_height = topLevel;
+		}
+
+		return shader_terrain;
+	}
+
+	void Terrain::InvalidateProps()
+	{
+		for (auto it = prop_chunks.begin(); it != prop_chunks.end(); ++it)
+		{
+			it->second.prop_density_current = 0;
+		}
+	}
+
+	void Terrain::InvalidateChunksAtSpline(const wi::scene::SplineComponent& spline)
+	{
+		for (auto it = chunks.begin(); it != chunks.end(); it++)
+		{
+			ChunkData& chunk_data = it->second;
+			if (chunk_data.invalidated)
+				continue;
+			BoundingBox bb(chunk_data.sphere.center, XMFLOAT3(chunk_data.sphere.radius, 1000000, chunk_data.sphere.radius));
+			if (spline.bvh.IntersectsFirst(bb, [&](uint32_t index) { return spline.precomputed_obbs[index].Intersects(bb); }))
+			{
+				chunk_data.invalidated = true;
+				generator->priority_invalidation.push_back(it->first);
+			}
+		}
 	}
 
 	void Terrain::Serialize(wi::Archive& archive, wi::ecs::EntitySerializer& seri)
 	{
 		Generation_Cancel();
 
+		// Note: separate component types serialized within terrain must NOT use the version of the terrain, but their own!
+		ComponentLibrary& library = *seri.componentlibrary;
+		const uint64_t terrain_version = seri.GetVersion();
+		const uint64_t grass_version = seri.GetVersion("wi::scene::Scene::hairs");
+		const uint64_t material_version = seri.GetVersion("wi::scene::Scene::materials");
+		const uint64_t weather_version = seri.GetVersion("wi::scene::Scene::weathers");
+
 		if (archive.IsReadMode())
 		{
 			archive >> _flags;
-			archive >> lod_multiplier;
-			if (seri.GetVersion() < 3)
+			archive >> lod_bias;
+			if (terrain_version < 3)
 			{
 				float texlod;
 				archive >> texlod;
@@ -1633,12 +3275,20 @@ namespace wi::terrain
 
 			archive >> center_chunk.x;
 			archive >> center_chunk.z;
+			if (terrain_version < 7)
+			{
+				// Older scenes stored props on terrain chunks. Place the new chunk grid on that center until the camera takes over.
+				const float anchor_x = float(center_chunk.x * (chunk_width - 1)) * chunk_scale;
+				const float anchor_z = float(center_chunk.z * (chunk_width - 1)) * chunk_scale;
+				prop_center_chunk.x = world_to_chunk_index(anchor_x, 1.0f, 1.0f);
+				prop_center_chunk.z = world_to_chunk_index(anchor_z, 1.0f, 1.0f);
+			}
 
-			if (seri.GetVersion() >= 1)
+			if (terrain_version >= 1)
 			{
 				archive >> physics_generation;
 			}
-			if (seri.GetVersion() >= 2 && seri.GetVersion() < 3)
+			if (terrain_version >= 2 && terrain_version < 3)
 			{
 				uint32_t target_texture_resolution;
 				archive >> target_texture_resolution;
@@ -1650,7 +3300,7 @@ namespace wi::terrain
 			for (size_t i = 0; i < props.size(); ++i)
 			{
 				Prop& prop = props[i];
-				if (seri.GetVersion() >= 1)
+				if (terrain_version >= 1)
 				{
 					archive >> prop.data;
 
@@ -1658,7 +3308,7 @@ namespace wi::terrain
 					{
 						// Serialize the prop data in read mode and remap internal entity references:
 						Scene tmp_scene;
-						wi::Archive tmp_archive = wi::Archive(prop.data.data());
+						wi::Archive tmp_archive = wi::Archive(prop.data.data(), prop.data.size());
 						Entity entity = tmp_scene.Entity_Serialize(
 							tmp_archive,
 							seri,
@@ -1704,21 +3354,54 @@ namespace wi::terrain
 					);
 					archive.WriteData(prop.data);
 				}
-				archive >> prop.min_count_per_chunk;
-				archive >> prop.max_count_per_chunk;
-				archive >> prop.region;
-				archive >> prop.region_power;
-				archive >> prop.noise_frequency;
-				archive >> prop.noise_power;
-				archive >> prop.threshold;
+				if (terrain_version >= 7)
+				{
+					archive >> prop.density;
+					archive >> prop.clumping;
+					archive >> prop.clump_spacing;
+					archive >> prop.seed;
+					archive >> prop.region;
+					archive >> prop.region_power;
+				}
+				else
+				{
+					int min_count = 0;
+					int max_count = 10;
+					float noise_frequency = 1;
+					float noise_power = 1;
+					float threshold = 0.5f;
+					archive >> min_count;
+					archive >> max_count;
+					archive >> prop.region;
+					archive >> prop.region_power;
+					archive >> noise_frequency;
+					archive >> noise_power;
+					archive >> threshold;
+					prop.density = float(min_count + max_count) * 0.5f;
+					prop.seed = 0;
+					prop.region_power *= 2;
+
+					const float freq = noise_frequency > 1.0e-6f ? noise_frequency : 1.0e-6f;
+					const float wavelength = 1.0f / freq;
+					const float scale = saturate((wavelength - 8.0f) / 192.0f);
+					const float peakiness = saturate((noise_power - 1.0f) / 3.0f);
+					const float pickiness = saturate(threshold);
+					prop.clumping = saturate(scale * 0.5f + peakiness * 0.35f + pickiness * 0.15f);
+					prop.clump_spacing = 64;
+				}
 				archive >> prop.min_size;
 				archive >> prop.max_size;
 				archive >> prop.min_y_offset;
 				archive >> prop.max_y_offset;
+				if (terrain_version >= 6)
+				{
+					SerializeEntity(archive, prop.source_entity, seri);
+				}
 			}
 
 			archive >> count;
 			chunks.reserve(count);
+			ComponentManager<wi::HairParticleSystem>* scene_hairs = library.Get<wi::HairParticleSystem>("wi::scene::Scene::hairs");
 			for (size_t i = 0; i < count; ++i)
 			{
 				Chunk chunk;
@@ -1727,14 +3410,96 @@ namespace wi::terrain
 				ChunkData& chunk_data = chunks[chunk];
 				SerializeEntity(archive, chunk_data.entity, seri);
 				SerializeEntity(archive, chunk_data.grass_entity, seri);
-				SerializeEntity(archive, chunk_data.props_entity, seri);
+				SerializeEntity(archive, chunk_data.props_entity_old, seri);
 				archive >> chunk_data.prop_density_current;
-				chunk_data.grass.Serialize(archive, seri);
+
+				if (terrain_version < 8)
+				{
+					wi::HairParticleSystem grass;
+					seri.version = grass_version;
+					grass.Serialize(archive, seri);
+					seri.version = terrain_version;
+					chunk_data.grass_region_lengths[MATERIAL_BASE] = std::move(grass.vertex_lengths);
+				}
+				else
+				{
+					for (int region = 0; region < MATERIAL_COUNT; ++region)
+					{
+						archive >> chunk_data.grass_region_lengths[region];
+					}
+				}
+
 				archive >> chunk_data.grass_density_current;
-				archive >> chunk_data.region_weights;
+				if (terrain_version >= 5)
+				{
+					size_t blendmapCount = 0;
+					archive >> blendmapCount;
+					chunk_data.blendmap_layers.resize(blendmapCount);
+					for (size_t i = 0; i < chunk_data.blendmap_layers.size(); ++i)
+					{
+						archive >> chunk_data.blendmap_layers[i].pixels;
+					}
+					archive >> chunk_data.heightmap_data;
+				}
+				else
+				{
+					wi::vector<wi::Color> blendmap4;
+					archive >> blendmap4;
+					chunk_data.blendmap_layers.resize(4);
+					for (size_t i = 0; i < 4; ++i)
+					{
+						chunk_data.blendmap_layers[i].pixels.resize(blendmap4.size());
+					}
+					for (size_t i = 0; i < blendmap4.size(); ++i)
+					{
+						chunk_data.blendmap_layers[0].pixels[i] = blendmap4[i].getR();
+						chunk_data.blendmap_layers[1].pixels[i] = blendmap4[i].getG();
+						chunk_data.blendmap_layers[2].pixels[i] = blendmap4[i].getB();
+						chunk_data.blendmap_layers[3].pixels[i] = blendmap4[i].getA();
+					}
+				}
 				archive >> chunk_data.sphere.center;
 				archive >> chunk_data.sphere.radius;
 				archive >> chunk_data.position;
+				if (terrain_version >= 8)
+				{
+					size_t patch_count = 0;
+					archive >> patch_count;
+					chunk_data.grass_patches.resize(patch_count);
+					for (size_t patch_index = 0; patch_index < patch_count; ++patch_index)
+					{
+						ChunkData::GrassPatch& patch = chunk_data.grass_patches[patch_index];
+						SerializeEntity(archive, patch.entity, seri);
+						archive >> patch.base_strand_count;
+						archive >> patch.x0;
+						archive >> patch.z0;
+						archive >> patch.x1;
+						archive >> patch.z1;
+						archive >> patch.region;
+					}
+					if (scene_hairs != nullptr)
+					{
+						for (ChunkData::GrassPatch& patch : chunk_data.grass_patches)
+						{
+							wi::HairParticleSystem* grass = scene_hairs->GetComponent(patch.entity);
+							if (grass == nullptr)
+							{
+								continue;
+							}
+							build_grass_index_range(*grass, patch.x0, patch.z0, patch.x1, patch.z1);
+							if (grass->indices.empty())
+							{
+								scene_hairs->Remove(patch.entity);
+								patch.entity = INVALID_ENTITY;
+								patch.base_strand_count = 0;
+							}
+							else
+							{
+								grass->_flags &= ~wi::HairParticleSystem::REBUILD_BUFFERS;
+							}
+						}
+					}
+				}
 			}
 
 			archive >> count;
@@ -1750,7 +3515,7 @@ namespace wi::terrain
 				default:
 				case Modifier::Type::Perlin:
 					{
-						std::shared_ptr<PerlinModifier> modifier = std::make_shared<PerlinModifier>();
+						wi::allocator::shared_ptr<PerlinModifier> modifier = wi::allocator::make_shared_single<PerlinModifier>();
 						modifiers[i] = modifier;
 						archive >> modifier->octaves;
 						archive >> modifier->seed;
@@ -1759,7 +3524,7 @@ namespace wi::terrain
 					break;
 				case Modifier::Type::Voronoi:
 					{
-						std::shared_ptr<VoronoiModifier> modifier = std::make_shared<VoronoiModifier>();
+						wi::allocator::shared_ptr<VoronoiModifier> modifier = wi::allocator::make_shared_single<VoronoiModifier>();
 						modifiers[i] = modifier;
 						archive >> modifier->fade;
 						archive >> modifier->shape;
@@ -1771,9 +3536,9 @@ namespace wi::terrain
 					break;
 				case Modifier::Type::Heightmap:
 					{
-						std::shared_ptr<HeightmapModifier> modifier = std::make_shared<HeightmapModifier>();
+						wi::allocator::shared_ptr<HeightmapModifier> modifier = wi::allocator::make_shared_single<HeightmapModifier>();
 						modifiers[i] = modifier;
-						archive >> modifier->scale;
+						archive >> modifier->amount;
 						archive >> modifier->data;
 						archive >> modifier->width;
 						archive >> modifier->height;
@@ -1792,8 +3557,8 @@ namespace wi::terrain
 		else
 		{
 			archive << _flags;
-			archive << lod_multiplier;
-			if (seri.GetVersion() < 3)
+			archive << lod_bias;
+			if (terrain_version < 3)
 			{
 				float texlod = 1;
 				archive << texlod;
@@ -1813,11 +3578,11 @@ namespace wi::terrain
 			archive << center_chunk.x;
 			archive << center_chunk.z;
 
-			if (seri.GetVersion() >= 1)
+			if (terrain_version >= 1)
 			{
 				archive << physics_generation;
 			}
-			if (seri.GetVersion() >= 2 && seri.GetVersion() < 3)
+			if (terrain_version >= 2 && terrain_version < 3)
 			{
 				uint32_t target_texture_resolution = 1024;
 				archive << target_texture_resolution;
@@ -1828,17 +3593,17 @@ namespace wi::terrain
 			{
 				Prop& prop = props[i];
 				archive << prop.data;
-				archive << prop.min_count_per_chunk;
-				archive << prop.max_count_per_chunk;
+				archive << prop.density;
+				archive << prop.clumping;
+				archive << prop.clump_spacing;
+				archive << prop.seed;
 				archive << prop.region;
 				archive << prop.region_power;
-				archive << prop.noise_frequency;
-				archive << prop.noise_power;
-				archive << prop.threshold;
 				archive << prop.min_size;
 				archive << prop.max_size;
 				archive << prop.min_y_offset;
 				archive << prop.max_y_offset;
+				SerializeEntity(archive, prop.source_entity, seri);
 			}
 
 			archive << chunks.size();
@@ -1850,14 +3615,50 @@ namespace wi::terrain
 				ChunkData& chunk_data = it.second;
 				SerializeEntity(archive, chunk_data.entity, seri);
 				SerializeEntity(archive, chunk_data.grass_entity, seri);
-				SerializeEntity(archive, chunk_data.props_entity, seri);
+				SerializeEntity(archive, chunk_data.props_entity_old, seri);
 				archive << chunk_data.prop_density_current;
-				chunk_data.grass.Serialize(archive, seri);
+
+				if (terrain_version < 8)
+				{
+					wi::HairParticleSystem grass;
+					grass.vertex_lengths = chunk_data.grass_region_lengths[MATERIAL_BASE];
+					grass.meshID = chunk_data.entity;
+					seri.version = grass_version;
+					grass.Serialize(archive, seri);
+					seri.version = terrain_version;
+				}
+				else
+				{
+					for (int region = 0; region < MATERIAL_COUNT; ++region)
+					{
+						archive << chunk_data.grass_region_lengths[region];
+					}
+				}
+
 				archive << chunk_data.grass_density_current;
-				archive << chunk_data.region_weights;
+				archive << chunk_data.blendmap_layers.size();
+				for (size_t i = 0; i < chunk_data.blendmap_layers.size(); ++i)
+				{
+					archive << chunk_data.blendmap_layers[i].pixels;
+				}
+				archive << chunk_data.heightmap_data;
 				archive << chunk_data.sphere.center;
 				archive << chunk_data.sphere.radius;
 				archive << chunk_data.position;
+				if (terrain_version >= 8)
+				{
+					archive << chunk_data.grass_patches.size();
+					for (ChunkData::GrassPatch& patch : chunk_data.grass_patches)
+					{
+						SerializeEntity(archive, patch.entity, seri);
+						archive << patch.base_strand_count;
+						archive << patch.x0;
+						archive << patch.z0;
+						archive << patch.x1;
+						archive << patch.z1;
+						archive << patch.region;
+					}
+				}
 			}
 
 			archive << modifiers.size();
@@ -1881,7 +3682,7 @@ namespace wi::terrain
 					((VoronoiModifier*)modifier.get())->perlin_noise.Serialize(archive);
 					break;
 				case Modifier::Type::Heightmap:
-					archive << ((HeightmapModifier*)modifier.get())->scale;
+					archive << ((HeightmapModifier*)modifier.get())->amount;
 					archive << ((HeightmapModifier*)modifier.get())->data;
 					archive << ((HeightmapModifier*)modifier.get())->width;
 					archive << ((HeightmapModifier*)modifier.get())->height;
@@ -1894,14 +3695,138 @@ namespace wi::terrain
 			}
 		}
 
-		material_Base.Serialize(archive, seri);
-		material_Slope.Serialize(archive, seri);
-		material_LowAltitude.Serialize(archive, seri);
-		material_HighAltitude.Serialize(archive, seri);
-		material_GrassParticle.Serialize(archive, seri);
+		// Caution: seri.version changes must be handled carefully!
+
+		if (terrain_version >= 5)
+		{
+			if (archive.IsReadMode())
+			{
+				SerializeEntity(archive, chunkGroupEntity, seri);
+				size_t materialCount = 0;
+				archive >> materialCount;
+				materialEntities.resize(materialCount);
+				for (size_t i = 0; i < materialEntities.size(); ++i)
+				{
+					SerializeEntity(archive, materialEntities[i], seri);
+				}
+				SerializeEntity(archive, grassEntities[MATERIAL_BASE], seri);
+				if (terrain_version >= 8)
+				{
+					for (int region = MATERIAL_SLOPE; region < MATERIAL_COUNT; ++region)
+					{
+						SerializeEntity(archive, grassEntities[region], seri);
+					}
+				}
+			}
+			else
+			{
+				SerializeEntity(archive, chunkGroupEntity, seri);
+				archive << materialEntities.size();
+				for (size_t i = 0; i < materialEntities.size(); ++i)
+				{
+					SerializeEntity(archive, materialEntities[i], seri);
+				}
+				SerializeEntity(archive, grassEntities[MATERIAL_BASE], seri);
+				if (terrain_version >= 8)
+				{
+					for (int region = MATERIAL_SLOPE; region < MATERIAL_COUNT; ++region)
+					{
+						SerializeEntity(archive, grassEntities[region], seri);
+					}
+				}
+			}
+		}
+		else if (terrain_version >= 4)
+		{
+			SerializeEntity(archive, chunkGroupEntity, seri);
+			for (size_t i = 0; i < MATERIAL_COUNT; ++i)
+			{
+				SerializeEntity(archive, materialEntities[i], seri);
+			}
+			SerializeEntity(archive, grassEntities[MATERIAL_BASE], seri);
+		}
+		else
+		{
+			// Convert terrain version below 4 to newer version:
+			seri.version = material_version;
+			wi::scene::MaterialComponent materials[MATERIAL_COUNT];
+			materials[MATERIAL_BASE].Serialize(archive, seri);
+			materials[MATERIAL_SLOPE].Serialize(archive, seri);
+			materials[MATERIAL_LOW_ALTITUDE].Serialize(archive, seri);
+			materials[MATERIAL_HIGH_ALTITUDE].Serialize(archive, seri);
+			grass_material.Serialize(archive, seri);
+			wi::jobsystem::Wait(seri.ctx); // wait for material CreateRenderData() that was asynchronously launched in Serialize()!
+
+			materialEntities[MATERIAL_BASE] = CreateEntity();
+			materialEntities[MATERIAL_SLOPE] = CreateEntity();
+			materialEntities[MATERIAL_LOW_ALTITUDE] = CreateEntity();
+			materialEntities[MATERIAL_HIGH_ALTITUDE] = CreateEntity();
+			grassEntities[MATERIAL_BASE] = CreateEntity();
+
+			ComponentManager<MaterialComponent>* scene_materials = library.Get<MaterialComponent>("wi::scene::Scene::materials");
+			scene_materials->Create(materialEntities[MATERIAL_BASE]) = materials[MATERIAL_BASE];
+			scene_materials->Create(materialEntities[MATERIAL_SLOPE]) = materials[MATERIAL_SLOPE];
+			scene_materials->Create(materialEntities[MATERIAL_LOW_ALTITUDE]) = materials[MATERIAL_LOW_ALTITUDE];
+			scene_materials->Create(materialEntities[MATERIAL_HIGH_ALTITUDE]) = materials[MATERIAL_HIGH_ALTITUDE];
+			scene_materials->Create(grassEntities[MATERIAL_BASE]) = grass_material;
+
+			ComponentManager<NameComponent>* scene_names = library.Get<NameComponent>("wi::scene::Scene::names");
+			scene_names->Create(materialEntities[MATERIAL_BASE]).name = "material_base";
+			scene_names->Create(materialEntities[MATERIAL_SLOPE]).name = "material_slope";
+			scene_names->Create(materialEntities[MATERIAL_LOW_ALTITUDE]).name = "material_low_altitude";
+			scene_names->Create(materialEntities[MATERIAL_HIGH_ALTITUDE]).name = "material_high_altitude";
+			scene_names->Create(grassEntities[MATERIAL_BASE]).name = "grass";
+		}
+
+		seri.version = weather_version;
 		weather.Serialize(archive, seri);
-		grass_properties.Serialize(archive, seri);
+
+		if (terrain_version < 4)
+		{
+			seri.version = grass_version;
+			grass_properties.Serialize(archive, seri);
+			seri.version = terrain_version;
+
+			ComponentManager<wi::HairParticleSystem>* scene_hairs = library.Get<wi::HairParticleSystem>("wi::scene::Scene::hairs");
+			scene_hairs->Create(grassEntities[MATERIAL_BASE]) = grass_properties;
+		}
+
 		perlin_noise.Serialize(archive);
+
+		if (terrain_version >= 7)
+		{
+			if (archive.IsReadMode())
+			{
+				archive >> prop_center_chunk.x;
+				archive >> prop_center_chunk.z;
+				size_t prop_chunk_count = 0;
+				archive >> prop_chunk_count;
+				prop_chunks.clear();
+				prop_chunks.reserve(prop_chunk_count);
+				for (size_t i = 0; i < prop_chunk_count; ++i)
+				{
+					Chunk prop_chunk;
+					archive >> prop_chunk.x;
+					archive >> prop_chunk.z;
+					PropChunkData& prop_data = prop_chunks[prop_chunk];
+					SerializeEntity(archive, prop_data.entity, seri);
+					archive >> prop_data.prop_density_current;
+				}
+			}
+			else
+			{
+				archive << prop_center_chunk.x;
+				archive << prop_center_chunk.z;
+				archive << prop_chunks.size();
+				for (auto& it : prop_chunks)
+				{
+					archive << it.first.x;
+					archive << it.first.z;
+					SerializeEntity(archive, it.second.entity, seri);
+					archive << it.second.prop_density_current;
+				}
+			}
+		}
 	}
 
 }

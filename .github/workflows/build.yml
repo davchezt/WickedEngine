@@ -4,144 +4,232 @@ on:
   push:
     branches: [ master ]
 
-jobs:
+env:
+  CCACHE_VERSION: 4.12.1
+  CCACHE_MAXSIZE: 500Mi
+  # see https://ccache.dev/manual/latest.html#_precompiled_headers
+  CCACHE_SLOPPINESS: pch_defines,time_macros,include_file_mtime,include_file_ctime
 
-  content:
-    runs-on: windows-latest
-    steps:
-    - uses: actions/checkout@v2
-    - name: Package Content
-      uses: actions/upload-artifact@v2
-      with:
-        name: Content
-        path: |
-          Content/models
-          Content/scripts
+jobs:
 
   windows:
     runs-on: windows-latest
+    env:
+      # needed on Windows because wiRenderer conditionally includes wiShaderDump.h
+      # and only our CMake config has a workaround for it
+      CCACHE_NODIRECT: 1
     steps:
-    - uses: actions/checkout@v2
-    - uses: nuget/setup-nuget@v1
+    - uses: actions/checkout@v4
+
+    - uses: microsoft/setup-msbuild@v2
       with:
-        nuget-api-key: ${{ secrets.NuGetAPIKey }}
-    - run: nuget restore WickedEngine.sln
-    - name: Build
+        msbuild-architecture: x64
+
+    - name: Restore Ccache database
+      id: restore-ccache
+      uses: actions/cache/restore@v4
+      with:
+        path: C:\Users\runneradmin\AppData\Local\ccache
+        key: ccache-win-${{ github.run_id }}
+        restore-keys: ccache-win-
+
+    - name: Install Ccache
+      run: |
+        curl -sOSL https://github.com/ccache/ccache/releases/download/v$Env:CCACHE_VERSION/ccache-$Env:CCACHE_VERSION-windows-x86_64.zip
+        unzip -qj ccache-$Env:CCACHE_VERSION-windows-x86_64.zip ccache-$Env:CCACHE_VERSION-windows-x86_64/ccache.exe
+        mv ccache.exe cl.exe
+        mv .github/workflows/Directory.Build.props.ghbuild Directory.Build.props
+
+    - name: Initial compile
       shell: cmd
       run: |
-        "C:/Program Files/Microsoft Visual Studio/2022/Enterprise/MSBuild/Current/Bin/MSBuild.exe" WickedEngine.sln /t:OfflineShaderCompiler /m /p:Configuration=Release /p:Platform=x64
+        MSBuild WickedEngine.sln /t:OfflineShaderCompiler /m /p:Configuration=Release /p:Platform=x64
+
+    - name: Generate shader dump
+      shell: cmd
+      run: |
         cd "WickedEngine"
-        "../BUILD/x64/Release/OfflineShaderCompiler/OfflineShaderCompiler.exe" hlsl6 spirv shaderdump
-        cd ..
-        "C:/Program Files/Microsoft Visual Studio/2022/Enterprise/MSBuild/Current/Bin/MSBuild.exe" WickedEngine.sln /t:rebuild /m /p:Configuration=Release /p:Platform=x64
-    
+        "../BUILD/x64/Release/OfflineShaderCompiler/OfflineShaderCompiler.exe" hlsl6 spirv shaderdump strip_reflection
+
+    - name: Recompile with shader dump
+      shell: cmd
+      run: |
+        MSBuild WickedEngine.sln /t:clean /m /p:Configuration=Release /p:Platform=x64
+        MSBuild WickedEngine.sln /t:Editor_Windows /m /p:Configuration=Release /p:Platform=x64
+
+    - name: Save Ccache database
+      id: save-ccache
+      if: always() && steps.restore-ccache.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: C:\Users\runneradmin\AppData\Local\ccache
+        key: ${{ steps.restore-ccache.outputs.cache-primary-key }}
+
     - name: Move files
       shell: cmd
       run: |
         move BUILD\x64\Release\Editor_Windows\Editor_Windows.exe .\
         move Editor\config.ini .\
         move Editor\startup.lua .\
-        move Editor\terrain .\
-        move Content\Documentation .\
-        
+        move Editor\languages .\
+        move Editor\fonts .\
+
     - name: Package Editor
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: Editor (Windows)
         path: |
-          Documentation/
-          terrain/
+          languages/
+          fonts/
           config.ini
           startup.lua
           Editor_Windows.exe
 
-    
+
   linux:
     runs-on: ubuntu-latest
+    name: linux (${{ matrix.cc }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - cc: gcc
+          cxx: g++
+          package_bins: true
+        - cc: clang
+          cxx: clang++
+          package_bins: false
+
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
+
+    - name: Restore Ccache database
+      id: restore-ccache
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.cache/ccache
+        key: ccache-${{ matrix.cc }}-${{ github.run_id }}
+        restore-keys: ccache-${{ matrix.cc }}-
 
     - name: Install dependencies
       run: |
         sudo apt update
-        sudo apt install libsdl2-dev
+        sudo apt install libsdl2-dev ccache
 
-    - name: Build
+    - name: Compile with embedded shaders
       run: |
-        mkdir build
-        cd build
-        cmake .. -DCMAKE_BUILD_TYPE=Release
-        make -j$(nproc)
-        echo "---Generating Shader Dump---"
-        cd WickedEngine
-        ./offlineshadercompiler spirv rebuild shaderdump
-        mv wiShaderDump.h ../../WickedEngine/
-        cd ..
-        echo "---Rebuilding with ShaderDump---"
-        make -B -j $(nproc)
+        CC=${{ matrix.cc }} CXX=${{ matrix.cxx }} cmake -B build -DWICKED_ENABLE_IPO=NO -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DWICKED_EMBED_SHADERS=YES
+        make -C build -j$(nproc)
 
-        
+    - name: Save Ccache database
+      id: save-ccache
+      if: always() && steps.restore-ccache.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.cache/ccache
+        key: ${{ steps.restore-ccache.outputs.cache-primary-key }}
+
     - name: Move files
+      if: matrix.package_bins
       run: |
-        mv build/Editor/WickedEngineEditor ./
+        mv build/Editor/Editor ./Editor_Linux
         mv Editor/config.ini ./
         mv Editor/startup.lua ./
-        mv Editor/terrain ./
-        mv Content/Documentation ./
-        
+        mv Editor/fonts ./
+
     - name: Package Editor
-      uses: actions/upload-artifact@v2
+      if: matrix.package_bins
+      uses: actions/upload-artifact@v4
       with:
-        name: Editor (Linux - Ubuntu)
+        name: Editor (Linux)
         path: |
-          Documentation/
-          terrain/
+          fonts/
           config.ini
           startup.lua
-          WickedEngineEditor
+          Editor_Linux
 
-  
-  linux-steamdeck:
-    runs-on: ubuntu-latest
+  macos:
+    runs-on: macos-15
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
 
-    - name: Build
+    - name: Compile Offlineshadercompiler
       run: |
-        mkdir build
-        echo "---Building Command Strings---"
-        echo -e "#!/bin/bash \
-        \nmkdir -p $(dirname $PWD) \
-        \nln -s /build $PWD \
-        \ncd /build/build \
-        \ncmake .. -DCMAKE_BUILD_TYPE=Release \
-        \nmake \
-        \necho \"---Generating Shader Dump---\" \
-        \ncd WickedEngine \
-        \n./offlineshadercompiler spirv rebuild shaderdump\nmv wiShaderDump.h ../../WickedEngine/ \
-        \necho \"---Rebuilding with ShaderDump---\" \
-        \ncd .. \
-        \nmake -B" > build.sh
-        chmod +x build.sh
-        echo "---Executing Containerized Build---"
-        podman run --name sniper -v $PWD:/build registry.gitlab.steamos.cloud/steamrt/sniper/sdk:latest /build/build.sh
-        podman container rm sniper
-        
+        xcodebuild clean build -project WickedEngine/offlineshadercompiler.xcodeproj -scheme offlineshadercompiler -configuration Release
+
+    - name: Generate shader dump
+      run: |
+        BUILD_PATH="$(xcodebuild -project WickedEngine/offlineshadercompiler.xcodeproj -scheme offlineshadercompiler -configuration Release -showBuildSettings | grep -m 1 "BUILT_PRODUCTS_DIR" | awk -F' = ' '{print $2}')"
+        cd WickedEngine
+        "${BUILD_PATH}/offlineshadercompiler" metal rebuild shaderdump
+        cd ..
+
+    - name: Build Editor
+      run: |
+        xcodebuild clean build -project Editor/Editor.xcodeproj -scheme Editor -configuration Release
+
     - name: Move files
       run: |
-        mv build/Editor/WickedEngineEditor ./
+        BUILD_PATH="$(xcodebuild -project Editor/Editor.xcodeproj -scheme Editor -configuration Release -showBuildSettings | grep -m 1 "BUILT_PRODUCTS_DIR" | awk -F' = ' '{print $2}')"
+        mv "${BUILD_PATH}/Editor" ./Editor_MacOS
         mv Editor/config.ini ./
         mv Editor/startup.lua ./
-        mv Editor/terrain ./
-        mv Content/Documentation ./
-        
+        mv Editor/languages ./
+        mv Editor/fonts ./
+
     - name: Package Editor
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
-        name: Editor (Linux - Steam Deck)
+        name: Editor (Mac OS)
         path: |
-          Documentation/
-          terrain/
+          languages/
+          fonts/
           config.ini
           startup.lua
-          WickedEngineEditor
+          Editor_MacOS
+
+  ios:
+    runs-on: macos-15
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Compile Offlineshadercompiler
+      run: |
+        xcodebuild clean build -project WickedEngine/offlineshadercompiler.xcodeproj -scheme offlineshadercompiler -configuration Release
+
+    - name: Generate shader dump
+      run: |
+        BUILD_PATH="$(xcodebuild -project WickedEngine/offlineshadercompiler.xcodeproj -scheme offlineshadercompiler -configuration Release -showBuildSettings | grep -m 1 "BUILT_PRODUCTS_DIR" | awk -F' = ' '{print $2}')"
+        cd WickedEngine
+        "${BUILD_PATH}/offlineshadercompiler" metal rebuild shaderdump
+        cd ..
+
+    - name: Build Editor_iOS
+      run: |
+        xcodebuild clean build -project Editor/Editor.xcodeproj -scheme Editor_iOS -configuration Release -sdk iphoneos CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+
+    - name: Move files
+      run: |
+        BUILD_PATH="$(xcodebuild -project Editor/Editor.xcodeproj -scheme Editor_iOS -configuration Release -sdk iphoneos -showBuildSettings | grep -m 1 "BUILT_PRODUCTS_DIR" | awk -F' = ' '{print $2}')"
+        mv "${BUILD_PATH}/Editor_iOS.app" ./Editor_iOS.app
+
+    - name: Package Editor
+      uses: actions/upload-artifact@v4
+      with:
+        name: Editor (iOS)
+        path: |
+          Editor_iOS.app
+
+  content:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Package Content
+      uses: actions/upload-artifact@v4
+      with:
+        name: Content
+        path: |
+          Content/Documentation
+          Content/models
+          Content/scripts
+          Content/terrain

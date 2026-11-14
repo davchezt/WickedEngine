@@ -20,12 +20,10 @@ VertextoPixel main(uint vid : SV_VertexID, uint instanceID : SV_InstanceID)
 	uint particleIndex = culledIndirectionBuffer2[culledIndirectionBuffer[instanceID]];
 	uint vertexID = particleIndex * 4 + vid;
 
-	uint4 data = bindless_buffers[geometry.vb_pos_nor_wind].Load4(vertexID * 16);
-	float3 position = asfloat(data.xyz);
-	float3 normal = normalize(unpack_unitvector(data.w));
-	float4 uvsets = unpack_half4(bindless_buffers[geometry.vb_uvs].Load2(vertexID * 8));
-	uint color = bindless_buffers[geometry.vb_col].Load(vertexID * 4);
-
+	float3 position = bindless_buffers_float4[descriptor_index(geometry.vb_pos_wind)][vertexID].xyz;
+	float3 normal = normalize(bindless_buffers_float4[descriptor_index(geometry.vb_nor)][vertexID].xyz);
+	float4 uvsets = bindless_buffers_float4[descriptor_index(geometry.vb_uvs)][vertexID];
+	float4 color = bindless_buffers_float4[descriptor_index(geometry.vb_col)][vertexID];
 
 	// load particle data:
 	Particle particle = particleBuffer[particleIndex];
@@ -37,16 +35,17 @@ VertextoPixel main(uint vid : SV_VertexID, uint instanceID : SV_InstanceID)
 	// Sprite sheet UV transform:
 	const float spriteframe = xEmitterFrameRate == 0 ? 
 		lerp(xEmitterFrameStart, xEmitterFrameCount, lifeLerp) : 
-		((xEmitterFrameStart + particle.life * xEmitterFrameRate) % xEmitterFrameCount);
+		((xEmitterFrameStart + (particle.maxLife - particle.life) * xEmitterFrameRate) % xEmitterFrameCount);
 	const float frameBlend = frac(spriteframe);
 
 	VertextoPixel Out;
-	Out.P = position;
-	Out.pos = mul(GetCamera().view_projection, float4(position, 1));
+	Out.pos = float4(position, 1);
+	Out.clip = dot(Out.pos, GetCamera().clip_plane);
+	Out.pos = mul(GetCamera().view_projection, Out.pos);
 	Out.tex = uvsets;
-	Out.size = size;
-	Out.color = color;
-	Out.unrotated_uv = BILLBOARD[vertexID % 4].xy * float2(1, -1) * 0.5f + 0.5f;
-	Out.frameBlend = frameBlend;
+	Out.size = half(size);
+	Out.color = pack_rgba(color);
+	Out.unrotated_uv = half2(BILLBOARD[vertexID % 4].xy * float2(1, -1) * 0.5f + 0.5f);
+	Out.frameBlend = half(frameBlend);
 	return Out;
 }

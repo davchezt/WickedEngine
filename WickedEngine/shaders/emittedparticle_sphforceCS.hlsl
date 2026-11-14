@@ -8,7 +8,7 @@ StructuredBuffer<float> densityBuffer : register(t1);
 StructuredBuffer<uint> particleCellBuffer : register(t2);
 StructuredBuffer<SPHGridCell> cellBuffer : register(t3);
 
-RWByteAddressBuffer counterBuffer : register(u0);
+RWStructuredBuffer<ParticleCounters> counterBuffer : register(u0);
 RWStructuredBuffer<Particle> particleBuffer : register(u1);
 
 #ifndef SPH_USE_ACCELERATION_GRID
@@ -29,7 +29,7 @@ void main( uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex, ui
 	const float p0 = xSPH_p0;		// reference density
 	const float e = xSPH_e;			// viscosity constant
 
-	uint aliveCount = counterBuffer.Load(PARTICLECOUNTER_OFFSET_ALIVECOUNT);
+	uint aliveCount = counterBuffer[0].aliveCount;
 
 	uint particleIndexA;
 	Particle particleA;
@@ -188,11 +188,7 @@ void main( uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex, ui
 #ifdef DEBUG_PRESSURE
 		// debug pressure:
 		float3 color = lerp(float3(1, 1, 1), float3(1, 0, 0), pow(saturate(pressureA * 0.0005f), 0.5)) * 255;
-		uint uColor = 0;
-		uColor |= (uint)color.r << 0;
-		uColor |= (uint)color.g << 8;
-		uColor |= (uint)color.b << 16;
-		particleBuffer[particleIndexA].color_mirror = uColor;
+		particleBuffer[particleIndexA].color = pack_rgba(color, 1);
 #endif // DEBUG_PRESSURE
 
 	}

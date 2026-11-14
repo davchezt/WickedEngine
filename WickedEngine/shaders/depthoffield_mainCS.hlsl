@@ -32,6 +32,9 @@ void main(uint3 Gid : SV_GroupID, uint3 GTid : SV_GroupThreadID)
     const uint2 subtile = unflatten2D(subtile_idx, DEPTHOFFIELD_TILESIZE / 2 / POSTPROCESS_BLOCKSIZE);
     const uint2 subtile_upperleft = tile * DEPTHOFFIELD_TILESIZE / 2 + subtile * POSTPROCESS_BLOCKSIZE;
     const uint2 pixel = subtile_upperleft + unflatten2D(GTid.x, POSTPROCESS_BLOCKSIZE);
+	const float2 uv = (pixel + 0.5f) * postprocess.resolution_rcp;
+	if (!GetCamera().is_uv_inside_scissor(uv))
+		return;
 
     float alpha;
     float3 color;
@@ -54,8 +57,6 @@ void main(uint3 Gid : SV_GroupID, uint3 GTid : SV_GroupThreadID)
     const float center_backgroundWeight = center_presort.g;
     const float center_foregroundWeight = center_presort.b;
 
-    const float2 uv = (pixel + 0.5f) * postprocess.resolution_rcp;
-
 #ifdef DEPTHOFFIELD_CHEAP
     color = center_color;
     [unroll(DOF_RING_COUNT)]
@@ -63,7 +64,7 @@ void main(uint3 Gid : SV_GroupID, uint3 GTid : SV_GroupThreadID)
     {
         for (uint i = ringSampleCount[j]; i < ringSampleCount[j + 1]; ++i)
         {
-            const float2 uv2 = uv + ringScale * disc[i].xy;
+            const float2 uv2 = GetCamera().clamp_uv_to_scissor(uv + ringScale * disc[i].xy);
             color += texture_prefilter.SampleLevel(sampler_linear_clamp, uv2, 0);
         }
     }
@@ -79,8 +80,8 @@ void main(uint3 Gid : SV_GroupID, uint3 GTid : SV_GroupThreadID)
         for (uint i = ringSampleCount[j]; i < ringSampleCount[j + 1]; ++i)
         {
             const float offsetCoc = disc[i].z;
-            const float2 uv2 = uv + ringScale * disc[i].xy;
-            const float4 color = float4(texture_prefilter.SampleLevel(sampler_linear_clamp, uv2, 0), 1);
+            const float2 uv2 = GetCamera().clamp_uv_to_scissor(uv + ringScale * disc[i].xy);
+            const float4 color = float4(texture_prefilter.SampleLevel(sampler_point_clamp, uv2, 0), 1);
             const float3 presort = texture_presort.SampleLevel(sampler_point_clamp, uv2, 0).rgb;
             const float coc = presort.r;
             const float spreadCmp = SpreadCmp(offsetCoc, coc, spreadScale);

@@ -1,6 +1,4 @@
 #pragma once
-#include "WickedEngine.h"
-
 class EditorComponent;
 
 struct ModifierWindow : public wi::gui::Window
@@ -9,7 +7,7 @@ struct ModifierWindow : public wi::gui::Window
 	std::function<void()> generation_callback;
 	wi::gui::ComboBox blendCombo;
 	wi::gui::Slider weightSlider;
-	wi::gui::Slider frequencySlider;
+	wi::gui::Slider scaleSlider;
 
 	virtual ~ModifierWindow() = default;
 
@@ -22,7 +20,7 @@ struct PerlinModifierWindow : public ModifierWindow
 	wi::gui::Slider octavesSlider;
 
 	PerlinModifierWindow();
-	void ResizeLayout();
+	void ResizeLayout() override;
 	void Bind(wi::terrain::PerlinModifier* ptr);
 	void From(wi::terrain::PerlinModifier* ptr);
 };
@@ -40,13 +38,60 @@ struct VoronoiModifierWindow : public ModifierWindow
 };
 struct HeightmapModifierWindow : public ModifierWindow
 {
-	wi::gui::Slider scaleSlider;
+	wi::gui::Slider amountSlider;
 	wi::gui::Button loadButton;
 
 	HeightmapModifierWindow();
 	void ResizeLayout() override;
 	void Bind(wi::terrain::HeightmapModifier* ptr);
 	void From(wi::terrain::HeightmapModifier* ptr);
+};
+
+struct PropWindow : public wi::gui::Window
+{
+	wi::gui::ComboBox meshCombo;
+	wi::gui::Slider densitySlider;
+	wi::gui::Slider clumpingSlider;
+	wi::gui::Slider spacingSlider;
+	wi::gui::Slider seedSlider;
+	wi::gui::ComboBox regionCombo;
+	wi::gui::Slider regionPowerSlider;
+	wi::gui::Slider minSizeSlider;
+	wi::gui::Slider maxSizeSlider;
+	wi::gui::TextInputField minYOffsetInput;
+	wi::gui::TextInputField maxYOffsetInput;
+
+	PropWindow(wi::terrain::Terrain* terrain, wi::terrain::Prop* prop, wi::scene::Scene* scene);
+	void ResizeLayout() override;
+
+	wi::terrain::Terrain* terrain = nullptr;
+	wi::terrain::Prop* prop = nullptr;
+	wi::scene::Scene* scene = nullptr;
+
+	std::function<void()> generation_callback;
+};
+
+struct PropsWindow : public wi::gui::Window
+{
+	wi::gui::Button addButton;
+	wi::gui::Button reloadButton;
+
+	PropsWindow(EditorComponent* editor);
+
+	void Rebuild();
+	void AddWindow(wi::terrain::Prop& prop);
+
+	void Update(const wi::Canvas& canvas, float dt) override;
+
+	void ResizeLayout() override;
+
+	EditorComponent* editor = nullptr;
+	wi::terrain::Terrain* terrain = nullptr;
+
+	wi::vector<std::unique_ptr<PropWindow>> windows;
+	wi::vector<PropWindow*> windows_to_remove;
+
+	std::function<void()> generation_callback;
 };
 
 class TerrainWindow : public wi::gui::Window
@@ -71,11 +116,17 @@ public:
 	wi::gui::Slider bottomLevelSlider;
 	wi::gui::Slider topLevelSlider;
 	wi::gui::Button saveHeightmapButton;
+	wi::gui::Button saveRegionButton;
 	wi::gui::ComboBox addModifierCombo;
 
 	wi::gui::Slider region1Slider;
 	wi::gui::Slider region2Slider;
 	wi::gui::Slider region3Slider;
+
+	wi::gui::ComboBox materialCombos[wi::terrain::MATERIAL_COUNT];
+	wi::gui::ComboBox grassCombos[wi::terrain::MATERIAL_COUNT];
+
+	std::unique_ptr<PropsWindow> propsWindow;
 
 	enum PRESET
 	{
@@ -83,6 +134,7 @@ public:
 		PRESET_ISLANDS,
 		PRESET_MOUNTAINS,
 		PRESET_ARCTIC,
+		PRESET_DESERT,
 	};
 
 	wi::vector<std::unique_ptr<ModifierWindow>> modifiers;
@@ -92,11 +144,12 @@ public:
 
 	EditorComponent* editor = nullptr;
 	wi::ecs::Entity entity = wi::ecs::INVALID_ENTITY;
-	wi::terrain::Terrain terrain_preset;
-	wi::terrain::Terrain* terrain = &terrain_preset;
+	wi::terrain::Terrain* terrain = nullptr;
 	void SetEntity(wi::ecs::Entity entity);
 	void AddModifier(ModifierWindow* modifier_window);
 	void SetupAssets();
+
+	void RefreshMaterialComboBoxes();
 
 	void Update(const wi::Canvas& canvas, float dt) override;
 	void ResizeLayout() override;

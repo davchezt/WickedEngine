@@ -24,14 +24,14 @@ namespace wi::lua::primitive
 
 
 
-	const char Ray_BindLua::className[] = "Ray";
-
 	Luna<Ray_BindLua>::FunctionType Ray_BindLua::methods[] = {
 		lunamethod(Ray_BindLua, Intersects),
 		lunamethod(Ray_BindLua, GetOrigin),
 		lunamethod(Ray_BindLua, GetDirection),
 		lunamethod(Ray_BindLua, SetOrigin),
 		lunamethod(Ray_BindLua, SetDirection),
+		lunamethod(Ray_BindLua, CreateFromPoints),
+		lunamethod(Ray_BindLua, GetPlacementOrientation),
 		{ NULL, NULL }
 	};
 	Luna<Ray_BindLua>::PropertyType Ray_BindLua::properties[] = {
@@ -99,13 +99,24 @@ namespace wi::lua::primitive
 				return 1;
 			}
 
+			Vector_BindLua* vec = Luna<Vector_BindLua>::lightcheck(L, 1);
+			if (vec)
+			{
+				XMVECTOR P = XMLoadFloat4(&vec->data);
+				XMVECTOR O = XMLoadFloat3(&ray.origin);
+				XMVECTOR D = XMLoadFloat3(&ray.direction);
+				XMVECTOR I = XMPlaneIntersectLine(P, O + D * ray.TMin, O + D * ray.TMax);
+				Luna<Vector_BindLua>::push(L, I);
+				return 1;
+			}
+
 		}
-		wi::lua::SError(L, "[Intersects(AABB), Intersects(Sphere), Intersects(Capsule)] no matching arguments! ");
+		wi::lua::SError(L, "[Intersects(AABB), Intersects(Sphere), Intersects(Capsule), Intersects(Vector)] no matching arguments! ");
 		return 0;
 	}
 	int Ray_BindLua::GetOrigin(lua_State* L)
 	{
-		Luna<Vector_BindLua>::push(L, new Vector_BindLua(XMLoadFloat3(&ray.origin)));
+		Luna<Vector_BindLua>::push(L, XMLoadFloat3(&ray.origin));
 		return 1;
 	}
 	int Ray_BindLua::SetOrigin(lua_State *L)
@@ -131,7 +142,7 @@ namespace wi::lua::primitive
 	}
 	int Ray_BindLua::GetDirection(lua_State* L)
 	{
-		Luna<Vector_BindLua>::push(L, new Vector_BindLua(XMLoadFloat3(&ray.direction)));
+		Luna<Vector_BindLua>::push(L, XMLoadFloat3(&ray.direction));
 		return 1;
 	}
 	int Ray_BindLua::SetDirection(lua_State *L)
@@ -155,10 +166,53 @@ namespace wi::lua::primitive
 		}
 		return 0;
 	}
+	int Ray_BindLua::CreateFromPoints(lua_State* L)
+	{
+		int argc = wi::lua::SGetArgCount(L);
+		if (argc > 1)
+		{
+			Vector_BindLua* a = Luna<Vector_BindLua>::lightcheck(L, 1);
+			Vector_BindLua* b = Luna<Vector_BindLua>::lightcheck(L, 2);
+			if (a != nullptr && b != nullptr)
+			{
+				ray.CreateFromPoints(a->GetFloat3(), b->GetFloat3());
+			}
+			else
+			{
+				wi::lua::SError(L, "CreateFromPoints(Vector a,b) argument is not a vector!");
+			}
+		}
+		else
+		{
+			wi::lua::SError(L, "CreateFromPoints(Vector a,b) not enough arguments!");
+		}
+		return 0;
+	}
+	int Ray_BindLua::GetPlacementOrientation(lua_State* L)
+	{
+		int argc = wi::lua::SGetArgCount(L);
+		if (argc > 1)
+		{
+			Vector_BindLua* position = Luna<Vector_BindLua>::lightcheck(L, 1);
+			if (position == nullptr)
+			{
+				wi::lua::SError(L, "GetPlacementOrientation(Vector position, normal) first argument is not a Vector!");
+				return 0;
+			}
+			Vector_BindLua* normal = Luna<Vector_BindLua>::lightcheck(L, 2);
+			if (normal == nullptr)
+			{
+				wi::lua::SError(L, "GetPlacementOrientation(Vector position, normal) second argument is not a Vector!");
+				return 0;
+			}
+			Luna<Matrix_BindLua>::push(L, ray.GetPlacementOrientation(position->GetFloat3(), normal->GetFloat3()));
+			return 1;
+		}
+		wi::lua::SError(L, "GetPlacementOrientation(Vector position, normal) not enough arguments!");
+		return 0;
+	}
 
 
-
-	const char AABB_BindLua::className[] = "AABB";
 
 	Luna<AABB_BindLua>::FunctionType AABB_BindLua::methods[] = {
 		lunamethod(AABB_BindLua, Intersects),
@@ -171,6 +225,7 @@ namespace wi::lua::primitive
 		lunamethod(AABB_BindLua, GetHalfExtents),
 		lunamethod(AABB_BindLua, Transform),
 		lunamethod(AABB_BindLua, GetAsBoxMatrix),
+		lunamethod(AABB_BindLua, ProjectToScreen),
 		{ NULL, NULL }
 	};
 	Luna<AABB_BindLua>::PropertyType AABB_BindLua::properties[] = {
@@ -217,6 +272,13 @@ namespace wi::lua::primitive
 		int argc = wi::lua::SGetArgCount(L);
 		if (argc > 0)
 		{
+			Vector_BindLua* _vec = Luna<Vector_BindLua>::lightcheck(L, 1);
+			if (_vec)
+			{
+				wi::lua::SSetBool(L, aabb.intersects(_vec->GetFloat3()));
+				return 1;
+			}
+
 			AABB_BindLua* _aabb = Luna<AABB_BindLua>::lightcheck(L, 1);
 			if (_aabb)
 			{
@@ -267,7 +329,7 @@ namespace wi::lua::primitive
 	int AABB_BindLua::GetMin(lua_State* L)
 	{
 		XMFLOAT3 M = aabb.getMin();
-		Luna<Vector_BindLua>::push(L, new Vector_BindLua(XMLoadFloat3(&M)));
+		Luna<Vector_BindLua>::push(L, XMLoadFloat3(&M));
 		return 1;
 	}
 	int AABB_BindLua::SetMin(lua_State *L)
@@ -294,7 +356,7 @@ namespace wi::lua::primitive
 	int AABB_BindLua::GetMax(lua_State* L)
 	{
 		XMFLOAT3 M = aabb.getMax();
-		Luna<Vector_BindLua>::push(L, new Vector_BindLua(XMLoadFloat3(&M)));
+		Luna<Vector_BindLua>::push(L, XMLoadFloat3(&M));
 		return 1;
 	}
 	int AABB_BindLua::SetMax(lua_State *L)
@@ -321,13 +383,13 @@ namespace wi::lua::primitive
 	int AABB_BindLua::GetCenter(lua_State* L)
 	{
 		XMFLOAT3 C = aabb.getCenter();
-		Luna<Vector_BindLua>::push(L, new Vector_BindLua(XMLoadFloat3(&C)));
+		Luna<Vector_BindLua>::push(L, XMLoadFloat3(&C));
 		return 1;
 	}
 	int AABB_BindLua::GetHalfExtents(lua_State* L)
 	{
 		XMFLOAT3 H = aabb.getHalfWidth();
-		Luna<Vector_BindLua>::push(L, new Vector_BindLua(XMLoadFloat3(&H)));
+		Luna<Vector_BindLua>::push(L, XMLoadFloat3(&H));
 		return 1;
 	}
 	int AABB_BindLua::Transform(lua_State* L)
@@ -338,7 +400,7 @@ namespace wi::lua::primitive
 			Matrix_BindLua* _matrix = Luna<Matrix_BindLua>::lightcheck(L, 1);
 			if (_matrix)
 			{
-				Luna<AABB_BindLua>::push(L, new AABB_BindLua(aabb.transform(_matrix->data)));
+				Luna<AABB_BindLua>::push(L, aabb.transform(_matrix->data));
 				return 1;
 			}
 			else
@@ -351,13 +413,28 @@ namespace wi::lua::primitive
 	}
 	int AABB_BindLua::GetAsBoxMatrix(lua_State* L)
 	{
-		Luna<Matrix_BindLua>::push(L, new Matrix_BindLua(aabb.getAsBoxMatrix()));
+		Luna<Matrix_BindLua>::push(L, aabb.getAsBoxMatrix());
+		return 1;
+	}
+	int AABB_BindLua::ProjectToScreen(lua_State* L)
+	{
+		int argc = wi::lua::SGetArgCount(L);
+		if (argc < 1)
+		{
+			wi::lua::SError(L, "ProjectToScreen(Matrix ViewProjection) not enough arguments!");
+			return 0;
+		}
+		Matrix_BindLua* mat = Luna<Matrix_BindLua>::lightcheck(L, 1);
+		if (mat == nullptr)
+		{
+			wi::lua::SError(L, "ProjectToScreen(Matrix ViewProjection) first argument is not a Matrix!");
+			return 0;
+		}
+		Luna<Vector_BindLua>::push(L, aabb.ProjectToScreen(XMLoadFloat4x4(&mat->data)));
 		return 1;
 	}
 
 
-
-	const char Sphere_BindLua::className[] = "Sphere";
 
 	Luna<Sphere_BindLua>::FunctionType Sphere_BindLua::methods[] = {
 		lunamethod(Sphere_BindLua, Intersects),
@@ -365,6 +442,7 @@ namespace wi::lua::primitive
 		lunamethod(Sphere_BindLua, GetRadius),
 		lunamethod(Sphere_BindLua, SetCenter),
 		lunamethod(Sphere_BindLua, SetRadius),
+		lunamethod(Sphere_BindLua, GetPlacementOrientation),
 		{ NULL, NULL }
 	};
 	Luna<Sphere_BindLua>::PropertyType Sphere_BindLua::properties[] = {
@@ -404,6 +482,14 @@ namespace wi::lua::primitive
 		int argc = wi::lua::SGetArgCount(L);
 		if (argc > 0)
 		{
+			Vector_BindLua* _vec = Luna<Vector_BindLua>::lightcheck(L, 1);
+			if (_vec)
+			{
+				bool intersects = sphere.intersects(_vec->GetFloat3());
+				wi::lua::SSetBool(L, intersects);
+				return 1;
+			}
+
 			AABB_BindLua* _aabb = Luna<AABB_BindLua>::lightcheck(L, 1);
 			if (_aabb)
 			{
@@ -416,6 +502,14 @@ namespace wi::lua::primitive
 			if (_sphere)
 			{
 				bool intersects = sphere.intersects(_sphere->sphere);
+				wi::lua::SSetBool(L, intersects);
+				return 1;
+			}
+
+			Capsule_BindLua* _capsule = Luna<Capsule_BindLua>::lightcheck(L, 1);
+			if (_capsule)
+			{
+				bool intersects = sphere.intersects(_capsule->capsule);
 				wi::lua::SSetBool(L, intersects);
 				return 1;
 			}
@@ -434,7 +528,7 @@ namespace wi::lua::primitive
 	}
 	int Sphere_BindLua::GetCenter(lua_State* L)
 	{
-		Luna<Vector_BindLua>::push(L, new Vector_BindLua(XMLoadFloat3(&sphere.center)));
+		Luna<Vector_BindLua>::push(L, XMLoadFloat3(&sphere.center));
 		return 1;
 	}
 	int Sphere_BindLua::GetRadius(lua_State* L)
@@ -476,10 +570,31 @@ namespace wi::lua::primitive
 		}
 		return 0;
 	}
+	int Sphere_BindLua::GetPlacementOrientation(lua_State* L)
+	{
+		int argc = wi::lua::SGetArgCount(L);
+		if (argc > 1)
+		{
+			Vector_BindLua* position = Luna<Vector_BindLua>::lightcheck(L, 1);
+			if (position == nullptr)
+			{
+				wi::lua::SError(L, "GetPlacementOrientation(Vector position, normal) first argument is not a Vector!");
+				return 0;
+			}
+			Vector_BindLua* normal = Luna<Vector_BindLua>::lightcheck(L, 2);
+			if (normal == nullptr)
+			{
+				wi::lua::SError(L, "GetPlacementOrientation(Vector position, normal) second argument is not a Vector!");
+				return 0;
+			}
+			Luna<Matrix_BindLua>::push(L, sphere.GetPlacementOrientation(position->GetFloat3(), normal->GetFloat3()));
+			return 1;
+		}
+		wi::lua::SError(L, "GetPlacementOrientation(Vector position, normal) not enough arguments!");
+		return 0;
+	}
 
 
-
-	const char Capsule_BindLua::className[] = "Capsule";
 
 	Luna<Capsule_BindLua>::FunctionType Capsule_BindLua::methods[] = {
 		lunamethod(Capsule_BindLua, Intersects),
@@ -490,6 +605,7 @@ namespace wi::lua::primitive
 		lunamethod(Capsule_BindLua, SetBase),
 		lunamethod(Capsule_BindLua, SetTip),
 		lunamethod(Capsule_BindLua, SetRadius),
+		lunamethod(Capsule_BindLua, GetPlacementOrientation),
 		{ NULL, NULL }
 	};
 	Luna<Capsule_BindLua>::PropertyType Capsule_BindLua::properties[] = {
@@ -541,10 +657,22 @@ namespace wi::lua::primitive
 				float depth = 0;
 				bool intersects = capsule.intersects(_capsule->capsule, position, normal, depth);
 				wi::lua::SSetBool(L, intersects);
-				Luna<Vector_BindLua>::push(L, new Vector_BindLua(XMLoadFloat3(&position)));
-				Luna<Vector_BindLua>::push(L, new Vector_BindLua(XMLoadFloat3(&normal)));
+				Luna<Vector_BindLua>::push(L, XMLoadFloat3(&position));
+				Luna<Vector_BindLua>::push(L, XMLoadFloat3(&normal));
 				wi::lua::SSetFloat(L, depth);
 				return 4;
+			}
+
+			Sphere_BindLua* sphere = Luna<Sphere_BindLua>::lightcheck(L, 1);
+			if (sphere)
+			{
+				XMFLOAT3 normal = XMFLOAT3(0, 0, 0);
+				float depth = 0;
+				bool intersects = capsule.intersects(sphere->sphere, depth, normal);
+				wi::lua::SSetBool(L, intersects);
+				wi::lua::SSetFloat(L, depth);
+				Luna<Vector_BindLua>::push(L, XMLoadFloat3(&normal));
+				return 3;
 			}
 
 			Ray_BindLua* ray = Luna<Ray_BindLua>::lightcheck(L, 1);
@@ -553,23 +681,30 @@ namespace wi::lua::primitive
 				wi::lua::SSetBool(L, capsule.intersects(ray->ray));
 				return 1;
 			}
+
+			Vector_BindLua* point = Luna<Vector_BindLua>::lightcheck(L, 1);
+			if (point)
+			{
+				wi::lua::SSetBool(L, capsule.intersects(point->GetFloat3()));
+				return 1;
+			}
 		}
-		wi::lua::SError(L, "Intersects(Capsule/Ray other) no matching arguments! ");
+		wi::lua::SError(L, "Intersects(Capsule/Ray/Vector other) no matching arguments! ");
 		return 0;
 	}
 	int Capsule_BindLua::GetAABB(lua_State* L)
 	{
-		Luna<AABB_BindLua>::push(L, new AABB_BindLua(capsule.getAABB()));
+		Luna<AABB_BindLua>::push(L, capsule.getAABB());
 		return 1;
 	}
 	int Capsule_BindLua::GetBase(lua_State* L)
 	{
-		Luna<Vector_BindLua>::push(L, new Vector_BindLua(XMLoadFloat3(&capsule.base)));
+		Luna<Vector_BindLua>::push(L, XMLoadFloat3(&capsule.base));
 		return 1;
 	}
 	int Capsule_BindLua::GetTip(lua_State* L)
 	{
-		Luna<Vector_BindLua>::push(L, new Vector_BindLua(XMLoadFloat3(&capsule.tip)));
+		Luna<Vector_BindLua>::push(L, XMLoadFloat3(&capsule.tip));
 		return 1;
 	}
 	int Capsule_BindLua::GetRadius(lua_State* L)
@@ -630,6 +765,29 @@ namespace wi::lua::primitive
 		{
 			wi::lua::SError(L, "SetRadius(float value) not enough arguments!");
 		}
+		return 0;
+	}
+	int Capsule_BindLua::GetPlacementOrientation(lua_State* L)
+	{
+		int argc = wi::lua::SGetArgCount(L);
+		if (argc > 1)
+		{
+			Vector_BindLua* position = Luna<Vector_BindLua>::lightcheck(L, 1);
+			if (position == nullptr)
+			{
+				wi::lua::SError(L, "GetPlacementOrientation(Vector position, normal) first argument is not a Vector!");
+				return 0;
+			}
+			Vector_BindLua* normal = Luna<Vector_BindLua>::lightcheck(L, 2);
+			if (normal == nullptr)
+			{
+				wi::lua::SError(L, "GetPlacementOrientation(Vector position, normal) second argument is not a Vector!");
+				return 0;
+			}
+			Luna<Matrix_BindLua>::push(L, capsule.GetPlacementOrientation(position->GetFloat3(), normal->GetFloat3()));
+			return 1;
+		}
+		wi::lua::SError(L, "GetPlacementOrientation(Vector position, normal) not enough arguments!");
 		return 0;
 	}
 

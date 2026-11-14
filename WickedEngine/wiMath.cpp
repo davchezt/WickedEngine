@@ -40,9 +40,9 @@ namespace wi::math
 	}
 	XMFLOAT3 GetQuadraticBezierPos(const XMFLOAT3& a, const XMFLOAT3&b, const XMFLOAT3& c, float t){
 		float param0, param1, param2;
-		param0 = powf(1 - t, 2);
-		param1 = 2 * (1 - t)*t;
-		param2 = powf(t, 2);
+		param0 = sqr(1 - t);
+		param1 = 2 * (1 - t) * t;
+		param2 = sqr(t);
 		float x = param0*a.x + param1*b.x + param2*c.x;
 		float y = param0*a.y + param1*b.y + param2*c.y;
 		float z = param0*a.z + param1*b.z + param2*c.z;
@@ -61,24 +61,6 @@ namespace wi::math
 		return XMFLOAT3(roll, pitch, yaw);
 	}
 	
-	XMVECTOR GetClosestPointToLine(const XMVECTOR& A, const XMVECTOR& B, const XMVECTOR& P, bool segmentClamp)
-	{
-		XMVECTOR AP_ = P - A;
-		XMVECTOR AB_ = B - A;
-		XMFLOAT3 AB, AP;
-		XMStoreFloat3(&AB, AB_);
-		XMStoreFloat3(&AP, AP_);
-		float ab2 = AB.x*AB.x + AB.y*AB.y + AB.z*AB.z;
-		float ap_ab = AP.x*AB.x + AP.y*AB.y + AP.z*AB.z;
-		float t = ap_ab / ab2;
-		if (segmentClamp)
-		{
-			if (t < 0.0f) t = 0.0f;
-			else if (t > 1.0f) t = 1.0f;
-		}
-		XMVECTOR Closest = A + AB_ * t;
-		return Closest;
-	}
 	float GetPointSegmentDistance(const XMVECTOR& point, const XMVECTOR& segmentA, const XMVECTOR& segmentB)
 	{
 		// Return minimum distance between line segment vw and point p
@@ -118,6 +100,15 @@ namespace wi::math
 		if (XMVectorGetX(XMVector3Dot(XMVector3Cross(A, B), AXIS)) < 0)
 		{
 			angle = XM_2PI - angle;
+		}
+		return angle;
+	}
+	float GetAngleSigned(XMVECTOR A, XMVECTOR B, XMVECTOR AXIS)
+	{
+		float angle = XMVectorGetX(XMVector3AngleBetweenVectors(A, B));
+		if (XMVectorGetX(XMVector3Dot(XMVector3Cross(A, B), AXIS)) < 0)
+		{
+			angle = -angle;
 		}
 		return angle;
 	}

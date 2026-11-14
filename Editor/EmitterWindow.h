@@ -1,6 +1,4 @@
 #pragma once
-#include "WickedEngine.h"
-
 class EditorComponent;
 
 class MaterialWindow;
@@ -19,6 +17,8 @@ public:
 	wi::EmittedParticleSystem* GetEmitter();
 
 	wi::gui::Button restartButton;
+	wi::gui::Button burstButton;
+	wi::gui::TextInputField burstCountInput;
 	wi::gui::ComboBox meshComboBox;
 	wi::gui::ComboBox shaderTypeComboBox;
 	wi::gui::Label infoLabel;
@@ -31,12 +31,16 @@ public:
 	wi::gui::CheckBox volumeCheckBox;
 	wi::gui::CheckBox frameBlendingCheckBox;
 	wi::gui::CheckBox collidersDisabledCheckBox;
+	wi::gui::CheckBox takeColorCheckBox;
 	wi::gui::Slider emitCountSlider;
+	wi::gui::Slider burstOnCreateSlider;
 	wi::gui::Slider emitSizeSlider;
 	wi::gui::Slider emitRotationSlider;
 	wi::gui::Slider emitNormalSlider;
 	wi::gui::Slider emitScalingSlider;
 	wi::gui::Slider emitLifeSlider;
+	wi::gui::Slider emitOpacityCurveStartSlider;
+	wi::gui::Slider emitOpacityCurveEndSlider;
 	wi::gui::Slider emitRandomnessSlider;
 	wi::gui::Slider emitLifeRandomnessSlider;
 	wi::gui::Slider emitColorRandomnessSlider;

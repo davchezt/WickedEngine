@@ -1,19 +1,18 @@
-#include "objectHF.hlsli"
 #include "skyHF.hlsli"
 
-float4 main(float4 pos : SV_POSITION, float2 clipspace : TEXCOORD) : SV_TARGET
+struct PushData
 {
-	float4 unprojected = mul(GetCamera().inverse_view_projection, float4(clipspace, 0.0f, 1.0f));
-	unprojected.xyz /= unprojected.w;
+	uint clouds_enabled;
+};
+PUSHCONSTANT(push, PushData);
 
-	const float3 V = normalize(unprojected.xyz - GetCamera().position);
+float4 main(float4 pos : SV_Position) : SV_Target
+{
+	const float3 V = normalize(-GetCamera().screen_to_view(pos));
 
-	float4 color = float4(texture_globalenvmap.SampleLevel(sampler_linear_clamp, V, 0).rgb, 1);
+	float4 color = float4(GetStaticSkyColor(V, push.clouds_enabled), 1);
 
-	float4 pos2DPrev = mul(GetCamera().previous_view_projection, float4(unprojected.xyz, 1));
-	float2 velocity = ((pos2DPrev.xy / pos2DPrev.w - GetCamera().temporalaa_jitter_prev) - (clipspace - GetCamera().temporalaa_jitter)) * float2(0.5f, -0.5f);
-
-	color = clamp(color, 0, 65000);
+	color = saturateMediump(color);
 	return color;
 }
 

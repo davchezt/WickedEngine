@@ -1,12 +1,16 @@
 #include "wiXInput.h"
 
-#if __has_include("xinput.h")
+#if __has_include(<xinput.h>)
 
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
+#if defined(PLATFORM_WINDOWS_DESKTOP)
 #include <xinput.h>
-
 #pragma comment(lib,"xinput.lib")
+#endif // PLATFORM_WINDOWS_DESKTOP
+
+#ifdef PLATFORM_XBOX
+#include <XInputOnGameInput.h>
+using namespace XInputOnGameInput;
+#endif // PLATFORM_XBOX
 
 namespace wi::input::xinput
 {
@@ -117,4 +121,4 @@ namespace wi::input::xinput
 	bool GetControllerState(wi::input::ControllerState* state, int index) { return false; }
 	void SetControllerFeedback(const wi::input::ControllerFeedback& data, int index) {}
 }
-#endif // __has_include("xinput.h")
+#endif // __has_include(<xinput.h>)

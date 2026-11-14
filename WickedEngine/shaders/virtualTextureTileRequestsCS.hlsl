@@ -9,8 +9,8 @@ void main(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
 	if (DTid.x >= push.width / 2 || DTid.y >= push.height / 2)
 		return;
 
-	Texture2D<uint> feedbackTexture = bindless_textures_uint[push.feedbackTextureRO];
-	RWByteAddressBuffer requestBuffer = bindless_rwbuffers[push.requestBufferRW];
+	RWTexture2D<uint> feedbackTexture = bindless_rwtextures_uint[descriptor_index(push.feedbackTextureRW)]; // this is not written, but we keep it in UAV state intentionally
+	RWByteAddressBuffer requestBuffer = bindless_rwbuffers[descriptor_index(push.requestBufferRW)];
 
 	uint page_count = 0;
 	uint lod_offsets[10];
@@ -54,6 +54,6 @@ void main(uint3 DTid : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
 		const uint l_width = max(1u, push.width >> lod);
 		const uint l_page_offset = lod_offsets[lod];
 		const uint l_index = l_page_offset + l_x + l_y * l_width;
-		requestBuffer.InterlockedMin(l_index * sizeof(uint), page_request);
+		requestBuffer.InterlockedMin(uint(l_index * sizeof(uint)), page_request);
 	}
 }

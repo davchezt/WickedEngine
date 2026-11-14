@@ -1,15 +1,13 @@
 #include "stdafx.h"
 #include "HierarchyWindow.h"
-#include "Editor.h"
 
 using namespace wi::ecs;
 using namespace wi::scene;
 
-
 void HierarchyWindow::Create(EditorComponent* _editor)
 {
 	editor = _editor;
-	wi::gui::Window::Create(ICON_HIERARCHY " Hierarchy", wi::gui::Window::WindowControls::COLLAPSE | wi::gui::Window::WindowControls::CLOSE);
+	wi::gui::Window::Create(ICON_HIERARCHY " Hierarchy", wi::gui::Window::WindowControls::COLLAPSE | wi::gui::Window::WindowControls::CLOSE | wi::gui::Window::WindowControls::FIT_ALL_WIDGETS_VERTICAL);
 	SetSize(XMFLOAT2(480, 60));
 
 	closeButton.SetTooltip("Delete HierarchyComponent");
@@ -19,12 +17,12 @@ void HierarchyWindow::Create(EditorComponent* _editor)
 		archive << EditorComponent::HISTORYOP_COMPONENT_DATA;
 		editor->RecordEntity(archive, entity);
 
-		editor->GetCurrentScene().hierarchy.Remove(entity);
+		editor->GetCurrentScene().Component_Detach(entity);
 
 		editor->RecordEntity(archive, entity);
 
-		editor->optionsWnd.RefreshEntityTree();
-		});
+		editor->componentsWnd.RefreshEntityTree();
+	});
 
 	float x = 80;
 	float xx = x;
@@ -37,27 +35,22 @@ void HierarchyWindow::Create(EditorComponent* _editor)
 	parentCombo.Create("Parent: ");
 	parentCombo.SetSize(XMFLOAT2(wid, hei));
 	parentCombo.SetPos(XMFLOAT2(x, y));
-	parentCombo.OnSelect([&](wi::gui::EventArgs args) {
-
-		wi::Archive& archive = editor->AdvanceHistory();
-		archive << EditorComponent::HISTORYOP_COMPONENT_DATA;
-		editor->RecordEntity(archive, entity);
-
+	parentCombo.OnSelect([this](wi::gui::EventArgs args) {
 		Scene& scene = editor->GetCurrentScene();
-		if (args.iValue == 0)
+		for (auto& x : editor->translator.selected)
 		{
-			scene.Component_Detach(entity);
+			if (args.iValue == 0)
+			{
+				scene.Component_Detach(x.entity);
+			}
+			else
+			{
+				scene.Component_Attach(x.entity, (Entity)args.userdata);
+			}
 		}
-		else
-		{
-			scene.Component_Attach(entity, (Entity)args.userdata);
-		}
+		editor->componentsWnd.RefreshEntityTree();
 
-		editor->RecordEntity(archive, entity);
-
-		editor->optionsWnd.RefreshEntityTree();
-
-		});
+	});
 	parentCombo.SetTooltip("Choose a parent entity (also works if selected entity has no transform)");
 	AddWidget(&parentCombo);
 
@@ -71,46 +64,106 @@ void HierarchyWindow::Create(EditorComponent* _editor)
 
 void HierarchyWindow::SetEntity(Entity entity)
 {
-	if (this->entity == entity)
-		return;
+	if (entity == this->entity)
+		return; // refreshing the things below every frame can get very expensive, so only refresh if selection changed
+
 	this->entity = entity;
 
-	Scene& scene = editor->GetCurrentScene();
+	const Scene& scene = editor->GetCurrentScene();
 
 	entities.clear();
 	scene.FindAllEntities(entities);
 
+	// Sort entities by hierarchy depth
+	wi::vector<wi::ecs::Entity> sorted_entities(entities.begin(), entities.end());
+	std::sort(sorted_entities.begin(), sorted_entities.end(), [&scene](wi::ecs::Entity a, wi::ecs::Entity b) {
+		auto get_depth = [&scene](const wi::ecs::Entity e) -> int {
+			int depth = 0;
+			const HierarchyComponent* h = scene.hierarchy.GetComponent(e);
+			while (h != nullptr && h->parentID != INVALID_ENTITY)
+			{
+				depth++;
+				h = scene.hierarchy.GetComponent(h->parentID);
+			}
+			return depth;
+		};
+		const int da = get_depth(a);
+		const int db = get_depth(b);
+		if (da != db)
+			return da < db;
+		// Secondary sort: by name for stable ordering within same depth
+		const NameComponent* na = scene.names.GetComponent(a);
+		const NameComponent* nb = scene.names.GetComponent(b);
+		const std::string sa = na ? na->name : std::to_string(a);
+		const std::string sb = nb ? nb->name : std::to_string(b);
+		return sa < sb;
+	});
+
 	parentCombo.ClearItems();
 	parentCombo.AddItem("NO PARENT " ICON_DISABLED);
-	HierarchyComponent* hier = scene.hierarchy.GetComponent(entity);
-	for (auto candidate_parent_entity : entities)
+
+	const HierarchyComponent* hierarchy_component = scene.hierarchy.GetComponent(entity);
+	for (const auto candidate_parent_entity : sorted_entities)
 	{
 		if (candidate_parent_entity == entity)
 		{
-			continue; // Don't list selected (don't allow attach to self)
+			continue; // Skip this candidate (can't be its own parent)
 		}
 
-		// Don't allow creating a loop:
+		// Skip candidates that are descendants of the selected entity to prevent circular hierarchy
 		bool loop = false;
-		const HierarchyComponent* candidate_hier = scene.hierarchy.GetComponent(candidate_parent_entity);
-		while (candidate_hier != nullptr && loop == false)
+		const HierarchyComponent* candidate_hierarchy_component = scene.hierarchy.GetComponent(candidate_parent_entity);
+		while (candidate_hierarchy_component != nullptr && loop == false)
 		{
-			if (candidate_hier->parentID == entity)
+			if (candidate_hierarchy_component->parentID == entity)
 			{
 				loop = true;
 				break;
 			}
-			candidate_hier = scene.hierarchy.GetComponent(candidate_hier->parentID);
+			candidate_hierarchy_component = scene.hierarchy.GetComponent(candidate_hierarchy_component->parentID);
 		}
 		if (loop)
 		{
-			continue;
+			continue; // Skip this candidate to avoid circular reference
 		}
 
 		const NameComponent* name = scene.names.GetComponent(candidate_parent_entity);
-		parentCombo.AddItem(name == nullptr ? std::to_string(candidate_parent_entity) : name->name, candidate_parent_entity);
+		std::string display_name = name == nullptr ? std::to_string(candidate_parent_entity) : name->name;
 
-		if (hier != nullptr && hier->parentID == candidate_parent_entity)
+		// Add parent information with depth indicator
+		const HierarchyComponent* candidate_hierarchy = scene.hierarchy.GetComponent(candidate_parent_entity);
+		if (candidate_hierarchy != nullptr && candidate_hierarchy->parentID != INVALID_ENTITY)
+		{
+			// Calculate depth by traversing up the hierarchy
+			int depth = 0;
+			const HierarchyComponent* current_hierarchy = candidate_hierarchy;
+			while (current_hierarchy != nullptr && current_hierarchy->parentID != INVALID_ENTITY)
+			{
+				depth++;
+				current_hierarchy = scene.hierarchy.GetComponent(current_hierarchy->parentID);
+			}
+
+			std::string depth_indicator;
+			if (depth > 3)
+			{
+				depth_indicator = "> " + std::to_string(depth) + " >";
+			}
+			else
+			{
+				for (int i = 0; i < depth; ++i)
+				{
+					depth_indicator += ">";
+				}
+			}
+
+			const NameComponent* parent_name = scene.names.GetComponent(candidate_hierarchy->parentID);
+			std::string parent_display = parent_name == nullptr ? std::to_string(candidate_hierarchy->parentID) : parent_name->name;
+			display_name += " [Child of " + depth_indicator + " " + parent_display + "]";
+		}
+
+		parentCombo.AddItem(display_name, candidate_parent_entity);
+
+		if (hierarchy_component != nullptr && hierarchy_component->parentID == candidate_parent_entity)
 		{
 			parentCombo.SetSelectedWithoutCallback((int)parentCombo.GetItemCount() - 1);
 		}

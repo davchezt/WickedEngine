@@ -12,9 +12,83 @@ namespace wi::input
 	{
 		BUTTON_NONE = 0,
 
+		DIGIT_RANGE_START = 48, // digit 0
+
+		CHARACTER_RANGE_START = 65, // letter A
+
+		GAMEPAD_RANGE_START = 256, // do not use!
+
+		GAMEPAD_BUTTON_UP,
+		GAMEPAD_BUTTON_LEFT,
+		GAMEPAD_BUTTON_DOWN,
+		GAMEPAD_BUTTON_RIGHT,
+		GAMEPAD_BUTTON_1,
+		GAMEPAD_BUTTON_2,
+		GAMEPAD_BUTTON_3,
+		GAMEPAD_BUTTON_4,
+		GAMEPAD_BUTTON_5,
+		GAMEPAD_BUTTON_6,
+		GAMEPAD_BUTTON_7,
+		GAMEPAD_BUTTON_8,
+		GAMEPAD_BUTTON_9,
+		GAMEPAD_BUTTON_10,
+		GAMEPAD_BUTTON_11,
+		GAMEPAD_BUTTON_12,
+		GAMEPAD_BUTTON_13,
+		GAMEPAD_BUTTON_14,
+
+		// Check analog presses like a button:
+		GAMEPAD_ANALOG_THUMBSTICK_L_AS_BUTTON_UP,
+		GAMEPAD_ANALOG_THUMBSTICK_L_AS_BUTTON_LEFT,
+		GAMEPAD_ANALOG_THUMBSTICK_L_AS_BUTTON_DOWN,
+		GAMEPAD_ANALOG_THUMBSTICK_L_AS_BUTTON_RIGHT,
+		GAMEPAD_ANALOG_THUMBSTICK_R_AS_BUTTON_UP,
+		GAMEPAD_ANALOG_THUMBSTICK_R_AS_BUTTON_LEFT,
+		GAMEPAD_ANALOG_THUMBSTICK_R_AS_BUTTON_DOWN,
+		GAMEPAD_ANALOG_THUMBSTICK_R_AS_BUTTON_RIGHT,
+		GAMEPAD_ANALOG_TRIGGER_L_AS_BUTTON,
+		GAMEPAD_ANALOG_TRIGGER_R_AS_BUTTON,
+
+		// Xbox mapping of generic codes:
+		GAMEPAD_BUTTON_XBOX_X = GAMEPAD_BUTTON_1,
+		GAMEPAD_BUTTON_XBOX_A = GAMEPAD_BUTTON_2,
+		GAMEPAD_BUTTON_XBOX_B = GAMEPAD_BUTTON_3,
+		GAMEPAD_BUTTON_XBOX_Y = GAMEPAD_BUTTON_4,
+		GAMEPAD_BUTTON_XBOX_L1 = GAMEPAD_BUTTON_5,
+		GAMEPAD_BUTTON_XBOX_LT = GAMEPAD_ANALOG_TRIGGER_L_AS_BUTTON,
+		GAMEPAD_BUTTON_XBOX_R1 = GAMEPAD_BUTTON_6,
+		GAMEPAD_BUTTON_XBOX_RT = GAMEPAD_ANALOG_TRIGGER_R_AS_BUTTON,
+		GAMEPAD_BUTTON_XBOX_L3 = GAMEPAD_BUTTON_7,
+		GAMEPAD_BUTTON_XBOX_R3 = GAMEPAD_BUTTON_8,
+		GAMEPAD_BUTTON_XBOX_BACK = GAMEPAD_BUTTON_9,
+		GAMEPAD_BUTTON_XBOX_START = GAMEPAD_BUTTON_10,
+
+		// Playstation mapping of generic codes:
+		GAMEPAD_BUTTON_PLAYSTATION_SQUARE = GAMEPAD_BUTTON_1,
+		GAMEPAD_BUTTON_PLAYSTATION_CROSS = GAMEPAD_BUTTON_2,
+		GAMEPAD_BUTTON_PLAYSTATION_CIRCLE = GAMEPAD_BUTTON_3,
+		GAMEPAD_BUTTON_PLAYSTATION_TRIANGLE = GAMEPAD_BUTTON_4,
+		GAMEPAD_BUTTON_PLAYSTATION_L1 = GAMEPAD_BUTTON_5,
+		GAMEPAD_BUTTON_PLAYSTATION_L2 = GAMEPAD_ANALOG_TRIGGER_L_AS_BUTTON,
+		GAMEPAD_BUTTON_PLAYSTATION_R1 = GAMEPAD_BUTTON_6,
+		GAMEPAD_BUTTON_PLAYSTATION_R2 = GAMEPAD_ANALOG_TRIGGER_R_AS_BUTTON,
+		GAMEPAD_BUTTON_PLAYSTATION_L3 = GAMEPAD_BUTTON_7,
+		GAMEPAD_BUTTON_PLAYSTATION_R3 = GAMEPAD_BUTTON_8,
+		GAMEPAD_BUTTON_PLAYSTATION_SHARE = GAMEPAD_BUTTON_9,
+		GAMEPAD_BUTTON_PLAYSTATION_OPTION = GAMEPAD_BUTTON_10,
+		GAMEPAD_BUTTON_PLAYSTATION_TOUCHPAD = GAMEPAD_BUTTON_14,
+		GAMEPAD_BUTTON_PLAYSTATION_SELECT = GAMEPAD_BUTTON_PLAYSTATION_TOUCHPAD,
+		GAMEPAD_BUTTON_PLAYSTATION_START = GAMEPAD_BUTTON_PLAYSTATION_OPTION,
+
+		GAMEPAD_RANGE_END = 512, // do not use!
+
 		MOUSE_BUTTON_LEFT,
 		MOUSE_BUTTON_RIGHT,
 		MOUSE_BUTTON_MIDDLE,
+
+		// Detect mouse scroll like a button:
+		MOUSE_SCROLL_AS_BUTTON_UP,
+		MOUSE_SCROLL_AS_BUTTON_DOWN,
 
 		KEYBOARD_BUTTON_UP,
 		KEYBOARD_BUTTON_DOWN,
@@ -44,31 +118,33 @@ namespace wi::input
 		KEYBOARD_BUTTON_BACKSPACE,
 		KEYBOARD_BUTTON_PAGEDOWN,
 		KEYBOARD_BUTTON_PAGEUP,
+		KEYBOARD_BUTTON_NUMPAD0,
+		KEYBOARD_BUTTON_NUMPAD1,
+		KEYBOARD_BUTTON_NUMPAD2,
+		KEYBOARD_BUTTON_NUMPAD3,
+		KEYBOARD_BUTTON_NUMPAD4,
+		KEYBOARD_BUTTON_NUMPAD5,
+		KEYBOARD_BUTTON_NUMPAD6,
+		KEYBOARD_BUTTON_NUMPAD7,
+		KEYBOARD_BUTTON_NUMPAD8,
+		KEYBOARD_BUTTON_NUMPAD9,
+		KEYBOARD_BUTTON_MULTIPLY,
+		KEYBOARD_BUTTON_ADD,
+		KEYBOARD_BUTTON_SEPARATOR,
+		KEYBOARD_BUTTON_SUBTRACT,
+		KEYBOARD_BUTTON_DECIMAL,
+		KEYBOARD_BUTTON_DIVIDE,
+		KEYBOARD_BUTTON_TAB,
+		KEYBOARD_BUTTON_TILDE,
+		KEYBOARD_BUTTON_INSERT,
+		KEYBOARD_BUTTON_ALT,
+		KEYBOARD_BUTTON_ALTGR,
+		KEYBOARD_BUTTON_LCOMMAND, // MacOS specific
+		KEYBOARD_BUTTON_RCOMMAND, // MacOS specific
+		KEYBOARD_BUTTON_END,
 
-		CHARACTER_RANGE_START = 65, // letter A
-
-		GAMEPAD_RANGE_START = 256, // do not use!
-
-		GAMEPAD_BUTTON_UP,
-		GAMEPAD_BUTTON_LEFT,
-		GAMEPAD_BUTTON_DOWN,
-		GAMEPAD_BUTTON_RIGHT,
-		GAMEPAD_BUTTON_1,
-		GAMEPAD_BUTTON_2,
-		GAMEPAD_BUTTON_3,
-		GAMEPAD_BUTTON_4,
-		GAMEPAD_BUTTON_5,
-		GAMEPAD_BUTTON_6,
-		GAMEPAD_BUTTON_7,
-		GAMEPAD_BUTTON_8,
-		GAMEPAD_BUTTON_9,
-		GAMEPAD_BUTTON_10,
-		GAMEPAD_BUTTON_11,
-		GAMEPAD_BUTTON_12,
-		GAMEPAD_BUTTON_13,
-		GAMEPAD_BUTTON_14,
-
-		GAMEPAD_RANGE_END, // do not use!
+		// must be the last entry
+		BUTTON_ENUM_SIZE
 	};
 	enum GAMEPAD_ANALOG
 	{
@@ -80,7 +156,7 @@ namespace wi::input
 
 	struct KeyboardState
 	{
-		bool buttons[256] = {}; // it contains pressed buttons as "keyboard/typewriter" like, so no continuous presses
+		bool buttons[BUTTON_ENUM_SIZE] = {}; // it contains pressed buttons as "keyboard/typewriter" like, so no continuous presses
 	};
 	struct MouseState
 	{
@@ -111,7 +187,7 @@ namespace wi::input
 	void Initialize();
 
 	// call once per frame
-	void Update(wi::platform::window_type window, wi::Canvas canvas);
+	void Update(wi::platform::window_type window, const wi::Canvas& canvas);
 
 	// Some things need to be cleared for next frame, like touches and delta states
 	//	These things can occasionally be updated outside engine's loop, depending on operating system messages
@@ -124,6 +200,8 @@ namespace wi::input
 	bool Down(BUTTON button, int playerindex = 0);
 	// check if a button is pressed once
 	bool Press(BUTTON button, int playerindex = 0);
+	// check if a button has been just released
+	bool Release(BUTTON button, int playerindex = 0);
 	// check if a button is held down
 	bool Hold(BUTTON button, uint32_t frames = 30, bool continuous = false, int playerIndex = 0);
 	// get pointer position (eg. mouse pointer) (.xy) + scroll delta (.z) + pressure (.w)
@@ -137,6 +215,15 @@ namespace wi::input
 	// send various feedback to the controller
 	void SetControllerFeedback(const ControllerFeedback& data, int playerindex = 0);
 
+	// returns BUTTON_NONE if currently nothing is pressed, or the first pressed button otherwise
+	BUTTON WhatIsPressed(int playerindex = 0);
+
+	// Returns true if the button belongs to gamepad, false otherwise
+	inline constexpr bool IsGamepadButton(BUTTON button) { return button > GAMEPAD_RANGE_START && button < GAMEPAD_RANGE_END; }
+
+	// Check if left mouse button was double clicked in the current frame:
+	bool IsDoubleClicked();
+
 	struct Pen
 	{
 		XMFLOAT2 position = {};
@@ -147,17 +234,75 @@ namespace wi::input
 
 	struct Touch
 	{
+		XMFLOAT2 pos = XMFLOAT2(0, 0); // current position of touch
+		float scale = 0; // scale of pinch
 		enum TOUCHSTATE
 		{
 			TOUCHSTATE_PRESSED,
 			TOUCHSTATE_RELEASED,
 			TOUCHSTATE_MOVED,
+			TOUCHSTATE_PINCHED,
 			TOUCHSTATE_COUNT,
-		} state;
-		// current position of touch
-		XMFLOAT2 pos;
+		} state = TOUCHSTATE_PRESSED;
 	};
 	const wi::vector<Touch>& GetTouches();
+	void AddTouchEvent(const Touch& touch);
 
+	enum CURSOR
+	{
+		CURSOR_DEFAULT,
+		CURSOR_TEXTINPUT,
+		CURSOR_RESIZEALL,
+		CURSOR_RESIZE_NS,
+		CURSOR_RESIZE_EW,
+		CURSOR_RESIZE_NESW,
+		CURSOR_RESIZE_NWSE,
+		CURSOR_HAND,
+		CURSOR_NOTALLOWED,
+		CURSOR_CROSS,
+
+		CURSOR_COUNT
+	};
+	void SetCursor(CURSOR cursor);
+
+	// Replaces the specified cursor from a cursor image file
+	//	(file type must be a .cur or .ani (.ani only works on Windows))
+	void SetCursorFromFile(CURSOR cursor, const char* filename);
+
+	// Resets specified cursor to the original:
+	void ResetCursor(CURSOR cursor);
+
+	// Resets all cursors to original:
+	void ResetCursors();
+
+	// Notify the engine's input system that the OS changed the cursor from outside
+	void NotifyCursorChanged();
+
+	BUTTON StringToButton(const char* str);
+
+	enum CONTROLLER_PREFERENCE
+	{
+		CONTROLLER_PREFERENCE_GENERIC,
+		CONTROLLER_PREFERENCE_PLAYSTATION,
+		CONTROLLER_PREFERENCE_XBOX,
+	};
+	StackString<32> ButtonToString(BUTTON button, CONTROLLER_PREFERENCE preference = CONTROLLER_PREFERENCE_GENERIC);
+
+
+	void AddMouseScrollEvent(float value);
+	void AddMouseMoveDeltaEvent(XMFLOAT2 value);
+
+	struct Pinch
+	{
+		XMFLOAT2 position = XMFLOAT2(0, 0);
+		float scale = 1;
+		float delta_scale = 0;
+	};
+	const Pinch& GetTouchPinch();
+
+	const XMFLOAT2& GetTouchPan();
+
+	bool IsTouchPanning();
+	bool IsTouchPanStarting();
 };
 

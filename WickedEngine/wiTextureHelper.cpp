@@ -5,7 +5,11 @@
 #include "wiSpinLock.h"
 #include "wiTimer.h"
 #include "wiUnorderedMap.h"
+#include "wiNoise.h"
+
+// embedded image datas:
 #include "logo.h"
+#include "waterripple.h"
 
 using namespace wi::graphics;
 
@@ -20,15 +24,18 @@ namespace wi::texturehelper
 		HELPERTEXTURE_LOGO,
 		HELPERTEXTURE_RANDOM64X64,
 		HELPERTEXTURE_COLORGRADEDEFAULT,
-		HELPERTEXTURE_NORMALMAPDEFAULT,
 		HELPERTEXTURE_BLACKCUBEMAP,
 		HELPERTEXTURE_UINT4,
 		HELPERTEXTURE_BLUENOISE,
+		HELPERTEXTURE_WATERRIPPLE,
+		HELPERTEXTURE_BLACK,
+		HELPERTEXTURE_WHITE,
+		HELPERTEXTURE_TRANSPARENT,
+		HELPERTEXTURE_NORMALMAPDEFAULT,
+		HELPERTEXTURE_CHECKERBOARD,
 		HELPERTEXTURE_COUNT
 	};
 	wi::graphics::Texture helperTextures[HELPERTEXTURE_COUNT];
-	wi::unordered_map<unsigned long, wi::graphics::Texture> colorTextures;
-	wi::SpinLock colorlock;
 
 	void Initialize()
 	{
@@ -88,16 +95,6 @@ namespace wi::texturehelper
 			const int width = 1;
 			const int height = 1;
 
-			struct vector4b
-			{
-				unsigned char r;
-				unsigned char g;
-				unsigned char b;
-				unsigned char a;
-
-				vector4b(unsigned char r = 0, unsigned char g = 0, unsigned char b = 0, unsigned char a = 0) :r(r), g(g), b(b), a(a) {}
-			};
-
 			TextureDesc texDesc;
 			texDesc.width = width;
 			texDesc.height = height;
@@ -110,16 +107,10 @@ namespace wi::texturehelper
 			texDesc.misc_flags = ResourceMiscFlag::TEXTURECUBE;
 
 			SubresourceData pData[6];
-			vector4b d[6][width * height]; // 6 images of type vector4b = 4 * unsigned char
+			wi::Color d[6][width * height] = {}; // 6 images initialized to 0 (transparent black)
 
 			for (int cubeMapFaceIndex = 0; cubeMapFaceIndex < 6; cubeMapFaceIndex++)
 			{
-				// fill with black color  
-				for (int pix = 0; pix < width*height; ++pix)
-				{
-					d[cubeMapFaceIndex][pix] = vector4b(0, 0, 0, 0);
-				}
-
 				pData[cubeMapFaceIndex].data_ptr = &d[cubeMapFaceIndex][0];// description.data;
 				pData[cubeMapFaceIndex].row_pitch = width * 4;
 				pData[cubeMapFaceIndex].slice_pitch = 0;
@@ -138,29 +129,82 @@ namespace wi::texturehelper
 
 		// Blue Noise:
 		{
-			uint8_t blueNoise[128][128][4] = {};
+			wi::vector<wi::Color> bluenoise(128 * 128); // heap alloc intended (PS5)
 
-			for (int x = 0; x < 128; ++x)
+			for (int y = 0; y < 128; ++y)
 			{
-				for (int y = 0; y < 128; ++y)
+				for (int x = 0; x < 128; ++x)
 				{
-					float const f0 = samplerBlueNoiseErrorDistribution_128x128_OptimizedFor_2d2d2d2d_1spp(x, y, 0, 0);
-					float const f1 = samplerBlueNoiseErrorDistribution_128x128_OptimizedFor_2d2d2d2d_1spp(x, y, 0, 1);
-					float const f2 = samplerBlueNoiseErrorDistribution_128x128_OptimizedFor_2d2d2d2d_1spp(x, y, 0, 2);
-					float const f3 = samplerBlueNoiseErrorDistribution_128x128_OptimizedFor_2d2d2d2d_1spp(x, y, 0, 3);
+					const float f0 = samplerBlueNoiseErrorDistribution_128x128_OptimizedFor_2d2d2d2d_1spp(x, y, 0, 0);
+					const float f1 = samplerBlueNoiseErrorDistribution_128x128_OptimizedFor_2d2d2d2d_1spp(x, y, 0, 1);
+					const float f2 = samplerBlueNoiseErrorDistribution_128x128_OptimizedFor_2d2d2d2d_1spp(x, y, 0, 2);
+					const float f3 = samplerBlueNoiseErrorDistribution_128x128_OptimizedFor_2d2d2d2d_1spp(x, y, 0, 3);
 
-					blueNoise[x][y][0] = static_cast<uint8_t>(f0 * 0xFF);
-					blueNoise[x][y][1] = static_cast<uint8_t>(f1 * 0xFF);
-					blueNoise[x][y][2] = static_cast<uint8_t>(f2 * 0xFF);
-					blueNoise[x][y][3] = static_cast<uint8_t>(f3 * 0xFF);
+					bluenoise[x + y * 128] = wi::Color::fromFloat4(XMFLOAT4(f0, f1, f2, f3));
 				}
 			}
 
-			CreateTexture(helperTextures[HELPERTEXTURE_BLUENOISE], (uint8_t*)blueNoise, 128, 128, Format::R8G8B8A8_UNORM);
+			CreateTexture(helperTextures[HELPERTEXTURE_BLUENOISE], bluenoise.data(), 128, 128, Format::R8G8B8A8_UNORM);
 			device->SetName(&helperTextures[HELPERTEXTURE_BLUENOISE], "HELPERTEXTURE_BLUENOISE");
 		}
 
-		wi::backlog::post("wi::texturehelper Initialized (" + std::to_string((int)std::round(timer.elapsed())) + " ms)");
+		// Water ripple:
+		{
+			TextureDesc desc;
+			desc.width = 64;
+			desc.height = 64;
+			desc.mip_levels = 7;
+			desc.format = Format::BC5_UNORM;
+			desc.swizzle = { ComponentSwizzle::R,ComponentSwizzle::G,ComponentSwizzle::ONE,ComponentSwizzle::ONE };
+			desc.bind_flags = BindFlag::SHADER_RESOURCE;
+
+			const uint32_t data_stride = GetFormatStride(desc.format);
+			const uint32_t block_size = GetFormatBlockSize(desc.format);
+			const uint8_t* src = waterriple;
+			SubresourceData initdata[7] = {};
+			for (uint32_t mip = 0; mip < desc.mip_levels; ++mip)
+			{
+				const uint32_t num_blocks_x = std::max(1u, desc.width >> mip) / block_size;
+				const uint32_t num_blocks_y = std::max(1u, desc.height >> mip) / block_size;
+				initdata[mip].data_ptr = src;
+				initdata[mip].row_pitch = num_blocks_x * data_stride;
+				src += num_blocks_x * num_blocks_y * data_stride;
+			}
+			device->CreateTexture(&desc, initdata, &helperTextures[HELPERTEXTURE_WATERRIPPLE]);
+			device->SetName(&helperTextures[HELPERTEXTURE_WATERRIPPLE], "HELPERTEXTURE_WATERRIPPLE");
+		}
+
+		// Checkerboard:
+		{
+			wi::Color checker[] = {
+				wi::Color(255,255,255,255), wi::Color(127,127,127,255),
+				wi::Color(127,127,127,255), wi::Color(255,255,255,255),
+			};
+
+			CreateTexture(helperTextures[HELPERTEXTURE_CHECKERBOARD], checker, 2, 2, Format::R8G8B8A8_UNORM);
+			device->SetName(&helperTextures[HELPERTEXTURE_CHECKERBOARD], "HELPERTEXTURE_CHECKERBOARD");
+		}
+
+		// Single colors:
+		{
+			wi::Color color = wi::Color::Black();
+			CreateTexture(helperTextures[HELPERTEXTURE_BLACK], (const uint8_t*)&color, 1, 1);
+			device->SetName(&helperTextures[HELPERTEXTURE_BLACK], "HELPERTEXTURE_BLACK");
+
+			color = wi::Color::White();
+			CreateTexture(helperTextures[HELPERTEXTURE_WHITE], (const uint8_t*)&color, 1, 1);
+			device->SetName(&helperTextures[HELPERTEXTURE_WHITE], "HELPERTEXTURE_WHITE");
+
+			color = wi::Color::Transparent();
+			CreateTexture(helperTextures[HELPERTEXTURE_TRANSPARENT], (const uint8_t*)&color, 1, 1);
+			device->SetName(&helperTextures[HELPERTEXTURE_TRANSPARENT], "HELPERTEXTURE_TRANSPARENT");
+
+			color = wi::Color(127, 127, 255, 255);
+			CreateTexture(helperTextures[HELPERTEXTURE_NORMALMAPDEFAULT], (const uint8_t*)&color, 1, 1);
+			device->SetName(&helperTextures[HELPERTEXTURE_NORMALMAPDEFAULT], "HELPERTEXTURE_NORMALMAPDEFAULT");
+		}
+
+		wilog("wi::texturehelper Initialized (%d ms)", (int)std::round(timer.elapsed()));
 	}
 
 	const Texture* getLogo()
@@ -177,7 +221,7 @@ namespace wi::texturehelper
 	}
 	const Texture* getNormalMapDefault()
 	{
-		return getColor(wi::Color(127, 127, 255, 255));
+		return &helperTextures[HELPERTEXTURE_NORMALMAPDEFAULT];
 	}
 	const Texture* getBlackCubeMap()
 	{
@@ -191,80 +235,296 @@ namespace wi::texturehelper
 	{
 		return &helperTextures[HELPERTEXTURE_BLUENOISE];
 	}
+	const Texture* getWaterRipple()
+	{
+		return &helperTextures[HELPERTEXTURE_WATERRIPPLE];
+	}
+	const Texture* getCheckerBoard()
+	{
+		return &helperTextures[HELPERTEXTURE_CHECKERBOARD];
+	}
 	const Texture* getWhite()
 	{
-		return getColor(wi::Color(255, 255, 255, 255));
+		return &helperTextures[HELPERTEXTURE_WHITE];
 	}
 	const Texture* getBlack()
 	{
-		return getColor(wi::Color(0, 0, 0, 255));
+		return &helperTextures[HELPERTEXTURE_BLACK];
 	}
 	const Texture* getTransparent()
 	{
-		return getColor(wi::Color(0, 0, 0, 0));
-	}
-	const Texture* getColor(wi::Color color)
-	{
-		colorlock.lock();
-		auto it = colorTextures.find(color.rgba);
-		auto end = colorTextures.end();
-		colorlock.unlock();
-
-		if (it != end)
-		{
-			return &it->second;
-		}
-
-		GraphicsDevice* device = wi::graphics::GetDevice();
-
-		static const int dim = 1;
-		static const int dataLength = dim * dim * 4;
-		uint8_t data[dataLength];
-		for (int i = 0; i < dataLength; i += 4)
-		{
-			data[i] = color.getR();
-			data[i + 1] = color.getG();
-			data[i + 2] = color.getB();
-			data[i + 3] = color.getA();
-		}
-
-		Texture texture;
-		if (CreateTexture(texture, data, dim, dim) == false)
-		{
-			return nullptr;
-		}
-		device->SetName(&texture, "HELPERTEXTURE_COLOR");
-
-		colorlock.lock();
-		colorTextures[color.rgba] = texture;
-		colorlock.unlock();
-
-		return &colorTextures[color.rgba];
+		return &helperTextures[HELPERTEXTURE_TRANSPARENT];
 	}
 
 
-	bool CreateTexture(wi::graphics::Texture& texture, const uint8_t* data, uint32_t width, uint32_t height, Format format)
+	bool CreateTexture(
+		Texture& texture,
+		const void* data,
+		uint32_t width,
+		uint32_t height,
+		Format format,
+		Swizzle swizzle
+	)
 	{
 		if (data == nullptr)
-		{
 			return false;
-		}
 		GraphicsDevice* device = wi::graphics::GetDevice();
 
-		TextureDesc textureDesc;
-		textureDesc.width = width;
-		textureDesc.height = height;
-		textureDesc.mip_levels = 1;
-		textureDesc.array_size = 1;
-		textureDesc.format = format;
-		textureDesc.sample_count = 1;
-		textureDesc.bind_flags = BindFlag::SHADER_RESOURCE;
+		TextureDesc desc;
+		desc.width = width;
+		desc.height = height;
+		desc.mip_levels = 1;
+		desc.array_size = 1;
+		desc.format = format;
+		desc.sample_count = 1;
+		desc.bind_flags = BindFlag::SHADER_RESOURCE;
+		desc.swizzle = swizzle;
 
 		SubresourceData InitData;
 		InitData.data_ptr = data;
 		InitData.row_pitch = width * GetFormatStride(format) / GetFormatBlockSize(format);
 
-		return device->CreateTexture(&textureDesc, &InitData, &texture);
+		return device->CreateTexture(&desc, &InitData, &texture);
+	}
+
+	Texture CreateGradientTexture(
+		GradientType type,
+		uint32_t width,
+		uint32_t height,
+		const XMFLOAT2& uv_start,
+		const XMFLOAT2& uv_end,
+		GradientFlags flags,
+		Swizzle swizzle,
+		float perlin_scale,
+		uint32_t perlin_seed,
+		int perlin_octaves,
+		float perlin_persistence
+	)
+	{
+		wi::vector<uint8_t> data;
+		wi::vector<uint16_t> data16;
+		if (has_flag(flags, GradientFlags::R16Unorm))
+		{
+			data16.resize(width * height);
+		}
+		else
+		{
+			data.resize(width * height);
+		}
+		wi::noise::Perlin perlin;
+		if (has_flag(flags, GradientFlags::PerlinNoise))
+		{
+			perlin.init(perlin_seed);
+		}
+		float aspect = float(height) / float(width);
+		XMFLOAT2 perlin_scale2 = XMFLOAT2(perlin_scale, perlin_scale * aspect);
+
+		switch (type)
+		{
+		default:
+		case GradientType::Linear:
+		{
+			const XMVECTOR a = XMLoadFloat2(&uv_start);
+			const XMVECTOR b = XMLoadFloat2(&uv_end);
+			const float distance = XMVectorGetX(XMVector3Length(b - a));
+			for (uint32_t y = 0; y < height; ++y)
+			{
+				for (uint32_t x = 0; x < width; ++x)
+				{
+					const XMFLOAT2 uv = XMFLOAT2((float(x) + 0.5f) / float(width), (float(y) + 0.5f) / float(height));
+					const XMVECTOR point_on_line = wi::math::ClosestPointOnLineSegment(a, b, XMLoadFloat2(&uv));
+					const float uv_distance = XMVectorGetX(XMVector3Length(point_on_line - a));
+					float gradient = saturate(wi::math::InverseLerp(0, distance, uv_distance));
+					if (has_flag(flags, GradientFlags::Inverse))
+					{
+						gradient = 1 - gradient;
+					}
+					if (has_flag(flags, GradientFlags::Smoothstep))
+					{
+						gradient = wi::math::SmoothStep(0, 1, gradient);
+					}
+					if (has_flag(flags, GradientFlags::PerlinNoise))
+					{
+						gradient *= perlin.compute(uv.x * perlin_scale2.x, uv.y * perlin_scale2.y, 0, perlin_octaves, perlin_persistence) * 0.5f + 0.5f;
+					}
+					gradient = saturate(gradient);
+					if (has_flag(flags, GradientFlags::R16Unorm))
+					{
+						data16[x + y * width] = uint16_t(gradient * 65535);
+					}
+					else
+					{
+						data[x + y * width] = uint8_t(gradient * 255);
+					}
+				}
+			}
+		}
+		break;
+
+		case GradientType::Circular:
+		{
+			const XMVECTOR a = XMLoadFloat2(&uv_start);
+			const XMVECTOR b = XMLoadFloat2(&uv_end);
+			const float distance = XMVectorGetX(XMVector3Length(b - a));
+			for (uint32_t y = 0; y < height; ++y)
+			{
+				for (uint32_t x = 0; x < width; ++x)
+				{
+					const XMFLOAT2 uv = XMFLOAT2((float(x) + 0.5f) / float(width), (float(y) + 0.5f) / float(height));
+					const float uv_distance = wi::math::Clamp(XMVectorGetX(XMVector3Length(XMLoadFloat2(&uv) - a)), 0, distance);
+					float gradient = saturate(wi::math::InverseLerp(0, distance, uv_distance));
+					if (has_flag(flags, GradientFlags::Inverse))
+					{
+						gradient = 1 - gradient;
+					}
+					if (has_flag(flags, GradientFlags::Smoothstep))
+					{
+						gradient = wi::math::SmoothStep(0, 1, gradient);
+					}
+					if (has_flag(flags, GradientFlags::PerlinNoise))
+					{
+						gradient *= perlin.compute(uv.x * perlin_scale2.x, uv.y * perlin_scale2.y, 0, perlin_octaves, perlin_persistence) * 0.5f + 0.5f;
+					}
+					gradient = saturate(gradient);
+					if (has_flag(flags, GradientFlags::R16Unorm))
+					{
+						data16[x + y * width] = uint16_t(gradient * 65535);
+					}
+					else
+					{
+						data[x + y * width] = uint8_t(gradient * 255);
+					}
+				}
+			}
+		}
+		break;
+
+		case GradientType::Angular:
+		{
+			XMFLOAT2 direction;
+			XMStoreFloat2(&direction, XMVector2Normalize(XMLoadFloat2(&uv_end) - XMLoadFloat2(&uv_start)));
+			for (uint32_t y = 0; y < height; ++y)
+			{
+				for (uint32_t x = 0; x < width; ++x)
+				{
+					const XMFLOAT2 uv = XMFLOAT2((float(x) + 0.5f) / float(width), (float(y) + 0.5f) / float(height));
+					const XMFLOAT2 coord = XMFLOAT2(uv.x - uv_start.x, uv.y - uv_start.y);
+					float gradient = wi::math::GetAngle(direction, coord) / XM_2PI;
+					if (has_flag(flags, GradientFlags::Inverse))
+					{
+						gradient = 1 - gradient;
+					}
+					if (has_flag(flags, GradientFlags::Smoothstep))
+					{
+						gradient = wi::math::SmoothStep(0, 1, gradient);
+					}
+					if (has_flag(flags, GradientFlags::PerlinNoise))
+					{
+						gradient *= perlin.compute(uv.x * perlin_scale2.x, uv.y * perlin_scale2.y, 0, perlin_octaves, perlin_persistence) * 0.5f + 0.5f;
+					}
+					gradient = saturate(gradient);
+					if (has_flag(flags, GradientFlags::R16Unorm))
+					{
+						data16[x + y * width] = uint16_t(gradient * 65535);
+					}
+					else
+					{
+						data[x + y * width] = uint8_t(gradient * 255);
+					}
+				}
+			}
+		}
+		break;
+
+		}
+
+		Texture texture;
+		if (has_flag(flags, GradientFlags::R16Unorm))
+		{
+			CreateTexture(texture, (const uint8_t*)data16.data(), width, height, Format::R16_UNORM, swizzle);
+		}
+		else
+		{
+			CreateTexture(texture, data.data(), width, height, Format::R8_UNORM, swizzle);
+		}
+		return texture;
+	}
+
+	Texture CreateCircularProgressGradientTexture(
+		uint32_t width,
+		uint32_t height,
+		const XMFLOAT2& direction,
+		bool counter_clockwise,
+		Swizzle swizzle
+	)
+	{
+		wi::vector<uint8_t> data(width * height);
+		for (uint32_t y = 0; y < height; ++y)
+		{
+			for (uint32_t x = 0; x < width; ++x)
+			{
+				const XMFLOAT2 coord = XMFLOAT2((float(x) + 0.5f) / float(width) * 2 - 1, -((float(y) + 0.5f) / float(height) * 2 - 1));
+				float gradient = wi::math::GetAngle(direction, coord) / XM_2PI;
+				if (counter_clockwise)
+				{
+					gradient = 1 - gradient;
+				}
+				data[x + y * width] = uint8_t(gradient * 255);
+			}
+		}
+
+		Texture texture;
+		CreateTexture(texture, data.data(), width, height, Format::R8_UNORM, swizzle);
+		return texture;
+	}
+
+	wi::graphics::Texture CreateLensDistortionNormalMap(
+		uint32_t width,
+		uint32_t height,
+		const XMFLOAT2& uv_start,
+		float radius,
+		float squish,
+		float blend,
+		float edge_smoothness
+	)
+	{
+		XMFLOAT2 offset = XMFLOAT2(uv_start.x * 2 - 1, uv_start.y * 2 - 1);
+		float scale = 1.0f / (radius * 2);
+		float edge = 1.0f - edge_smoothness;
+
+		wi::vector<uint32_t> data(width * height);
+		for (uint32_t y = 0; y < height; ++y)
+		{
+			for (uint32_t x = 0; x < width; ++x)
+			{
+				XMFLOAT2 uv = XMFLOAT2(float(x) / float(width - 1) * 2 - 1, float(y) / float(height - 1) * 2 - 1);
+
+				uv.x -= offset.x;
+				uv.y -= offset.y;
+				uv.x *= scale;
+				uv.y *= scale;
+
+				if (width > height)
+					uv.x *= float(width) / float(height);
+				else
+					uv.y *= float(height) / float(width);
+
+				const float d = wi::math::Length(uv);
+				const float dp = std::pow(saturate(d), squish);
+				uv.x = uv.x * dp;
+				uv.y = uv.y * dp;
+
+				XMFLOAT2 color = XMFLOAT2(uv.x * 0.5f + 0.5f, uv.y * 0.5f + 0.5f);
+				float s = smoothstep(1.0f, edge, d) * blend;
+				color.x = lerp(0.5f, color.x, s);
+				color.y = lerp(0.5f, color.y, s);
+				data[x + y * width] = (uint32_t(color.x * 65535) & 0xFFFF) | (uint32_t(color.y * 65535) & 0xFFFF) << 16u;
+			}
+		}
+
+		Texture texture;
+		CreateTexture(texture, data.data(), width, height, Format::R16G16_UNORM);
+		return texture;
 	}
 
 }

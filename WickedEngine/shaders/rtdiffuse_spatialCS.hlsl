@@ -3,6 +3,8 @@
 #include "stochasticSSRHF.hlsli"
 #include "ShaderInterop_Postprocess.h"
 
+PUSHCONSTANT(postprocess, PostProcess);
+
 Texture2D<float4> texture_rayIndirectDiffuse : register(t0);
 
 RWTexture2D<float4> texture_resolve : register(u0);
@@ -59,13 +61,13 @@ void main(uint3 DTid : SV_DispatchThreadID)
 {
 	const uint2 tracingCoord = DTid.xy;
 
-	const float depth = texture_depth[DTid.xy * 2];
+	const float depth = texture_depth[DTid.xy * rtdiffuse_downscalefactor];
 
 	const float farplane = GetCamera().z_far;
-	const float lineardepth = texture_lineardepth[DTid.xy * 2] * farplane;
+	const float lineardepth = texture_lineardepth[DTid.xy * rtdiffuse_downscalefactor] * farplane;
 
 	// Everthing in world space:
-	const float3 N = decode_oct(texture_normal[DTid.xy * 2]);
+	const float3 N = decode_normal(texture_normal_roughness[DTid.xy * rtdiffuse_downscalefactor]);
 
 	float4 result = 0.0f;
 	float weightSum = 0.0f;
@@ -83,13 +85,15 @@ void main(uint3 DTid : SV_DispatchThreadID)
 		float2 offset = (hammersley2d_random(i, sampleCount, random) - 0.5) * resolveSpatialSize;
 
 		int2 neighborTracingCoord = tracingCoord + offset;
-		int2 neighborCoord = DTid.xy * 2 + offset;
+		int2 neighborCoord = neighborTracingCoord * rtdiffuse_downscalefactor;
 
 		float neighbor_lineardepth = texture_lineardepth[neighborCoord] * farplane;
 		if (neighbor_lineardepth < farplane)
 		{
 			float weight = 1;
-			weight *= 1 - saturate(abs(lineardepth - neighbor_lineardepth));
+			// Relative depth difference (zero weight at 10%), so that a surface seen at a grazing
+			// angle far away is not rejected just because its depth changes by meters per pixel:
+			weight *= 1 - saturate(abs(lineardepth - neighbor_lineardepth) / lineardepth * 10);
 
 			float4 sampleColor = texture_rayIndirectDiffuse[neighborTracingCoord];
 			sampleColor.rgb *= rcp(1 + Luminance(sampleColor.rgb));
@@ -101,8 +105,17 @@ void main(uint3 DTid : SV_DispatchThreadID)
 		}
 	}
 
-	result /= weightSum;
-	result.rgb *= rcp(1 - Luminance(result.rgb));
+	if (weightSum > 0)
+	{
+		result /= weightSum;
+		result.rgb *= rcp(1 - Luminance(result.rgb));
+	}
+	else
+	{
+		// No neighbor passed the depth test: keep this pixel's own ray result instead of 0/0
+		result = texture_rayIndirectDiffuse[tracingCoord];
+		weightSum = 1;
+	}
 
 	// Population variance
 	float resolveVariance = S / weightSum;

@@ -3,28 +3,29 @@
 #include "globals.hlsli"
 #include "ShaderInterop_EmittedParticle.h"
 
-ShaderMeshInstance EmitterGetInstance()
-{
-	return load_instance(xEmitterInstanceIndex);
-}
-ShaderGeometry EmitterGetGeometry()
-{
-	return load_geometry(EmitterGetInstance().geometryOffset);
-}
-ShaderMaterial EmitterGetMaterial()
-{
-	return load_material(EmitterGetGeometry().materialIndex);
-}
+#define EmitterGetInstance() (load_instance(xEmitterInstanceIndex))
+#define EmitterGetGeometry() (load_geometry(EmitterGetInstance().geometryOffset))
+#define EmitterGetMaterial() (load_material(EmitterGetGeometry().materialIndex))
 
 struct VertextoPixel
 {
-	float4 pos						: SV_POSITION;
-	float4 tex						: TEXCOORD0;
-	nointerpolation float size		: TEXCOORD1;
-	nointerpolation uint color		: TEXCOORD2;
-	float3 P : WORLDPOSITION;
-	nointerpolation float frameBlend : FRAMEBLEND;
-	float2 unrotated_uv : UNROTATED_UV;
+	float4 pos : SV_POSITION;
+	float4 tex : TEXCOORD0;
+	half2 unrotated_uv : UNROTATED_UV;
+	float clip : SV_ClipDistance0;
+	nointerpolation half frameBlend : FRAMEBLEND;
+	nointerpolation half size : PARTICLESIZE;
+	nointerpolation uint color : PARTICLECOLOR;
+	
+	inline float3 GetPos3D()
+	{
+		return GetCamera().screen_to_world(pos);
+	}
+
+	inline float3 GetViewVector()
+	{
+		return GetCamera().screen_to_view(pos);
+	}
 };
 
 #endif // WI_EMITTEDPARTICLE_HF

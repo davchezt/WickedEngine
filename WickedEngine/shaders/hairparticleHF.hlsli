@@ -3,27 +3,33 @@
 #include "globals.hlsli"
 #include "ShaderInterop_HairParticle.h"
 
-ShaderMeshInstance HairGetInstance()
-{
-	return load_instance(xHairInstanceIndex);
-}
-ShaderGeometry HairGetGeometry()
-{
-	return load_geometry(HairGetInstance().geometryOffset);
-}
-ShaderMaterial HairGetMaterial()
-{
-	return load_material(HairGetGeometry().materialIndex);
-}
+#define HairGetInstance() (load_instance(xHairInstanceIndex))
+#define HairGetGeometry() (load_geometry(HairGetInstance().geometryOffset))
+#define HairGetMaterial() (load_material(HairGetGeometry().materialIndex))
 
 struct VertexToPixel
 {
-	float4 pos : SV_POSITION;
+	precise float4 pos : SV_POSITION;
 	float2 tex : TEXCOORD;
+	half4 nor_wet : NORMAL_WET;
+	float clip : SV_ClipDistance0;
 	nointerpolation float fade : DITHERFADE;
-	uint primitiveID : PRIMITIVEID;
-	float3 pos3D : POSITION3D;
-	float3 nor : NORMAL;
+	nointerpolation uint primitiveID : PRIMITIVEID;
+	
+	inline float3 GetPos3D()
+	{
+		return GetCamera().screen_to_world(pos);
+	}
+
+	inline float3 GetViewVector()
+	{
+		return GetCamera().screen_to_view(pos);
+	}
+
+	inline half GetDither()
+	{
+		return fade;
+	}
 };
 
 #endif // WI_HAIRPARTICLE_HF

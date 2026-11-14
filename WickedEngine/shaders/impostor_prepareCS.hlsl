@@ -2,7 +2,8 @@
 
 static const uint THREADCOUNT = 64;
 
-static const float3 BILLBOARD[] = {
+static const float3 BILLBOARD[] =
+{
 	float3(-1, -1, 0),
 	float3(1, -1, 0),
 	float3(-1, 1, 0),
@@ -10,9 +11,10 @@ static const float3 BILLBOARD[] = {
 };
 
 RWBuffer<uint> output_indices : register(u0);
-RWByteAddressBuffer output_vertices_pos_nor : register(u1);
-RWByteAddressBuffer output_impostor_data : register(u2);
-RWStructuredBuffer<IndirectDrawArgsIndexedInstanced> output_indirect : register(u3);
+RWBuffer<float4> output_vertices_pos : register(u1);
+RWBuffer<float4> output_vertices_nor : register(u2);
+RWByteAddressBuffer output_impostor_data : register(u3);
+RWStructuredBuffer<IndirectDrawArgsIndexedInstanced> output_indirect : register(u4);
 
 struct ObjectCount
 {
@@ -58,12 +60,12 @@ void main(uint3 DTid : SV_DispatchThreadID)
 		const uint vertexOffset = impostorOffset * 4u;
 
 		// Write out indices:
-		output_indices[indexOffset + 0] = vertexOffset + 0;
+		output_indices[indexOffset + 0] = vertexOffset + 0; // provoking vertex prim0
 		output_indices[indexOffset + 1] = vertexOffset + 1;
 		output_indices[indexOffset + 2] = vertexOffset + 2;
-		output_indices[indexOffset + 3] = vertexOffset + 2;
-		output_indices[indexOffset + 4] = vertexOffset + 1;
-		output_indices[indexOffset + 5] = vertexOffset + 3;
+		output_indices[indexOffset + 3] = vertexOffset + 3; // provoking vertex prim1
+		output_indices[indexOffset + 4] = vertexOffset + 2;
+		output_indices[indexOffset + 5] = vertexOffset + 1;
 
 		// We rotate the billboard to face camera, but unlike emitted particles, 
 		//	they don't rotate according to camera rotation, but the camera position relative
@@ -92,7 +94,7 @@ void main(uint3 DTid : SV_DispatchThreadID)
 		uint2 data = 0;
 		data.x |= slice & 0xFFFFFF;
 		data.x |= (uint(dither * 255) & 0xFF) << 24u;
-		data.y = instance.color;
+		data.y = pack_rgba(instance.GetColor());
 		output_impostor_data.Store2(impostorOffset * sizeof(uint2), data);
 
 		// Write out vertices:
@@ -102,7 +104,8 @@ void main(uint3 DTid : SV_DispatchThreadID)
 			pos = mul(pos, float3x3(right, up, face));
 			pos *= instance.radius;
 			pos += instance.center;
-			output_vertices_pos_nor.Store4((vertexOffset + vertexID) * sizeof(uint4), uint4(asuint(pos), pack_unitvector(face)));
+			output_vertices_pos[vertexOffset + vertexID] = float4(pos, 0);
+			output_vertices_nor[vertexOffset + vertexID] = float4(face, 0);
 		}
 	}
 }

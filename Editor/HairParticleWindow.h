@@ -1,5 +1,5 @@
 #pragma once
-#include "WickedEngine.h"
+#include "SpriteRectWindow.h"
 
 class EditorComponent;
 
@@ -20,17 +20,28 @@ public:
 
 	wi::gui::Label infoLabel;
 	wi::gui::ComboBox meshComboBox;
+	wi::gui::CheckBox cameraBendCheckbox;
 	wi::gui::Slider lengthSlider;
+	wi::gui::Slider widthSlider;
 	wi::gui::Slider stiffnessSlider;
+	wi::gui::Slider dragSlider;
+	wi::gui::Slider gravityPowerSlider;
 	wi::gui::Slider randomnessSlider;
 	wi::gui::Slider countSlider;
 	wi::gui::Slider segmentcountSlider;
+	wi::gui::Slider billboardcountSlider;
 	wi::gui::Slider randomSeedSlider;
 	wi::gui::Slider viewDistanceSlider;
-	wi::gui::TextInputField framesXInput;
-	wi::gui::TextInputField framesYInput;
-	wi::gui::TextInputField frameCountInput;
-	wi::gui::TextInputField frameStartInput;
+	wi::gui::Slider uniformitySlider;
+
+	wi::gui::Button addSpriteButton;
+	std::deque<wi::gui::Button> sprites;
+	std::deque<wi::gui::Button> spriteRemoveButtons;
+	std::deque<wi::gui::Slider> spriteSizeSliders;
+
+	SpriteRectWindow spriterectwnd;
+
+	void RefreshSprites();
 
 	void ResizeLayout() override;
 };

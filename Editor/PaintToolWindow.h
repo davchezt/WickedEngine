@@ -1,17 +1,10 @@
 #pragma once
-#include "WickedEngine.h"
-
-#include <deque>
-
 class EditorComponent;
 
 class PaintToolWindow : public wi::gui::Window
 {
 	float rot = 0;
 	float stroke_dist = 0;
-	bool history_needs_recording_start = false;
-	bool history_needs_recording_end = false;
-	size_t history_redo_jump_position = 0;
 	size_t history_textureIndex = 0;
 	struct TextureSlot
 	{
@@ -21,6 +14,8 @@ class PaintToolWindow : public wi::gui::Window
 	wi::vector<TextureSlot> history_textures;
 	TextureSlot GetEditTextureSlot(const wi::scene::MaterialComponent& material, int* uvset = nullptr);
 	void ReplaceEditTextureSlot(wi::scene::MaterialComponent& material, const TextureSlot& textureslot);
+
+	wi::unordered_map<wi::ecs::Entity, wi::Archive> historyStartDatas;
 
 	struct SculptingIndex
 	{
@@ -56,6 +51,8 @@ public:
 	wi::gui::CheckBox backfaceCheckBox;
 	wi::gui::CheckBox wireCheckBox;
 	wi::gui::CheckBox pressureCheckBox;
+	wi::gui::CheckBox alphaCheckBox;
+	wi::gui::CheckBox terrainCheckBox;
 	wi::gui::ColorPicker colorPicker;
 	wi::gui::ComboBox textureSlotComboBox;
 	wi::gui::ComboBox brushShapeComboBox;
@@ -64,10 +61,11 @@ public:
 	wi::gui::Button revealTextureButton;
 	wi::gui::ComboBox axisCombo;
 
-	void Update(float dt);
+	void UpdateData(float dt);
 	void DrawBrush(const wi::Canvas& canvas, wi::graphics::CommandList cmd) const;
 
 	XMFLOAT2 pos = XMFLOAT2(0, 0);
+	wi::scene::PickResult brushIntersect;
 
 	enum MODE
 	{
@@ -81,6 +79,7 @@ public:
 		MODE_HAIRPARTICLE_ADD_TRIANGLE,
 		MODE_HAIRPARTICLE_REMOVE_TRIANGLE,
 		MODE_HAIRPARTICLE_LENGTH,
+		MODE_TERRAIN_MATERIAL,
 		MODE_WIND,
 	};
 	MODE GetMode() const;
@@ -93,9 +92,19 @@ public:
 		Z
 	};
 
+	std::deque<wi::gui::Button> terrain_material_buttons;
+	size_t terrain_material_layer = 0;
+
+	float texture_paint_radius = 50;
+	float vertex_paint_radius = 0.1f;
+	float terrain_paint_radius = 5;
+
 	wi::Archive* currentHistory = nullptr;
-	void RecordHistory(bool start, wi::graphics::CommandList cmd = wi::graphics::CommandList());
+	void WriteHistoryData(wi::ecs::Entity entity, wi::Archive& archive, wi::graphics::CommandList cmd = wi::graphics::CommandList());
+	void RecordHistory(wi::ecs::Entity entity, wi::graphics::CommandList cmd = wi::graphics::CommandList());
 	void ConsumeHistoryOperation(wi::Archive& archive, bool undo);
 
 	void ResizeLayout() override;
+
+	void RecreateTerrainMaterialButtons();
 };

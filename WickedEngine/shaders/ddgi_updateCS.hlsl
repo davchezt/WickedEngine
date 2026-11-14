@@ -1,5 +1,7 @@
+#define DISABLE_HALF_PRECISION // compiler issue
 #include "globals.hlsli"
 #include "ShaderInterop_DDGI.h"
+#include "bc6h.hlsli"
 
 // This shader collects all traced rays (one probe per thread group) and integrates them
 //	Rays are first gathered to shared memory
@@ -11,23 +13,64 @@
 PUSHCONSTANT(push, DDGIPushConstants);
 
 StructuredBuffer<DDGIRayDataPacked> ddgiRayBuffer : register(t0);
+Buffer<uint> ddgiRayCountBuffer : register(t1);
 
 static const float WEIGHT_EPSILON = 0.0001;
 
 #ifdef DDGI_UPDATE_DEPTH
 static const uint THREADCOUNT = DDGI_DEPTH_RESOLUTION;
+static const uint RESOLUTION = DDGI_DEPTH_RESOLUTION;
 RWTexture2D<float2> output : register(u0);
-RWByteAddressBuffer ddgiOffsetBuffer:register(u1);
+groupshared uint shared_depths[DDGI_DEPTH_RESOLUTION * DDGI_DEPTH_RESOLUTION];
 #else
 static const uint THREADCOUNT = DDGI_COLOR_RESOLUTION;
-RWTexture2D<float3> output : register(u0);
+static const uint RESOLUTION = DDGI_COLOR_RESOLUTION;
+RWStructuredBuffer<DDGIVarianceDataPacked> varianceBuffer : register(u0);
+groupshared half shared_r[DDGI_COLOR_RESOLUTION][DDGI_COLOR_RESOLUTION];
+groupshared half shared_g[DDGI_COLOR_RESOLUTION][DDGI_COLOR_RESOLUTION];
+groupshared half shared_b[DDGI_COLOR_RESOLUTION][DDGI_COLOR_RESOLUTION];
 #endif // DDGI_UPDATE_DEPTH
+
+RWStructuredBuffer<DDGIProbe> ddgiProbeBuffer : register(u1);
 
 static const uint CACHE_SIZE = THREADCOUNT * THREADCOUNT;
 groupshared DDGIRayData ray_cache[CACHE_SIZE];
 
+static const int3 voxel_neighbors[] = {
+	// First priority is direct straight neighbors:
+	int3(-1, 0, 0),
+	int3(1, 0, 0),
+	int3(0, -1, 0),
+	int3(0, 1, 0),
+	int3(0, 0, -1),
+	int3(0, 0, 1),
+
+	// Second priority is diagonal neighbors:
+	int3(-1, 0, -1),
+	int3(1, 0, -1),
+	int3(-1, 0, 1),
+	int3(1, 0, 1),
+	int3(-1, -1, -1),
+	int3(1, -1, -1),
+	int3(-1, -1, 1),
+	int3(1, -1, 1),
+	int3(-1, 1, -1),
+	int3(1, 1, -1),
+	int3(-1, 1, 1),
+	int3(1, 1, 1),
+};
+int3 get_nearby_empty_voxel(ShaderVoxelGrid voxelgrid, uint3 coord)
+{
+	for(uint i = 0; i < arraysize(voxel_neighbors); ++i)
+	{
+		if(!voxelgrid.check_voxel(coord + voxel_neighbors[i]))
+			return voxel_neighbors[i];
+	}
+	return 0;
+}
+
 [numthreads(THREADCOUNT, THREADCOUNT, 1)]
-void main(uint3 GTid : SV_GroupThreadID, uint3 Gid : SV_GroupID, uint groupIndex : SV_GroupIndex)
+void main(uint2 GTid : SV_GroupThreadID, uint2 Gid : SV_GroupID, uint groupIndex : SV_GroupIndex)
 {
 	const uint probeIndex = Gid.x;
 	const uint3 probeCoord = ddgi_probe_coord(probeIndex);
@@ -37,30 +80,31 @@ void main(uint3 GTid : SV_GroupThreadID, uint3 Gid : SV_GroupID, uint groupIndex
 	[branch]
 	if (groupIndex == 0 && push.frameIndex == 0)
 	{
-		DDGIProbeOffset ofs;
-		ofs.store(float3(0, 0, 0));
-		ddgiOffsetBuffer.Store<DDGIProbeOffset>(probeIndex * sizeof(DDGIProbeOffset), ofs);
+		ddgiProbeBuffer[probeIndex].offset = 0;
 	}
-	float3 probeOffset = ddgiOffsetBuffer.Load<DDGIProbeOffset>(probeIndex * sizeof(DDGIProbeOffset)).load();
+	const float3 probe_limit = ddgi_cellsize() * 0.5;
 	float3 probeOffsetNew = 0;
 	const float probeOffsetDistance = maxDistance * DDGI_KEEP_DISTANCE;
 #endif // DDGI_UPDATE_DEPTH
 
 #ifdef DDGI_UPDATE_DEPTH
-	float2 result = 0;
+	float2 result = 0; // this must be full precision, otherwise popping will occur!
 	const uint2 pixel_topleft = ddgi_probe_depth_pixel(probeCoord);
-#else
-	float3 result = 0;
-	const uint2 pixel_topleft = ddgi_probe_color_pixel(probeCoord);
-#endif // DDGI_UPDATE_DEPTH
 	const uint2 pixel_current = pixel_topleft + GTid.xy;
 	const uint2 copy_coord = pixel_topleft - 1;
+#else
+	// Full precision: this accumulates the radiance of up to DDGI_MAX_RAYCOUNT
+	// (512) rays before dividing by total_weight. In half precision that
+	// running sum overflows to +Inf for bright probes, which then poisons the
+	// probe and spreads. (The averaged result is cast back to half afterwards.)
+	float3 result = 0;
+#endif // DDGI_UPDATE_DEPTH
 
-	const float3 texel_direction = decode_oct(((GTid.xy + 0.5) / (float2)THREADCOUNT) * 2 - 1);
+	const half3 texel_direction = decode_oct((((GTid.xy % RESOLUTION) + 0.5) / RESOLUTION) * 2 - 1);
 
 	float total_weight = 0;
 
-	uint remaining_rays = push.rayCount;
+	uint remaining_rays = min(ddgiRayCountBuffer[probeIndex] * DDGI_RAY_BUCKET_COUNT, DDGI_MAX_RAYCOUNT);
 	uint offset = 0;
 
 	while (remaining_rays > 0)
@@ -79,7 +123,7 @@ void main(uint3 GTid : SV_GroupThreadID, uint3 Gid : SV_GroupID, uint groupIndex
 			DDGIRayData ray = ray_cache[r];
 
 #ifdef DDGI_UPDATE_DEPTH
-			float depth;
+			half depth;
 			if (ray.depth > 0)
 			{
 				depth = clamp(ray.depth - 0.01, 0, maxDistance);
@@ -94,10 +138,10 @@ void main(uint3 GTid : SV_GroupThreadID, uint3 Gid : SV_GroupID, uint groupIndex
 				probeOffsetNew -= ray.direction * (probeOffsetDistance - depth);
 			}
 #else
-			const float3 radiance = ray.radiance.rgb;
+			const half3 radiance = ray.radiance.rgb;
 #endif // DDGI_UPDATE_DEPTH
 
-			float weight = saturate(dot(texel_direction, ray.direction));
+			half weight = saturate(dot(texel_direction, ray.direction));
 #ifdef DDGI_UPDATE_DEPTH
 			weight = pow(weight, 64);
 #endif // DDGI_UPDATE_DEPTH
@@ -105,7 +149,7 @@ void main(uint3 GTid : SV_GroupThreadID, uint3 Gid : SV_GroupID, uint groupIndex
 			if (weight > WEIGHT_EPSILON)
 			{
 #ifdef DDGI_UPDATE_DEPTH
-				result += float2(depth, sqr(depth)) * weight;
+				result += half2(depth, sqr(depth)) * weight;
 #else
 				result += ray.radiance.rgb * weight;
 #endif // DDGI_UPDATE_DEPTH
@@ -126,46 +170,88 @@ void main(uint3 GTid : SV_GroupThreadID, uint3 Gid : SV_GroupID, uint groupIndex
 	}
 
 #ifdef DDGI_UPDATE_DEPTH
-	const float2 prev_result = bindless_textures[GetScene().ddgi.depth_texture][pixel_current].xy;
-#else
-	const float3 prev_result = bindless_textures[GetScene().ddgi.color_texture][pixel_current].rgb;
-#endif // DDGI_UPDATE_DEPTH
-
+	const half2 prev_result = output[pixel_current].xy;
 	if (push.frameIndex > 0)
 	{
-		result = lerp(prev_result, result, push.blendSpeed);
+		result = lerp(prev_result, result, 0.02);
 	}
-
+	shared_depths[flatten2D(GTid, DDGI_DEPTH_RESOLUTION)] = pack_half2(result);
 	output[pixel_current] = result;
 
-	DeviceMemoryBarrierWithGroupSync();
+	GroupMemoryBarrierWithGroupSync();
 
-#ifdef DDGI_UPDATE_DEPTH
 	// Copy depth borders:
-	for (uint index = groupIndex; index < 68; index += THREADCOUNT * THREADCOUNT)
+	for (uint index = groupIndex; index < arraysize(DDGI_DEPTH_BORDER_OFFSETS); index += THREADCOUNT * THREADCOUNT)
 	{
-		uint2 src_coord = copy_coord + DDGI_DEPTH_BORDER_OFFSETS[index].xy;
+		uint src_coord = flatten2D(DDGI_DEPTH_BORDER_OFFSETS[index].xy - 1, DDGI_DEPTH_RESOLUTION);
 		uint2 dst_coord = copy_coord + DDGI_DEPTH_BORDER_OFFSETS[index].zw;
-		output[dst_coord] = output[src_coord];
+		output[dst_coord] = unpack_half2(shared_depths[src_coord]);
 	}
 
 	[branch]
 	if (groupIndex == 0)
 	{
+		[branch]
+		if(GetScene().voxelgrid.IsValid())
+		{
+			// If there is a voxel grid, that can help offset the probes when they are stuck in closed spaces:
+			ShaderVoxelGrid voxelgrid = GetScene().voxelgrid;
+			uint3 coord = voxelgrid.world_to_coord(ddgi_probe_position_rest(probeCoord));
+			if(voxelgrid.check_voxel(coord))
+			{
+				probeOffsetNew += get_nearby_empty_voxel(voxelgrid, coord) * voxelgrid.voxelSize * 2;
+			}
+		}
+		
+		half3 probeOffset = unpack_half3(ddgiProbeBuffer[probeIndex].offset);
+		probeOffset *= probe_limit;
 		probeOffset = lerp(probeOffset, probeOffsetNew, 0.01);
-		const float3 limit = ddgi_cellsize() * 0.5;
-		probeOffset = clamp(probeOffset, -limit, limit);
-		DDGIProbeOffset ofs;
-		ofs.store(probeOffset);
-		ddgiOffsetBuffer.Store<DDGIProbeOffset>(probeIndex * sizeof(DDGIProbeOffset), ofs);
+		probeOffset = clamp(probeOffset, -probe_limit, probe_limit);
+		probeOffset /= probe_limit;
+		ddgiProbeBuffer[probeIndex].offset = pack_half3(probeOffset);
 	}
 #else
-	// Copy color borders:
-	for (uint index = groupIndex; index < 36; index += THREADCOUNT * THREADCOUNT)
+
+	if (GTid.x < DDGI_COLOR_RESOLUTION && GTid.y < DDGI_COLOR_RESOLUTION)
 	{
-		uint2 src_coord = copy_coord + DDGI_COLOR_BORDER_OFFSETS[index].xy;
-		uint2 dst_coord = copy_coord + DDGI_COLOR_BORDER_OFFSETS[index].zw;
-		output[dst_coord] = output[src_coord];
+		const uint idx = flatten2D(GTid.xy, DDGI_COLOR_RESOLUTION);
+		const uint variance_data_index = probeIndex * DDGI_COLOR_RESOLUTION * DDGI_COLOR_RESOLUTION + idx;
+		DDGIVarianceData varianceData = varianceBuffer[variance_data_index].load();
+		if (push.frameIndex == 0)
+		{
+			varianceData = (DDGIVarianceData)0;
+			varianceData.mean = result;
+			varianceData.shortMean = result;
+			varianceData.inconsistency = 1;
+		}
+		MultiscaleMeanEstimator(result, varianceData, push.blendSpeed);
+		varianceBuffer[variance_data_index].store(varianceData);
+		result = varianceData.mean;
+
+		shared_r[GTid.x][GTid.y] = result.r;
+		shared_g[GTid.x][GTid.y] = result.g;
+		shared_b[GTid.x][GTid.y] = result.b;
 	}
+
+	GroupMemoryBarrierWithGroupSync();
+
+	if (groupIndex == 0)
+	{
+		SH::L1_RGB radiance = SH::L1_RGB::Zero();
+		for (int x = 0; x < RESOLUTION; ++x)
+		{
+			for (int y = 0; y < RESOLUTION; ++y)
+			{
+				const half3 direction = decode_oct(((half2(x, y) + 0.5) / RESOLUTION) * 2 - 1);
+				half3 value = half3(shared_r[x][y], shared_g[x][y], shared_b[x][y]);
+				radiance = SH::Add(radiance, SH::ProjectOntoL1_RGB(direction, value));
+			}
+		}
+		radiance = SH::Multiply(radiance, rcp(RESOLUTION * RESOLUTION * SPHERE_SAMPLING_PDF));
+		ddgiProbeBuffer[probeIndex].radiance = radiance.Pack();
+		
+		//draw_line(ddgi_probe_position(probeCoord), ddgi_probe_position(probeCoord) + OptimalLinearDirection(radiance));
+	}
+	
 #endif // DDGI_UPDATE_DEPTH
 }

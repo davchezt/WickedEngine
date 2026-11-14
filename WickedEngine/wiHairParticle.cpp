@@ -12,6 +12,8 @@
 #include "wiEventHandler.h"
 #include "wiTimer.h"
 
+#include <cstring>
+
 using namespace wi::primitive;
 using namespace wi::graphics;
 using namespace wi::scene;
@@ -21,122 +23,47 @@ namespace wi
 {
 	static Shader vs;
 	static Shader ps_prepass;
+	static Shader ps_prepass_depthonly;
 	static Shader ps;
+	static Shader ps_shadow;
 	static Shader ps_simple;
 	static Shader cs_simulate;
-	static Shader cs_finishUpdate;
-	static DepthStencilState dss_default, dss_equal;
-	static RasterizerState rs, ncrs, wirers;
+	static DepthStencilState dss_default, dss_equal, dss_shadow;
+	static RasterizerState rs, ncrs, wirers, rs_shadow;
 	static BlendState bs;
+	static BlendState bs_shadow;
 	static PipelineState PSO[RENDERPASS_COUNT];
 	static PipelineState PSO_wire;
 
 	uint64_t HairParticleSystem::GetMemorySizeInBytes() const
 	{
-		if (!simulationBuffer.IsValid())
+		if (!generalBuffer.IsValid())
 			return 0;
 
 		uint64_t retVal = 0;
 
-		retVal += simulationBuffer.GetDesc().size;
 		retVal += constantBuffer.GetDesc().size;
-		retVal += vertexBuffer_POS[0].GetDesc().size;
-		retVal += vertexBuffer_POS[1].GetDesc().size;
-		retVal += vertexBuffer_UVS.GetDesc().size;
-		retVal += primitiveBuffer.GetDesc().size;
-		retVal += culledIndexBuffer.GetDesc().size;
-		retVal += indirectBuffer.GetDesc().size;
+		retVal += generalBuffer.GetDesc().size;
 		retVal += indexBuffer.GetDesc().size;
 		retVal += vertexBuffer_length.GetDesc().size;
 
 		return retVal;
 	}
 
-	void HairParticleSystem::CreateRenderData(const wi::scene::MeshComponent& mesh)
+	void HairParticleSystem::CreateFromMesh(const wi::scene::MeshComponent& mesh)
 	{
-		GraphicsDevice* device = wi::graphics::GetDevice();
-
-		BLAS = {};
-		_flags &= ~REBUILD_BUFFERS;
-		regenerate_frame = true;
-
-		GPUBufferDesc bd;
-		bd.usage = Usage::DEFAULT;
-		bd.bind_flags = BindFlag::SHADER_RESOURCE | BindFlag::UNORDERED_ACCESS;
-		bd.misc_flags = ResourceMiscFlag::BUFFER_STRUCTURED;
-
-		const uint32_t particleCount = GetParticleCount();
-		if (particleCount > 0)
+		if (mesh.so_pos.IsValid())
 		{
-			bd.stride = sizeof(PatchSimulationData);
-			bd.size = bd.stride * particleCount;
-			device->CreateBuffer(&bd, nullptr, &simulationBuffer);
-			device->SetName(&simulationBuffer, "HairParticleSystem::simulationBuffer");
-
-			bd.misc_flags = ResourceMiscFlag::BUFFER_RAW;
-			if (device->CheckCapability(GraphicsDeviceCapability::RAYTRACING))
-			{
-				bd.misc_flags |= ResourceMiscFlag::RAY_TRACING;
-			}
-			bd.stride = sizeof(MeshComponent::Vertex_POS);
-			bd.size = bd.stride * 4 * particleCount;
-			wi::vector<uint8_t> initdata(bd.size);
-			std::fill(initdata.begin(), initdata.end(), 0);
-			device->CreateBuffer(&bd, initdata.data(), &vertexBuffer_POS[0]);
-			device->SetName(&vertexBuffer_POS[0], "HairParticleSystem::vertexBuffer_POS[0]");
-			device->CreateBuffer(&bd, initdata.data(), &vertexBuffer_POS[1]);
-			device->SetName(&vertexBuffer_POS[1], "HairParticleSystem::vertexBuffer_POS[1]");
-
-			bd.misc_flags = ResourceMiscFlag::BUFFER_RAW;
-			bd.stride = sizeof(MeshComponent::Vertex_UVS);
-			bd.size = bd.stride * 4 * particleCount;
-			device->CreateBuffer(&bd, nullptr, &vertexBuffer_UVS);
-			device->SetName(&vertexBuffer_UVS, "HairParticleSystem::vertexBuffer_UVS");
-
-			bd.bind_flags = BindFlag::SHADER_RESOURCE;
-			bd.misc_flags = ResourceMiscFlag::NONE;
-			if (device->CheckCapability(GraphicsDeviceCapability::RAYTRACING))
-			{
-				bd.misc_flags |= ResourceMiscFlag::RAY_TRACING;
-			}
-			bd.format = Format::R32_UINT;
-			bd.stride = sizeof(uint);
-			bd.size = bd.stride * 6 * particleCount;
-			wi::vector<uint> primitiveData(6 * particleCount);
-			for (uint particleID = 0; particleID < particleCount; ++particleID)
-			{
-				uint v0 = particleID * 4;
-				uint i0 = particleID * 6;
-				primitiveData[i0 + 0] = v0 + 0;
-				primitiveData[i0 + 1] = v0 + 1;
-				primitiveData[i0 + 2] = v0 + 2;
-				primitiveData[i0 + 3] = v0 + 2;
-				primitiveData[i0 + 4] = v0 + 1;
-				primitiveData[i0 + 5] = v0 + 3;
-			}
-			device->CreateBuffer(&bd, primitiveData.data(), &primitiveBuffer);
-			device->SetName(&primitiveBuffer, "HairParticleSystem::primitiveBuffer");
-
-			bd.bind_flags = BindFlag::INDEX_BUFFER | BindFlag::UNORDERED_ACCESS;
-			bd.misc_flags = ResourceMiscFlag::NONE;
-			bd.format = Format::R32_UINT;
-			bd.stride = sizeof(uint);
-			bd.size = bd.stride * 6 * particleCount;
-			device->CreateBuffer(&bd, nullptr, &culledIndexBuffer);
-			device->SetName(&culledIndexBuffer, "HairParticleSystem::culledIndexBuffer");
+			position_format = MeshComponent::Vertex_POS32W::FORMAT;
 		}
-
-		bd.usage = Usage::DEFAULT;
-		bd.size = sizeof(HairParticleCB);
-		bd.bind_flags = BindFlag::CONSTANT_BUFFER;
-		bd.misc_flags = ResourceMiscFlag::NONE;
-		device->CreateBuffer(&bd, nullptr, &constantBuffer);
-		device->SetName(&constantBuffer, "HairParticleSystem::constantBuffer");
+		else
+		{
+			position_format = MeshComponent::Vertex_POS16::FORMAT;
+		}
 
 		if (vertex_lengths.size() != mesh.vertex_positions.size())
 		{
-			vertex_lengths.resize(mesh.vertex_positions.size());
-			std::fill(vertex_lengths.begin(), vertex_lengths.end(), 1.0f);
+			vertex_lengths.resize(mesh.vertex_positions.size(), 1.0f);
 		}
 
 		indices.clear();
@@ -160,21 +87,201 @@ namespace wi
 			}
 		}
 
-		if (!vertex_lengths.empty())
+		_flags |= REBUILD_BUFFERS;
+	}
+
+	void HairParticleSystem::DeleteRenderData()
+	{
+		constantBuffer = {};
+		constantBufferData = {}; // force a re-upload into the recreated buffer
+		generalBuffer = {};
+		simulation_view = {};
+		vb_pos[0] = {};
+		vb_pos[1] = {};
+		vb_nor = {};
+		vb_pos_raytracing = {};
+		vb_uvs = {};
+		wetmap = {};
+		ib_culled = {};
+		indirect_view = {};
+		prim_view = {};
+		indexBuffer = {};
+		vertexBuffer_length = {};
+		BLAS = {};
+	}
+
+	void HairParticleSystem::CreateRenderData()
+	{
+		DeleteRenderData();
+
+		GraphicsDevice* device = wi::graphics::GetDevice();
+
+		BLAS = {};
+		_flags &= ~REBUILD_BUFFERS;
+		regenerate_frame = true;
+
+		const uint32_t particleCount = GetParticleCount();
+		const uint32_t gfx_vertexcount = GetVertexCount();
+		const uint32_t gfx_indexcount = GetIndexCount();
+
+		if (particleCount > 0)
 		{
-			wi::vector<uint8_t> ulengths;
-			ulengths.reserve(vertex_lengths.size());
-			for (auto& x : vertex_lengths)
+			GPUBufferDesc bd;
+			bd.usage = Usage::DEFAULT;
+			bd.bind_flags = BindFlag::SHADER_RESOURCE | BindFlag::UNORDERED_ACCESS | BindFlag::INDEX_BUFFER;
+			bd.misc_flags = ResourceMiscFlag::BUFFER_RAW | ResourceMiscFlag::TYPED_FORMAT_CASTING | ResourceMiscFlag::INDIRECT_ARGS | ResourceMiscFlag::NO_DEFAULT_DESCRIPTORS;
+			if (device->CheckCapability(GraphicsDeviceCapability::RAYTRACING))
 			{
-				ulengths.push_back(uint8_t(wi::math::Clamp(x, 0, 1) * 255.0f));
+				bd.misc_flags |= ResourceMiscFlag::RAY_TRACING;
 			}
 
+			const size_t position_stride = GetFormatStride(position_format);
+			const Format ib_format = GetIndexBufferFormatRaw(gfx_vertexcount);
+			const uint32_t ib_stride = GetFormatStride(ib_format);
+			const uint64_t alignment =
+				device->GetMinOffsetAlignment(&bd) *
+				sizeof(IndirectDrawArgsIndexedInstanced) * // additional alignment
+				sizeof(PatchSimulationData) // additional alignment
+				;
+
+			simulation_view.size = sizeof(PatchSimulationData) * particleCount;
+			vb_pos[0].size = position_stride * gfx_vertexcount;
+			vb_pos[1].size = position_stride * gfx_vertexcount;
+			vb_nor.size = sizeof(MeshComponent::Vertex_NOR) * gfx_vertexcount;
+			vb_uvs.size = sizeof(MeshComponent::Vertex_TEX) * gfx_vertexcount;
+			wetmap.size = sizeof(uint16_t) * gfx_vertexcount;
+			ib_culled.size = ib_stride * gfx_indexcount;
+			prim_view.size = ib_stride * gfx_indexcount;
+			indirect_view.size = sizeof(IndirectDrawArgsIndexedInstanced);
+			vb_pos_raytracing.size = position_stride * gfx_vertexcount;
+
+			bd.size =
+				align(indirect_view.size, alignment) +
+				align(simulation_view.size, alignment) +
+				align(vb_pos[0].size, alignment) +
+				align(vb_pos[1].size, alignment) +
+				align(vb_nor.size, alignment) +
+				align(vb_uvs.size, alignment) +
+				align(wetmap.size, alignment) +
+				align(ib_culled.size, alignment) +
+				align(prim_view.size, alignment) +
+				align(vb_pos_raytracing.size, alignment)
+				;
+
+			bool success = device->CreateBuffer(&bd, nullptr, &generalBuffer);
+			assert(success);
+			device->SetName(&generalBuffer, "HairParticleSystem::generalBuffer");
+			gpu_initialized = false;
+
+			uint64_t buffer_offset = 0ull;
+
+			const uint32_t indirect_stride = sizeof(IndirectDrawArgsIndexedInstanced);
+			buffer_offset = align(buffer_offset, alignment);
+			indirect_view.offset = buffer_offset;
+			indirect_view.subresource_srv = device->CreateSubresource(&generalBuffer, SubresourceType::SRV, indirect_view.offset, indirect_view.size, nullptr, &indirect_stride);
+			indirect_view.subresource_uav = device->CreateSubresource(&generalBuffer, SubresourceType::UAV, indirect_view.offset, indirect_view.size, nullptr, &indirect_stride);
+			indirect_view.descriptor_srv = device->GetDescriptorIndex(&generalBuffer, SubresourceType::SRV, indirect_view.subresource_srv);
+			indirect_view.descriptor_uav = device->GetDescriptorIndex(&generalBuffer, SubresourceType::UAV, indirect_view.subresource_uav);
+			buffer_offset += indirect_view.size;
+
+			const uint32_t simulation_stride = sizeof(PatchSimulationData);
+			buffer_offset = align(buffer_offset, alignment);
+			simulation_view.offset = buffer_offset;
+			simulation_view.subresource_srv = device->CreateSubresource(&generalBuffer, SubresourceType::SRV, simulation_view.offset, simulation_view.size, nullptr, &simulation_stride);
+			simulation_view.subresource_uav = device->CreateSubresource(&generalBuffer, SubresourceType::UAV, simulation_view.offset, simulation_view.size, nullptr, &simulation_stride);
+			simulation_view.descriptor_srv = device->GetDescriptorIndex(&generalBuffer, SubresourceType::SRV, simulation_view.subresource_srv);
+			simulation_view.descriptor_uav = device->GetDescriptorIndex(&generalBuffer, SubresourceType::UAV, simulation_view.subresource_uav);
+			buffer_offset += simulation_view.size;
+
+			buffer_offset = align(buffer_offset, alignment);
+			vb_pos[0].offset = buffer_offset;
+			vb_pos[0].subresource_srv = device->CreateSubresource(&generalBuffer, SubresourceType::SRV, vb_pos[0].offset, vb_pos[0].size, &position_format);
+			vb_pos[0].subresource_uav = device->CreateSubresource(&generalBuffer, SubresourceType::UAV, vb_pos[0].offset, vb_pos[0].size, &position_format);
+			vb_pos[0].descriptor_srv = device->GetDescriptorIndex(&generalBuffer, SubresourceType::SRV, vb_pos[0].subresource_srv);
+			vb_pos[0].descriptor_uav = device->GetDescriptorIndex(&generalBuffer, SubresourceType::UAV, vb_pos[0].subresource_uav);
+			buffer_offset += vb_pos[0].size;
+
+			buffer_offset = align(buffer_offset, alignment);
+			vb_pos[1].offset = buffer_offset;
+			vb_pos[1].subresource_srv = device->CreateSubresource(&generalBuffer, SubresourceType::SRV, vb_pos[1].offset, vb_pos[1].size, &position_format);
+			vb_pos[1].subresource_uav = device->CreateSubresource(&generalBuffer, SubresourceType::UAV, vb_pos[1].offset, vb_pos[1].size, &position_format);
+			vb_pos[1].descriptor_srv = device->GetDescriptorIndex(&generalBuffer, SubresourceType::SRV, vb_pos[1].subresource_srv);
+			vb_pos[1].descriptor_uav = device->GetDescriptorIndex(&generalBuffer, SubresourceType::UAV, vb_pos[1].subresource_uav);
+			buffer_offset += vb_pos[1].size;
+
+			buffer_offset = align(buffer_offset, alignment);
+			vb_nor.offset = buffer_offset;
+			vb_nor.subresource_srv = device->CreateSubresource(&generalBuffer, SubresourceType::SRV, vb_nor.offset, vb_nor.size, &MeshComponent::Vertex_NOR::FORMAT);
+			vb_nor.subresource_uav = device->CreateSubresource(&generalBuffer, SubresourceType::UAV, vb_nor.offset, vb_nor.size, &MeshComponent::Vertex_NOR::FORMAT);
+			vb_nor.descriptor_srv = device->GetDescriptorIndex(&generalBuffer, SubresourceType::SRV, vb_nor.subresource_srv);
+			vb_nor.descriptor_uav = device->GetDescriptorIndex(&generalBuffer, SubresourceType::UAV, vb_nor.subresource_uav);
+			buffer_offset += vb_nor.size;
+
+			buffer_offset = align(buffer_offset, alignment);
+			vb_uvs.offset = buffer_offset;
+			vb_uvs.subresource_srv = device->CreateSubresource(&generalBuffer, SubresourceType::SRV, vb_uvs.offset, vb_uvs.size, &MeshComponent::Vertex_TEX::FORMAT);
+			vb_uvs.subresource_uav = device->CreateSubresource(&generalBuffer, SubresourceType::UAV, vb_uvs.offset, vb_uvs.size, &MeshComponent::Vertex_TEX::FORMAT);
+			vb_uvs.descriptor_srv = device->GetDescriptorIndex(&generalBuffer, SubresourceType::SRV, vb_uvs.subresource_srv);
+			vb_uvs.descriptor_uav = device->GetDescriptorIndex(&generalBuffer, SubresourceType::UAV, vb_uvs.subresource_uav);
+			buffer_offset += vb_uvs.size;
+
+			constexpr Format wetmap_fmt = Format::R16_UNORM;
+			buffer_offset = align(buffer_offset, alignment);
+			wetmap.offset = buffer_offset;
+			wetmap.subresource_srv = device->CreateSubresource(&generalBuffer, SubresourceType::SRV, wetmap.offset, wetmap.size, &wetmap_fmt);
+			wetmap.subresource_uav = device->CreateSubresource(&generalBuffer, SubresourceType::UAV, wetmap.offset, wetmap.size, &wetmap_fmt);
+			wetmap.descriptor_srv = device->GetDescriptorIndex(&generalBuffer, SubresourceType::SRV, wetmap.subresource_srv);
+			wetmap.descriptor_uav = device->GetDescriptorIndex(&generalBuffer, SubresourceType::UAV, wetmap.subresource_uav);
+			buffer_offset += wetmap.size;
+
+			buffer_offset = align(buffer_offset, alignment);
+			ib_culled.offset = buffer_offset;
+			ib_culled.subresource_srv = device->CreateSubresource(&generalBuffer, SubresourceType::SRV, ib_culled.offset, ib_culled.size, &ib_format);
+			ib_culled.subresource_uav = device->CreateSubresource(&generalBuffer, SubresourceType::UAV, ib_culled.offset, ib_culled.size, &ib_format);
+			ib_culled.descriptor_srv = device->GetDescriptorIndex(&generalBuffer, SubresourceType::SRV, ib_culled.subresource_srv);
+			ib_culled.descriptor_uav = device->GetDescriptorIndex(&generalBuffer, SubresourceType::UAV, ib_culled.subresource_uav);
+			buffer_offset += ib_culled.size;
+
+			buffer_offset = align(buffer_offset, alignment);
+			prim_view.offset = buffer_offset;
+			prim_view.subresource_srv = device->CreateSubresource(&generalBuffer, SubresourceType::SRV, prim_view.offset, prim_view.size, &ib_format);
+			prim_view.subresource_uav = device->CreateSubresource(&generalBuffer, SubresourceType::UAV, prim_view.offset, prim_view.size, &ib_format);
+			prim_view.descriptor_srv = device->GetDescriptorIndex(&generalBuffer, SubresourceType::SRV, prim_view.subresource_srv);
+			prim_view.descriptor_uav = device->GetDescriptorIndex(&generalBuffer, SubresourceType::UAV, prim_view.subresource_uav);
+			buffer_offset += prim_view.size;
+
+			buffer_offset = align(buffer_offset, alignment);
+			vb_pos_raytracing.offset = buffer_offset;
+			vb_pos_raytracing.subresource_uav = device->CreateSubresource(&generalBuffer, SubresourceType::UAV, vb_pos_raytracing.offset, vb_pos_raytracing.size, &position_format);
+			vb_pos_raytracing.descriptor_uav = device->GetDescriptorIndex(&generalBuffer, SubresourceType::UAV, vb_pos_raytracing.subresource_uav);
+			buffer_offset += vb_pos_raytracing.size;
+
+		}
+
+		GPUBufferDesc bd;
+		bd.usage = Usage::DEFAULT;
+		bd.size = sizeof(HairParticleCB);
+		bd.bind_flags = BindFlag::CONSTANT_BUFFER;
+		bd.misc_flags = ResourceMiscFlag::NONE;
+		device->CreateBuffer(&bd, nullptr, &constantBuffer);
+		device->SetName(&constantBuffer, "HairParticleSystem::constantBuffer");
+
+		if (!vertex_lengths.empty())
+		{
+			auto pack_lengths = [&](void* dest) {
+				uint8_t* vertex_lengths_packed = (uint8_t*)dest;
+				for (size_t i = 0; i < vertex_lengths.size(); ++i)
+				{
+					uint8_t packed = uint8_t(wi::math::Clamp(vertex_lengths[i], 0, 1) * 255.0f);
+					std::memcpy(vertex_lengths_packed + i, &packed, sizeof(uint8_t));
+				}
+			};
 			bd.misc_flags = ResourceMiscFlag::NONE;
 			bd.bind_flags = BindFlag::SHADER_RESOURCE;
 			bd.format = Format::R8_UNORM;
 			bd.stride = sizeof(uint8_t);
-			bd.size = bd.stride * (uint32_t)ulengths.size();
-			device->CreateBuffer(&bd, ulengths.data(), &vertexBuffer_length);
+			bd.size = bd.stride * vertex_lengths.size();
+			device->CreateBuffer2(&bd, pack_lengths, &vertexBuffer_length);
 			device->SetName(&vertexBuffer_length, "HairParticleSystem::vertexBuffer_length");
 		}
 		if (!indices.empty())
@@ -183,46 +290,44 @@ namespace wi
 			bd.bind_flags = BindFlag::SHADER_RESOURCE;
 			bd.format = Format::R32_UINT;
 			bd.stride = sizeof(uint32_t);
-			bd.size = bd.stride * (uint32_t)indices.size();
+			bd.size = bd.stride * indices.size();
 			device->CreateBuffer(&bd, indices.data(), &indexBuffer);
 			device->SetName(&indexBuffer, "HairParticleSystem::indexBuffer");
-		}
-
-		if (!indirectBuffer.IsValid())
-		{
-			GPUBufferDesc desc;
-			desc.size = sizeof(uint) + sizeof(IndirectDrawArgsIndexedInstanced); // counter + draw args
-			desc.misc_flags = ResourceMiscFlag::BUFFER_RAW | ResourceMiscFlag::INDIRECT_ARGS;
-			desc.bind_flags = BindFlag::UNORDERED_ACCESS;
-			device->CreateBuffer(&desc, nullptr, &indirectBuffer);
 		}
 	}
 	void HairParticleSystem::CreateRaytracingRenderData()
 	{
 		GraphicsDevice* device = wi::graphics::GetDevice();
 
-		if (device->CheckCapability(GraphicsDeviceCapability::RAYTRACING) && primitiveBuffer.IsValid())
+		if (device->CheckCapability(GraphicsDeviceCapability::RAYTRACING) && prim_view.IsValid())
 		{
 			RaytracingAccelerationStructureDesc desc;
 			desc.type = RaytracingAccelerationStructureDesc::Type::BOTTOMLEVEL;
+			// Grass is heavily traced by GI rays, so prefer a traversal-optimized
+			// BVH (FAST_TRACE) over a cheap-to-build one. Animation is handled by
+			// per-frame refits (ALLOW_UPDATE) plus a periodic full rebuild on the
+			// renderer side to keep the structure's quality from decaying.
+			desc.flags |= RaytracingAccelerationStructureDesc::FLAG_PREFER_FAST_TRACE;
 			desc.flags |= RaytracingAccelerationStructureDesc::FLAG_ALLOW_UPDATE;
-			desc.flags |= RaytracingAccelerationStructureDesc::FLAG_PREFER_FAST_BUILD;
 
 			desc.bottom_level.geometries.emplace_back();
 			auto& geometry = desc.bottom_level.geometries.back();
 			geometry.type = RaytracingAccelerationStructureDesc::BottomLevel::Geometry::Type::TRIANGLES;
-			geometry.triangles.vertex_buffer = vertexBuffer_POS[0];
-			geometry.triangles.index_buffer = primitiveBuffer;
-			geometry.triangles.index_format = IndexBufferFormat::UINT32;
-			geometry.triangles.index_count = (uint32_t)(primitiveBuffer.desc.size / primitiveBuffer.desc.stride);
-			geometry.triangles.index_offset = 0;
-			geometry.triangles.vertex_count = (uint32_t)(vertexBuffer_POS[0].desc.size / vertexBuffer_POS[0].desc.stride);
-			geometry.triangles.vertex_format = Format::R32G32B32_FLOAT;
-			geometry.triangles.vertex_stride = sizeof(MeshComponent::Vertex_POS);
+			geometry.triangles.vertex_buffer = generalBuffer;
+			geometry.triangles.index_buffer = generalBuffer;
+			geometry.triangles.index_format = GetIndexBufferFormat(GetVertexCount());
+			geometry.triangles.index_count = GetIndexCount();
+			geometry.triangles.index_offset = prim_view.offset / GetFormatStride(GetIndexBufferFormatRaw(GetVertexCount()));
+			geometry.triangles.vertex_count = (uint32_t)(vb_pos_raytracing.size / GetFormatStride(position_format));
+			geometry.triangles.vertex_format = position_format == Format::R32G32B32A32_FLOAT ? Format::R32G32B32_FLOAT : position_format;
+			geometry.triangles.vertex_stride = GetFormatStride(position_format);
+			geometry.triangles.vertex_byte_offset = vb_pos_raytracing.offset;
 
 			bool success = device->CreateRaytracingAccelerationStructure(&desc, &BLAS);
 			assert(success);
 			device->SetName(&BLAS, "HairParticleSystem::BLAS");
+
+			must_rebuild_blas = true;
 		}
 	}
 
@@ -233,28 +338,100 @@ namespace wi
 		XMFLOAT3 _min = mesh.aabb.getMin();
 		XMFLOAT3 _max = mesh.aabb.getMax();
 
-		_max.x += length;
-		_max.y += length;
-		_max.z += length;
+		float maxlen = length;
 
-		_min.x -= length;
-		_min.y -= length;
-		_min.z -= length;
+		for (auto& x : atlas_rects)
+		{
+			maxlen = std::max(maxlen, x.size);
+		}
+
+		_max.x += maxlen;
+		_max.y += maxlen;
+		_max.z += maxlen;
+
+		_min.x -= maxlen;
+		_min.y -= maxlen;
+		_min.z -= maxlen;
 
 		aabb = AABB(_min, _max);
 		aabb = aabb.transform(world);
 
-		if (_flags & REBUILD_BUFFERS || !constantBuffer.IsValid() || GetParticleCount() != simulationBuffer.GetDesc().size / sizeof(PatchSimulationData))
+		struct HairBackgroundGeneration
 		{
-			CreateRenderData(mesh);
+			HairParticleSystem hair;
+			wi::jobsystem::context ctx;
+		};
+		if (background_generation.IsValid())
+		{
+			HairBackgroundGeneration* gen = (HairBackgroundGeneration*)background_generation.get();
+			if (wi::jobsystem::IsBusy(gen->ctx))
+			{
+				return;
+			}
+			else
+			{
+				*this = std::move(gen->hair);
+				background_generation = {};
+			}
 		}
 
-		std::swap(vertexBuffer_POS[0], vertexBuffer_POS[1]);
-
-		if (BLAS.IsValid() && !BLAS.desc.bottom_level.geometries.empty())
+		if ((_flags & REBUILD_BUFFERS) || indices.empty())
 		{
-			BLAS.desc.bottom_level.geometries.back().triangles.vertex_buffer = vertexBuffer_POS[0];
+			CreateFromMesh(mesh);
 		}
+
+		const uint32_t particleCount = GetParticleCount();
+		const uint32_t gfx_indexcount = GetIndexCount();
+
+		if (
+			(_flags & REBUILD_BUFFERS) ||
+			!constantBuffer.IsValid() ||
+			particleCount != simulation_view.size / sizeof(PatchSimulationData) ||
+			(gfx_indexcount > 0 && prim_view.size != gfx_indexcount * GetFormatStride(GetIndexBufferFormatRaw(GetVertexCount())))
+			)
+		{
+#if 0
+			// immediate regen
+			CreateRenderData();
+#else
+			// background regen
+			auto gen = wi::allocator::make_shared<HairBackgroundGeneration>();
+			gen->hair = *this;
+			gen->ctx.priority = wi::jobsystem::Priority::Low;
+			background_generation = gen;
+			wi::jobsystem::Execute(gen->ctx, [gen](wi::jobsystem::JobArgs args) {
+				gen->hair.CreateRenderData();
+			});
+#endif
+		}
+
+		std::swap(vb_pos[0], vb_pos[1]);
+	}
+	void HairParticleSystem::InitializeGPUBuffersIfNeeded(
+		const HairParticleSystem* hairs,
+		size_t hairCount,
+		CommandList cmd
+	)
+	{
+		GraphicsDevice* device = wi::graphics::GetDevice();
+		device->EventBegin("HairParticleSystem - InitializeGPUBuffersIfNeeded", cmd);
+
+		for (uint32_t i = 0; i < hairCount; ++i)
+		{
+			const HairParticleSystem& hair = hairs[i];
+			if (hair.strandCount == 0 || !hair.generalBuffer.IsValid())
+			{
+				continue;
+			}
+			if (!hair.gpu_initialized)
+			{
+				hair.gpu_initialized = true;
+				device->ClearUAV(&hair.generalBuffer, 0, cmd);
+				wi::renderer::PushBarrier(GPUBarrier::Buffer(&hair.generalBuffer, ResourceState::UNORDERED_ACCESS, ResourceState::COPY_DST));
+			}
+		}
+		wi::renderer::FlushBarriers(cmd);
+		device->EventEnd(cmd);
 	}
 	void HairParticleSystem::UpdateGPU(
 		const UpdateGPUItem* items,
@@ -265,21 +442,11 @@ namespace wi
 		GraphicsDevice* device = wi::graphics::GetDevice();
 		device->EventBegin("HairParticleSystem - UpdateGPU", cmd);
 
-		static thread_local wi::vector<GPUBarrier> barrier_stack;
-		auto barrier_stack_flush = [&]()
-		{
-			if (barrier_stack.empty())
-				return;
-			device->Barrier(barrier_stack.data(), (uint32_t)barrier_stack.size(), cmd);
-			barrier_stack.clear();
-		};
-
-		bool mem_barrier_needed = false;
 		for (uint32_t i = 0; i < itemCount; ++i)
 		{
 			const UpdateGPUItem& item = items[i];
 			const HairParticleSystem& hair = *item.hair;
-			if (hair.strandCount == 0 || !hair.simulationBuffer.IsValid())
+			if (hair.strandCount == 0 || !hair.generalBuffer.IsValid())
 			{
 				continue;
 			}
@@ -291,48 +458,105 @@ namespace wi
 			{
 				desc = material.textures[MaterialComponent::BASECOLORMAP].resource.GetTexture().GetDesc();
 			}
-			HairParticleCB hcb;
+			HairParticleCB hcb = {};
 			hcb.xHairTransform.Create(hair.world);
-			hcb.xHairRegenerate = hair.regenerate_frame ? 1 : 0;
-			hcb.xLength = hair.length;
-			hcb.xStiffness = hair.stiffness;
+			if (!IsFormatUnorm(mesh.position_format) || mesh.so_pos.IsValid())
+			{
+				hcb.xHairBaseMeshUnormRemap.init();
+			}
+			else
+			{
+				XMFLOAT4X4 unormRemap;
+				XMStoreFloat4x4(&unormRemap, mesh.aabb.getUnormRemapMatrix());
+				hcb.xHairBaseMeshUnormRemap.Create(unormRemap);
+			}
+			if (IsFormatUnorm(hair.position_format))
+			{
+				hcb.xHairFlags |= HAIR_FLAG_UNORM_POS;
+			}
+			if (hair.regenerate_frame)
+			{
+				hcb.xHairFlags |= HAIR_FLAG_REGENERATE_FRAME;
+			}
+			if (hair.IsCameraBendEnabled())
+			{
+				hcb.xHairFlags |= HAIR_FLAG_CAMERA_BEND;
+			}
+			if (hair.BLAS.IsValid())
+			{
+				// Only write the raytracing position buffer when an acceleration
+				// structure exists to consume it (raytracing active for the scene).
+				hcb.xHairFlags |= HAIR_FLAG_RAYTRACED;
+			}
+			hcb.xHairAspect = hair.width * (float)std::max(1u, desc.width) / (float)std::max(1u, desc.height);
+			hcb.xHairLength = hair.length;
+			hcb.xHairStiffness = hair.stiffness;
+			hcb.xHairDrag = hair.drag;
+			hcb.xHairGravityPower = hair.gravityPower;
 			hcb.xHairRandomness = hair.randomness;
 			hcb.xHairStrandCount = hair.strandCount;
 			hcb.xHairSegmentCount = std::max(hair.segmentCount, 1u);
+			hcb.xHairBillboardCount = std::max(hair.billboardCount, 1u);
 			hcb.xHairParticleCount = hcb.xHairStrandCount * hcb.xHairSegmentCount;
 			hcb.xHairRandomSeed = hair.randomSeed;
 			hcb.xHairViewDistance = hair.viewDistance;
 			hcb.xHairBaseMeshIndexCount = (uint)hair.indices.size();
-			hcb.xHairBaseMeshVertexPositionStride = sizeof(MeshComponent::Vertex_POS);
-			hcb.xHairFramesXY = uint2(std::max(1u, hair.framesX), std::max(1u, hair.framesY));
-			hcb.xHairFrameCount = std::max(1u, hair.frameCount);
-			hcb.xHairFrameStart = hair.frameStart;
-			hcb.xHairTexMul = float2(1.0f / (float)hcb.xHairFramesXY.x, 1.0f / (float)hcb.xHairFramesXY.y);
-			hcb.xHairAspect = (float)std::max(1u, desc.width) / (float)std::max(1u, desc.height);
 			hcb.xHairLayerMask = hair.layerMask;
 			hcb.xHairInstanceIndex = item.instanceIndex;
-			device->UpdateBuffer(&hair.constantBuffer, &hcb, cmd);
+			if (hair.atlas_rects.empty())
+			{
+				// unspecified rects will default to view the whole texture:
+				hcb.xHairAtlasRects[0].texMulAdd = float4(1, 1, 0, 0);
+				hcb.xHairAtlasRects[0].size = 1;
+				hcb.xHairAtlasRects[0].aspect = 1;
+				hcb.xHairAtlasRectCount = 1;
+			}
+			else
+			{
+				// custom atlas rects:
+				hcb.xHairAtlasRectCount = uint(std::min(hair.atlas_rects.size(), arraysize(hcb.xHairAtlasRects)));
+				for (uint a = 0; a < hcb.xHairAtlasRectCount; ++a)
+				{
+					hcb.xHairAtlasRects[a].texMulAdd = hair.atlas_rects[a].texMulAdd;
+					hcb.xHairAtlasRects[a].size = hair.atlas_rects[a].size;
+					hcb.xHairAtlasRects[a].aspect = hcb.xHairAtlasRects[a].texMulAdd.x / hcb.xHairAtlasRects[a].texMulAdd.y;
+				}
+			}
+			hcb.xHairUniformity = hair.uniformity;
+
+			// Only upload the constant buffer when its contents changed since
+			// the last frame. For static grass this is almost never, which
+			// avoids a per-hair GPU copy and barrier every frame. The buffer is
+			// Usage::DEFAULT, so its previous contents persist when skipped. A
+			// raw byte compare is safe here: HairParticleCB is explicitly
+			// padded (no indeterminate bytes) and both operands are value-
+			// initialized, so equal bytes mean the GPU already holds this exact
+			// data. The only imprecision (e.g. +0.0 vs -0.0 comparing unequal
+			// by bytes) can trigger a harmless redundant upload, never a false
+			// skip.
+			if (std::memcmp(&hair.constantBufferData, &hcb, sizeof(hcb)) != 0)
+			{
+				hair.constantBufferData = hcb;
+				device->UpdateBuffer(&hair.constantBuffer, &hcb, cmd);
+				wi::renderer::PushBarrier(GPUBarrier::Buffer(&hair.constantBuffer, ResourceState::COPY_DST, ResourceState::CONSTANT_BUFFER));
+			}
+
+			IndirectDrawArgsIndexedInstanced args = {};
+			args.BaseVertexLocation = 0;
+			args.IndexCountPerInstance = 0; // this will use shader atomic
+			args.InstanceCount = 1;
+			args.StartIndexLocation = 0;
+			args.StartInstanceLocation = 0;
+			device->UpdateBuffer(&hair.generalBuffer, &args, cmd, sizeof(args), hair.indirect_view.offset);
+			wi::renderer::PushBarrier(GPUBarrier::Buffer(&hair.generalBuffer, ResourceState::COPY_DST, ResourceState::UNORDERED_ACCESS));
 
 			if (hair.regenerate_frame)
 			{
 				hair.regenerate_frame = false;
-				device->ClearUAV(&hair.simulationBuffer, 0, cmd);
-				device->ClearUAV(&hair.vertexBuffer_POS[0], 0, cmd);
-				device->ClearUAV(&hair.vertexBuffer_POS[1], 0, cmd);
-				device->ClearUAV(&hair.vertexBuffer_UVS, 0, cmd);
-				device->ClearUAV(&hair.culledIndexBuffer, 0, cmd);
-				device->ClearUAV(&hair.indirectBuffer, 0, cmd);
-				mem_barrier_needed = true;
 			}
-
-			barrier_stack.push_back(GPUBarrier::Buffer(&hair.constantBuffer, ResourceState::COPY_DST, ResourceState::CONSTANT_BUFFER));
 		}
 
-		if (mem_barrier_needed)
-		{
-			barrier_stack.push_back(GPUBarrier::Memory());
-		}
-		barrier_stack_flush();
+		wi::renderer::FlushBarriers(cmd);
 
 		// Simulate:
 		device->BindComputeShader(&cs_simulate, cmd);
@@ -340,7 +564,7 @@ namespace wi
 		{
 			const UpdateGPUItem& item = items[i];
 			const HairParticleSystem& hair = *item.hair;
-			if (hair.strandCount == 0 || !hair.simulationBuffer.IsValid())
+			if (hair.strandCount == 0 || !hair.generalBuffer.IsValid())
 			{
 				continue;
 			}
@@ -348,14 +572,14 @@ namespace wi
 
 			device->BindConstantBuffer(&hair.constantBuffer, CB_GETBINDSLOT(HairParticleCB), cmd);
 
-			const GPUResource* uavs[] = {
-				&hair.simulationBuffer,
-				&hair.vertexBuffer_POS[0],
-				&hair.vertexBuffer_UVS,
-				&hair.culledIndexBuffer,
-				&hair.indirectBuffer
-			};
-			device->BindUAVs(uavs, 0, arraysize(uavs), cmd);
+			device->BindUAV(&hair.generalBuffer, 0, cmd, hair.simulation_view.subresource_uav);
+			device->BindUAV(&hair.generalBuffer, 1, cmd, hair.vb_pos[0].subresource_uav);
+			device->BindUAV(&hair.generalBuffer, 2, cmd, hair.vb_uvs.subresource_uav);
+			device->BindUAV(&hair.generalBuffer, 3, cmd, hair.ib_culled.subresource_uav);
+			device->BindUAV(&hair.generalBuffer, 4, cmd, hair.indirect_view.subresource_uav);
+			device->BindUAV(&hair.generalBuffer, 5, cmd, hair.vb_pos_raytracing.subresource_uav);
+			device->BindUAV(&hair.generalBuffer, 6, cmd, hair.vb_nor.subresource_uav);
+			device->BindUAV(&hair.generalBuffer, 7, cmd, hair.prim_view.subresource_uav);
 
 			if (hair.indexBuffer.IsValid())
 			{
@@ -367,70 +591,41 @@ namespace wi
 			}
 			if (mesh.streamoutBuffer.IsValid())
 			{
-				device->BindResource(&mesh.streamoutBuffer, 1, cmd, mesh.so_pos_nor_wind.subresource_srv);
+				device->BindResource(&mesh.streamoutBuffer, 1, cmd, mesh.so_pos.subresource_srv);
+				device->BindResource(&mesh.streamoutBuffer, 2, cmd, mesh.so_nor.subresource_srv);
 			}
 			else
 			{
-				device->BindResource(&mesh.generalBuffer, 1, cmd, mesh.vb_pos_nor_wind.subresource_srv);
+				device->BindResource(&mesh.generalBuffer, 1, cmd, mesh.vb_pos_wind.subresource_srv);
+				device->BindResource(&mesh.generalBuffer, 2, cmd, mesh.vb_nor.subresource_srv);
 			}
-			device->BindResource(&hair.vertexBuffer_length, 2, cmd);
+			device->BindResource(&hair.vertexBuffer_length, 3, cmd);
 
 			device->Dispatch((hair.strandCount + THREADCOUNT_SIMULATEHAIR - 1) / THREADCOUNT_SIMULATEHAIR, 1, 1, cmd);
 
+			wi::renderer::PushBarrier(GPUBarrier::Buffer(&hair.generalBuffer, ResourceState::UNORDERED_ACCESS, ResourceState::INDIRECT_ARGUMENT | ResourceState::INDEX_BUFFER | ResourceState::SHADER_RESOURCE));
 		}
 
-		{
-			GPUBarrier barriers[] = {
-				GPUBarrier::Memory(),
-			};
-			device->Barrier(barriers, arraysize(barriers), cmd);
-		}
-
-		// Finish update (reset counter, create indirect draw args):
-		device->BindComputeShader(&cs_finishUpdate, cmd);
-		for (uint32_t i = 0; i < itemCount; ++i)
-		{
-			const UpdateGPUItem& item = items[i];
-			const HairParticleSystem& hair = *item.hair;
-			if (hair.strandCount == 0 || !hair.simulationBuffer.IsValid())
-			{
-				continue;
-			}
-
-			const GPUResource* uavs[] = {
-				&hair.indirectBuffer
-			};
-			device->BindUAVs(uavs, 0, arraysize(uavs), cmd);
-
-			device->Dispatch(1, 1, 1, cmd);
-
-			barrier_stack.push_back(GPUBarrier::Memory(&hair.indirectBuffer));
-			barrier_stack.push_back(GPUBarrier::Buffer(&hair.indirectBuffer, ResourceState::UNORDERED_ACCESS, ResourceState::INDIRECT_ARGUMENT));
-			barrier_stack.push_back(GPUBarrier::Buffer(&hair.vertexBuffer_POS[0], ResourceState::UNORDERED_ACCESS, ResourceState::SHADER_RESOURCE));
-			barrier_stack.push_back(GPUBarrier::Buffer(&hair.vertexBuffer_UVS, ResourceState::UNORDERED_ACCESS, ResourceState::SHADER_RESOURCE));
-			barrier_stack.push_back(GPUBarrier::Buffer(&hair.culledIndexBuffer, ResourceState::UNORDERED_ACCESS, ResourceState::INDEX_BUFFER));
-		}
-
-		barrier_stack_flush();
+		wi::renderer::FlushBarriers(cmd);
 
 		device->EventEnd(cmd);
 	}
 
-	void HairParticleSystem::Draw(const MaterialComponent& material, wi::enums::RENDERPASS renderPass, CommandList cmd) const
+	void HairParticleSystem::Draw(const MaterialComponent& material, wi::enums::RENDERPASS renderPass, CommandList cmd, uint16_t camera_mask) const
 	{
 		if (strandCount == 0 || !constantBuffer.IsValid())
 		{
 			return;
 		}
 
+		if (renderPass == RENDERPASS_SHADOW && !material.IsCastingShadow())
+			return;
+
 		GraphicsDevice* device = wi::graphics::GetDevice();
-		device->EventBegin("HairParticle - Draw", cmd);
 
-		device->BindStencilRef(STENCILREF_DEFAULT, cmd);
-
-		if (wi::renderer::IsWireRender())
+		if (wi::renderer::GetWireframeMode() == wi::renderer::WIREFRAME_ONLY)
 		{
-			if (renderPass == RENDERPASS_PREPASS)
+			if (renderPass == RENDERPASS_PREPASS || renderPass == RENDERPASS_PREPASS_DEPTHONLY)
 			{
 				return;
 			}
@@ -440,18 +635,36 @@ namespace wi
 		{
 			device->BindPipelineState(&PSO[renderPass], cmd);
 
-			if (renderPass != RENDERPASS_PREPASS) // depth only alpha test will be full res
+			if (renderPass != RENDERPASS_PREPASS || renderPass == RENDERPASS_PREPASS_DEPTHONLY) // depth only alpha test will be full res
 			{
 				device->BindShadingRate(material.shadingRate, cmd);
 			}
 		}
 
+		device->EventBegin("HairParticle - Draw", cmd);
+
+		device->BindStencilRef(STENCILREF_DEFAULT, cmd);
+
 		device->BindConstantBuffer(&constantBuffer, CB_GETBINDSLOT(HairParticleCB), cmd);
-		device->BindResource(&primitiveBuffer, 0, cmd);
+		device->BindResource(&generalBuffer, 0, cmd, prim_view.subresource_srv);
 
-		device->BindIndexBuffer(&culledIndexBuffer, IndexBufferFormat::UINT32, 0, cmd);
+		device->BindIndexBuffer(&generalBuffer, GetIndexBufferFormat(GetVertexCount()), ib_culled.offset, cmd);
 
-		device->DrawIndexedInstancedIndirect(&indirectBuffer, 4, cmd);
+		uint32_t camera_bits = camera_mask;
+		while (camera_bits != 0)
+		{
+			const uint camera_index = firstbitlow(camera_bits);
+			camera_bits ^= 1u << camera_index;
+			device->PushConstants(&camera_index, sizeof(camera_index), cmd);
+
+			device->DrawIndexedInstancedIndirect(&generalBuffer, indirect_view.offset, cmd);
+
+			if (renderPass == RENDERPASS_MAIN && wi::renderer::GetWireframeMode() == wi::renderer::WIREFRAME_OVERLAY)
+			{
+				device->BindPipelineState(&PSO_wire, cmd);
+				device->DrawIndexedInstancedIndirect(&generalBuffer, indirect_view.offset, cmd);
+			}
+		}
 
 		device->EventEnd(cmd);
 	}
@@ -476,16 +689,64 @@ namespace wi
 			}
 			if (archive.GetVersion() >= 42)
 			{
-				archive >> framesX;
-				archive >> framesY;
-				archive >> frameCount;
-				archive >> frameStart;
+				if (seri.GetVersion() < 1)
+				{
+					// Conversion from old frame format to new:
+					uint32_t framesX = 1;
+					uint32_t framesY = 1;
+					uint32_t frameCount = 1;
+					uint32_t frameStart = 0;
+
+					archive >> framesX;
+					archive >> framesY;
+					archive >> frameCount;
+					archive >> frameStart;
+
+					ConvertFromOLDSpriteSheet(framesX, framesY, frameCount, frameStart);
+
+				}
 			}
 
 			if (archive.GetVersion() == 48)
 			{
 				uint8_t shadingRate;
 				archive >> shadingRate; // no longer needed
+			}
+
+			if (seri.GetVersion() >= 1)
+			{
+				archive >> width;
+				archive >> uniformity;
+
+				size_t rect_count = 0;
+				archive >> rect_count;
+				atlas_rects.resize(rect_count);
+				for (size_t i = 0; i < rect_count; ++i)
+				{
+					archive >> atlas_rects[i].texMulAdd;
+					archive >> atlas_rects[i].size;
+				}
+			}
+
+			if (seri.GetVersion() >= 2)
+			{
+				archive >> drag;
+			}
+			else
+			{
+				// Old stiffness remap to new:
+				stiffness *= 0.05f;
+			}
+
+			if (seri.GetVersion() >= 3)
+			{
+				archive >> gravityPower;
+				archive >> billboardCount;
+			}
+			else
+			{
+				// This param was always true before:
+				SetCameraBendEnabled(true);
 			}
 		}
 		else
@@ -503,12 +764,27 @@ namespace wi
 			{
 				archive << vertex_lengths;
 			}
-			if (archive.GetVersion() >= 42)
+
+			if (seri.GetVersion() >= 1)
 			{
-				archive << framesX;
-				archive << framesY;
-				archive << frameCount;
-				archive << frameStart;
+				archive << width;
+				archive << uniformity;
+				archive << atlas_rects.size();
+				for (size_t i = 0; i < atlas_rects.size(); ++i)
+				{
+					archive << atlas_rects[i].texMulAdd;
+					archive << atlas_rects[i].size;
+				}
+			}
+
+			if (seri.GetVersion() >= 2)
+			{
+				archive << drag;
+			}
+			if (seri.GetVersion() >= 3)
+			{
+				archive << gravityPower;
+				archive << billboardCount;
 			}
 		}
 	}
@@ -521,16 +797,17 @@ namespace wi
 
 			wi::renderer::LoadShader(ShaderStage::PS, ps_simple, "hairparticlePS_simple.cso");
 			wi::renderer::LoadShader(ShaderStage::PS, ps_prepass, "hairparticlePS_prepass.cso");
+			wi::renderer::LoadShader(ShaderStage::PS, ps_prepass_depthonly, "hairparticlePS_prepass_depthonly.cso");
+			wi::renderer::LoadShader(ShaderStage::PS, ps_shadow, "hairparticlePS_shadow.cso");
 			wi::renderer::LoadShader(ShaderStage::PS, ps, "hairparticlePS.cso");
 
 			wi::renderer::LoadShader(ShaderStage::CS, cs_simulate, "hairparticle_simulateCS.cso");
-			wi::renderer::LoadShader(ShaderStage::CS, cs_finishUpdate, "hairparticle_finishUpdateCS.cso");
 
 			GraphicsDevice* device = wi::graphics::GetDevice();
 
 			for (int i = 0; i < RENDERPASS_COUNT; ++i)
 			{
-				if (i == RENDERPASS_PREPASS || i == RENDERPASS_MAIN)
+				if (i == RENDERPASS_PREPASS || i == RENDERPASS_PREPASS_DEPTHONLY || i == RENDERPASS_MAIN || i == RENDERPASS_SHADOW)
 				{
 					PipelineStateDesc desc;
 					desc.vs = &vs;
@@ -544,9 +821,18 @@ namespace wi
 					case RENDERPASS_PREPASS:
 						desc.ps = &ps_prepass;
 						break;
+					case RENDERPASS_PREPASS_DEPTHONLY:
+						desc.ps = &ps_prepass_depthonly;
+						break;
 					case RENDERPASS_MAIN:
 						desc.ps = &ps;
 						desc.dss = &dss_equal;
+						break;
+					case RENDERPASS_SHADOW:
+						desc.ps = &ps_shadow;
+						desc.rs = &rs_shadow;
+						desc.bs = &bs_shadow;
+						desc.dss = &dss_shadow;
 						break;
 					}
 
@@ -607,11 +893,25 @@ namespace wi
 		rsd.antialiased_line_enable = false;
 		wirers = rsd;
 
+		rs_shadow = ncrs;
+
+		if (IsFormatUnorm(wi::renderer::format_depthbuffer_shadowmap))
+		{
+			rs_shadow.depth_bias = -1;
+		}
+		else
+		{
+			rs.depth_bias = -10;
+		}
+
 
 		DepthStencilState dsd;
 		dsd.depth_enable = true;
 		dsd.depth_write_mask = DepthWriteMask::ALL;
 		dsd.depth_func = ComparisonFunc::GREATER;
+
+		dsd.stencil_enable = false;
+		dss_shadow = dsd;
 
 		dsd.stencil_enable = true;
 		dsd.stencil_read_mask = 0xFF;
@@ -637,9 +937,27 @@ namespace wi
 		bld.alpha_to_coverage_enable = false;
 		bs = bld;
 
+		bld.render_target[0].render_target_write_mask = ColorWrite::DISABLE;
+		bs_shadow = bld;
+
 		static wi::eventhandler::Handle handle = wi::eventhandler::Subscribe(wi::eventhandler::EVENT_RELOAD_SHADERS, [](uint64_t userdata) { HairParticleSystem_Internal::LoadShaders(); });
 		HairParticleSystem_Internal::LoadShaders();
 
-		wi::backlog::post("wi::HairParticleSystem Initialized (" + std::to_string((int)std::round(timer.elapsed())) + " ms)");
+		wilog("wi::HairParticleSystem Initialized (%d ms)", (int)std::round(timer.elapsed()));
+	}
+
+	void HairParticleSystem::ConvertFromOLDSpriteSheet(uint32_t framesX, uint32_t framesY, uint32_t frameCount, uint32_t frameStart)
+	{
+		framesX = std::max(1u, framesX);
+		framesY = std::max(1u, framesY);
+		width = (float)framesX / (float)framesY;
+		float2 texmul = float2(1.0f / (float)framesX, 1.0f / (float)framesY);
+		atlas_rects.resize(frameCount);
+		for (uint32_t i = 0; i < frameCount; ++i)
+		{
+			uint currentFrame = frameStart + i;
+			uint2 offset = uint2(currentFrame % framesX, currentFrame / framesY);
+			atlas_rects[i].texMulAdd = XMFLOAT4(texmul.x, texmul.y, offset.x * texmul.x, offset.y * texmul.y);
+		}
 	}
 }

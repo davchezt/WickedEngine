@@ -4,92 +4,103 @@
 
 #include <list>
 #include <mutex>
+#include <utility>
 
 namespace wi::eventhandler
 {
 	struct EventManager
 	{
+		// Note: list is used because events can also add events from within and that mustn't cause invalidation like vector
 		wi::unordered_map<int, std::list<std::function<void(uint64_t)>*>> subscribers;
-		wi::unordered_map<int, wi::vector<std::function<void(uint64_t)>>> subscribers_once;
+		wi::unordered_map<int, std::list<std::function<void(uint64_t)>>> subscribers_once;
 		std::mutex locker;
 	};
-	std::shared_ptr<EventManager> manager = std::make_shared<EventManager>();
+	wi::allocator::shared_ptr<EventManager> manager = wi::allocator::make_shared_single<EventManager>();
 
 	struct EventInternal
 	{
-		std::shared_ptr<EventManager> manager;
+		wi::allocator::shared_ptr<EventManager> manager;
 		int id = 0;
 		std::function<void(uint64_t)> callback;
 
 		~EventInternal()
 		{
-			manager->locker.lock();
+			std::scoped_lock lck(manager->locker);
 			auto it = manager->subscribers.find(id);
 			if (it != manager->subscribers.end())
 			{
 				it->second.remove(&callback);
 			}
-			manager->locker.unlock();
 		}
 	};
 
 	Handle Subscribe(int id, std::function<void(uint64_t)> callback)
 	{
 		Handle handle;
-		auto eventinternal = std::make_shared<EventInternal>();
+		auto eventinternal = wi::allocator::make_shared<EventInternal>();
 		handle.internal_state = eventinternal;
 		eventinternal->manager = manager;
 		eventinternal->id = id;
-		eventinternal->callback = callback;
+		eventinternal->callback = std::move(callback);
 
-		manager->locker.lock();
+		std::scoped_lock lck(manager->locker);
 		manager->subscribers[id].push_back(&eventinternal->callback);
-		manager->locker.unlock();
 
 		return handle;
 	}
 
-	void Subscribe_Once(int id, std::function<void(uint64_t)> callback)
+	void Subscribe_Once(int id, const std::function<void(uint64_t)>& callback)
 	{
-		manager->locker.lock();
+		std::scoped_lock lck(manager->locker);
 		manager->subscribers_once[id].push_back(callback);
-		manager->locker.unlock();
 	}
 
 	void FireEvent(int id, uint64_t userdata)
 	{
+		manager->locker.lock();
+
 		// Callbacks that only live for once:
 		{
-			manager->locker.lock();
 			auto it = manager->subscribers_once.find(id);
 			bool found = it != manager->subscribers_once.end();
-			manager->locker.unlock();
 
 			if (found)
 			{
 				auto& callbacks = it->second;
 				for (auto& callback : callbacks)
 				{
-					callback(userdata);
+					// move callback into temp var:
+					auto cb = std::move(callback);
+
+					// execute outside lock:
+					manager->locker.unlock();
+					cb(userdata);
+					manager->locker.lock();
 				}
 				callbacks.clear();
 			}
 		}
 		// Callbacks that live until deleted:
 		{
-			manager->locker.lock();
 			auto it = manager->subscribers.find(id);
 			bool found = it != manager->subscribers.end();
-			manager->locker.unlock();
 
 			if (found)
 			{
 				auto& callbacks = it->second;
 				for (auto& callback : callbacks)
 				{
-					(*callback)(userdata);
+					// make copy of callback:
+					auto cb = *callback;
+
+					// execute outside lock:
+					manager->locker.unlock();
+					cb(userdata);
+					manager->locker.lock();
 				}
 			}
 		}
+
+		manager->locker.unlock();
 	}
 }

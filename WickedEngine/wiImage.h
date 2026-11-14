@@ -4,6 +4,7 @@
 #include "wiEnums.h"
 #include "wiColor.h"
 #include "wiCanvas.h"
+#include "wiPrimitive.h"
 
 namespace wi::image
 {
@@ -41,6 +42,12 @@ namespace wi::image
 		QUALITY_ANISOTROPIC,
 		QUALITY_COUNT
 	};
+	enum DEPTH_TEST_MODE
+	{
+		DEPTH_TEST_OFF,
+		DEPTH_TEST_ON,
+		DEPTH_TEST_MODE_COUNT
+	};
 
 	struct Params
 	{
@@ -56,6 +63,11 @@ namespace wi::image
 			OUTPUT_COLOR_SPACE_HDR10_ST2084 = 1 << 6,
 			OUTPUT_COLOR_SPACE_LINEAR = 1 << 7,
 			CORNER_ROUNDING = 1 << 8,
+			DEPTH_TEST = 1 << 9,
+			ANGULAR_DOUBLESIDED = 1 << 10,
+			ANGULAR_INVERSE = 1 << 11,
+			DISTORTION_MASK = 1 << 12,
+			HIGHLIGHT = 1 << 13,
 		};
 		uint32_t _flags = EMPTY;
 
@@ -67,11 +79,31 @@ namespace wi::image
 		XMFLOAT4 drawRect2 = XMFLOAT4(0, 0, 0, 0);
 		XMFLOAT2 texOffset = XMFLOAT2(0, 0);
 		XMFLOAT2 texOffset2 = XMFLOAT2(0, 0);
+		XMFLOAT4 texMulAdd = XMFLOAT4(1, 1, 0, 0);
+		XMFLOAT4 texMulAdd2 = XMFLOAT4(1, 1, 0, 0);
 		XMFLOAT2 pivot = XMFLOAT2(0, 0); // (0,0) : upperleft, (0.5,0.5) : center, (1,1) : bottomright
 		float rotation = 0;
 		float fade = 0;
 		float opacity = 1;
+		float intensity = 1;
 		float hdr_scaling = 1.0f; // a scaling value for use by linear output mapping
+		float mask_alpha_range_start = 0; // constrain mask alpha to not go below this level
+		float mask_alpha_range_end = 1; // constrain mask alpha to not go above this level
+		XMFLOAT2 angular_softness_direction = XMFLOAT2(0, 1);
+		float angular_softness_inner_angle = 0;
+		float angular_softness_outer_angle = 0;
+		float saturation = 1;
+
+		enum class Gradient
+		{
+			None,
+			Linear,
+			LinearReflected,
+			Circular,
+		} gradient = Gradient::None;
+		XMFLOAT2 gradient_uv_start = XMFLOAT2(0, 0);
+		XMFLOAT2 gradient_uv_end = XMFLOAT2(1, 0);
+		XMFLOAT4 gradient_color = XMFLOAT4(1, 1, 1, 1);
 
 		// you can deform the image by its corners (0: top left, 1: top right, 2: bottom left, 3: bottom right)
 		XMFLOAT2 corners[4] = {
@@ -89,6 +121,10 @@ namespace wi::image
 
 		float border_soften = 0; // how much alpha softening to apply to image border in range [0, 1] (0: disable)
 
+		XMFLOAT3 highlight_color = XMFLOAT3(1, 1, 1);
+		float highlight_spread = 1;
+		XMFLOAT2 highlight_pos = XMFLOAT2(0, 0); // screen-uv space highlight position (if HIGHLIGHT is enabled)
+
 		uint8_t stencilRef = 0;
 		STENCILMODE stencilComp = STENCILMODE_DISABLED;
 		STENCILREFMODE stencilRefMode = STENCILREFMODE_ALL;
@@ -97,9 +133,17 @@ namespace wi::image
 		QUALITY quality = QUALITY_LINEAR;
 
 		const wi::graphics::Texture* maskMap = nullptr;
+		const wi::graphics::Texture* backgroundMap = nullptr;
+		int image_subresource = -1;
+		int mask_subresource = -1;
+		int background_subresource = -1;
 
 		// Set a mask map that will be used to multiply the base image
 		constexpr void setMaskMap(const wi::graphics::Texture* tex) { maskMap = tex; }
+		// Set a texture that will be used to blend to the transparent part of the image with screen coordinates
+		//	Will be used if using enableBackground()
+		//	If you don't set this per image, then wi::image::SetBackground() will be used instead
+		constexpr void setBackgroundMap(const wi::graphics::Texture* tex) { backgroundMap = tex; }
 
 		constexpr bool isDrawRectEnabled() const { return _flags & DRAWRECT; }
 		constexpr bool isDrawRect2Enabled() const { return _flags & DRAWRECT2; }
@@ -110,6 +154,11 @@ namespace wi::image
 		constexpr bool isHDR10OutputMappingEnabled() const { return _flags & OUTPUT_COLOR_SPACE_HDR10_ST2084; }
 		constexpr bool isLinearOutputMappingEnabled() const { return _flags & OUTPUT_COLOR_SPACE_LINEAR; }
 		constexpr bool isCornerRoundingEnabled() const { return _flags & CORNER_ROUNDING; }
+		constexpr bool isDepthTestEnabled() const { return _flags & DEPTH_TEST; }
+		constexpr bool isAngularSoftnessDoubleSided() const { return _flags & ANGULAR_DOUBLESIDED; }
+		constexpr bool isAngularSoftnessInverse() const { return _flags & ANGULAR_INVERSE; }
+		constexpr bool isDistortionMaskEnabled() const { return _flags & DISTORTION_MASK; }
+		constexpr bool isHighlightEnabled() const { return _flags & HIGHLIGHT; }
 
 		// enables draw rectangle for base texture (cutout texture outside draw rectangle)
 		constexpr void enableDrawRect(const XMFLOAT4& rect) { _flags |= DRAWRECT; drawRect = rect; }
@@ -119,7 +168,7 @@ namespace wi::image
 		constexpr void enableMirror() { _flags |= MIRROR; }
 		// enable normal map extraction shader that will perform texcolor * 2 - 1 (preferably onto a signed render target)
 		constexpr void enableExtractNormalMap() { _flags |= EXTRACT_NORMALMAP; }
-		// enable full screen override. It just draws texture onto the full screen, disabling any other setup except sampler and stencil)
+		// enable full screen override. It will draw the image over the full screen, disabling any positioning and sizing setup
 		constexpr void enableFullScreen() { _flags |= FULLSCREEN; }
 		// enable background, which samples a background screen texture on transparent areas instead of alpha blending
 		//	the background tex should be bound with wi::image::SetBackground() beforehand
@@ -128,7 +177,13 @@ namespace wi::image
 		constexpr void enableHDR10OutputMapping() { _flags |= OUTPUT_COLOR_SPACE_HDR10_ST2084; }
 		// enable linear output mapping, which means removing gamma curve and outputting in linear space (useful for blending in HDR space)
 		constexpr void enableLinearOutputMapping(float scaling = 1.0f) { _flags |= OUTPUT_COLOR_SPACE_LINEAR; hdr_scaling = scaling; }
-		constexpr void enableCornerRounding(float scaling = 1.0f) { _flags |= CORNER_ROUNDING; hdr_scaling = scaling; }
+		constexpr void enableCornerRounding() { _flags |= CORNER_ROUNDING; }
+		constexpr void enableDepthTest() { _flags |= DEPTH_TEST; }
+		constexpr void enableAngularSoftnessDoubleSided() { _flags |= ANGULAR_DOUBLESIDED; }
+		constexpr void enableAngularSoftnessInverse() { _flags |= ANGULAR_INVERSE; }
+		// Mask texture RG will be used for distortion of screen UVs for background image, A will be used as opacity
+		constexpr void enableDistortionMask() { _flags |= DISTORTION_MASK; }
+		constexpr void enableHighlight() { _flags |= HIGHLIGHT; }
 
 		// disable draw rectangle for base texture (whole texture will be drawn, no cutout)
 		constexpr void disableDrawRect() { _flags &= ~DRAWRECT; }
@@ -141,6 +196,11 @@ namespace wi::image
 		constexpr void disableHDR10OutputMapping() { _flags &= ~OUTPUT_COLOR_SPACE_HDR10_ST2084; }
 		constexpr void disableLinearOutputMapping() { _flags &= ~OUTPUT_COLOR_SPACE_LINEAR; }
 		constexpr void disableCornerRounding() { _flags &= ~CORNER_ROUNDING; }
+		constexpr void disableDepthTest() { _flags &= ~DEPTH_TEST; }
+		constexpr void disableAngularSoftnessDoubleSided() { _flags &= ~ANGULAR_DOUBLESIDED; }
+		constexpr void disableAngularSoftnessInverse() { _flags &= ~ANGULAR_INVERSE; }
+		constexpr void disableDistortionMask() { _flags &= ~DISTORTION_MASK; }
+		constexpr void disableHighlight() { _flags &= ~HIGHLIGHT; }
 
 		Params() = default;
 
@@ -176,6 +236,14 @@ namespace wi::image
 				enableBackground();
 			}
 		}
+
+		Params(
+			const wi::primitive::Hitbox2D& hitbox, const XMFLOAT4& color = XMFLOAT4(1, 1, 1, 1)
+		) :
+			pos(XMFLOAT3(hitbox.pos.x, hitbox.pos.y, 0)),
+			siz(hitbox.siz),
+			color(color)
+		{}
 	};
 
 
@@ -190,5 +258,7 @@ namespace wi::image
 
 	// Initializes the image renderer
 	void Initialize();
+
+	const wi::graphics::PipelineState* GetPSO(DEPTH_TEST_MODE depth_test_mode, wi::enums::BLENDMODE blend_mode, STENCILMODE stencil_mode, STENCILREFMODE stencil_ref_mode);
 
 }

@@ -3,7 +3,6 @@
 
 namespace wi::version
 {
-	long GetVersion();
 	// major features
 	int GetMajor();
 	// minor features, major bug fixes
@@ -12,7 +11,11 @@ namespace wi::version
 	int GetRevision();
 	const char* GetVersionString();
 
+	// Full formatted credits with creator, contributors, supporters...
 	const char* GetCreditsString();
+
+	// Only the supporters
+	const char* GetSupportersString();
 }
 
 #endif // WICKEDENGINE_VERSION_DEFINED

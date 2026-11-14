@@ -1,39 +1,27 @@
 #include "globals.hlsli"
 #include "ShaderInterop_EmittedParticle.h"
 
-RWByteAddressBuffer counterBuffer : register(u4);
-RWByteAddressBuffer indirectBuffers : register(u5);
+RWStructuredBuffer<ParticleCounters> counterBuffer : register(u4);
+RWStructuredBuffer<EmitterIndirectArgs> indirectBuffer : register(u5);
 
 [numthreads(1, 1, 1)]
 void main(uint3 DTid : SV_DispatchThreadID)
 {
-	// Load dead particle count:
-	uint deadCount = counterBuffer.Load(PARTICLECOUNTER_OFFSET_DEADCOUNT);
+	uint aliveCount = counterBuffer[0].aliveCount_afterSimulation;
+	int deadCount = counterBuffer[0].deadCount;
 
-	// Load alive particle count:
-	uint aliveCount_NEW = counterBuffer.Load(PARTICLECOUNTER_OFFSET_ALIVECOUNT_AFTERSIMULATION);
-
-	// we can not emit more than there are free slots in the dead list:
-	uint realEmitCount = min(deadCount, xEmitCount);
-
-	// Fill dispatch argument buffer for emitting (ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ):
-	indirectBuffers.Store3(ARGUMENTBUFFER_OFFSET_DISPATCHEMIT, uint3(ceil((float)realEmitCount / (float)THREADCOUNT_EMIT), 1, 1));
-
-	// Fill dispatch argument buffer for simulation (ThreadGroupCountX, ThreadGroupCountY, ThreadGroupCountZ):
-	indirectBuffers.Store3(ARGUMENTBUFFER_OFFSET_DISPATCHSIMULATION, uint3(ceil((float)(aliveCount_NEW + realEmitCount) / (float)THREADCOUNT_SIMULATION), 1, 1));
-
-	// copy new alivelistcount to current alivelistcount:
-	counterBuffer.Store(PARTICLECOUNTER_OFFSET_ALIVECOUNT, aliveCount_NEW);
-
-	// reset new alivecount:
-	counterBuffer.Store(PARTICLECOUNTER_OFFSET_ALIVECOUNT_AFTERSIMULATION, 0);
-
-	// reset culled count:
-	counterBuffer.Store(PARTICLECOUNTER_OFFSET_CULLEDCOUNT, 0);
-
-	// write real emit count:
-	counterBuffer.Store(PARTICLECOUNTER_OFFSET_REALEMITCOUNT, realEmitCount);
-
-	// reset cell allocator:
-	counterBuffer.Store(PARTICLECOUNTER_OFFSET_CELLALLOCATOR, 0);
+	IndirectDispatchArgs args;
+	args.ThreadGroupCountX = (aliveCount + THREADCOUNT_SIMULATION - 1) / THREADCOUNT_SIMULATION;
+	args.ThreadGroupCountY = 1;
+	args.ThreadGroupCountZ = 1;
+	indirectBuffer[0].dispatch = args;
+	
+	counterBuffer[0].aliveCount = aliveCount;
+	counterBuffer[0].aliveCount_afterSimulation = 0;
+	
+	counterBuffer[0].deadCount = max(0, deadCount);
+	
+	counterBuffer[0].culledCount = 0;
+	
+	counterBuffer[0].cellAllocator = 0;
 }

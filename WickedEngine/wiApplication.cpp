@@ -15,9 +15,16 @@
 #include "wiFont.h"
 #include "wiImage.h"
 #include "wiEventHandler.h"
+#include "wiPlatform.h"
 
+#if defined(PLATFORM_PS5)
+#include "wiGraphicsDevice_PS5.h"
+#elif defined(PLATFORM_APPLE)
+#include "wiGraphicsDevice_Metal.h"
+#else
 #include "wiGraphicsDevice_DX12.h"
 #include "wiGraphicsDevice_Vulkan.h"
+#endif // PLATFORM_PS5
 
 #include <string>
 #include <algorithm>
@@ -36,7 +43,6 @@ using namespace wi::graphics;
 
 namespace wi
 {
-
 	void Application::Initialize()
 	{
 		if (initialized)
@@ -46,9 +52,16 @@ namespace wi
 		initialized = true;
 
 		wi::initializer::InitializeComponentsAsync();
+
+		alwaysactive = wi::arguments::HasArgument("alwaysactive");
+
+		// Note: lua is always initialized immediately on main thread by wi::initializer, so this is safe to do:
+		assert(wi::initializer::IsInitializeFinished(wi::initializer::INITIALIZED_SYSTEM_LUA));
+		Luna<wi::lua::Application_BindLua>::push_global(wi::lua::GetLuaState(), "main", this);
+		Luna<wi::lua::Application_BindLua>::push_global(wi::lua::GetLuaState(), "application", this);
 	}
 
-	void Application::ActivatePath(RenderPath* component, float fadeSeconds, wi::Color fadeColor)
+	void Application::ActivatePath(RenderPath* component, float fadeSeconds, wi::Color fadeColor, FadeManager::FadeType fadetype)
 	{
 		if (component != nullptr)
 		{
@@ -56,12 +69,11 @@ namespace wi
 		}
 
 		// Fade manager will activate on fadeout
-		fadeManager.Clear();
 		fadeManager.Start(fadeSeconds, fadeColor, [this, component]() {
 
-			if (GetActivePath() != nullptr)
+			if (activePath != nullptr)
 			{
-				GetActivePath()->Stop();
+				activePath->Stop();
 			}
 
 			if (component != nullptr)
@@ -69,7 +81,7 @@ namespace wi
 				component->Start();
 			}
 			activePath = component;
-			});
+		}, fadetype);
 
 		fadeManager.Update(0); // If user calls ActivatePath without fadeout, it will be instant
 	}
@@ -83,76 +95,203 @@ namespace wi
 			initialized = true;
 		}
 
-		wi::font::UpdateAtlas();
+		wi::font::UpdateAtlas(canvas.GetDPIScaling());
 
 		ColorSpace colorspace = graphicsDevice->GetSwapChainColorSpace(&swapChain);
+		if (colorspace == ColorSpace::HDR10_ST2084)
+		{
+			// In HDR10, we perform the compositing in a custom linear color space render target
+			//	The reason is that blending doesn't look good in HDR10 color space
+			//	In HDR10 the composition is done like:
+			//	rendertargetPreHDR10:
+			//		- RenderPath3D: linear space
+			//		- RenderPath2D: SRGB space -> linear space with HDR scaling
+			//	swapChain:
+			//		- HDR10 composition: linear -> HDR10_ST2084
+			if (!rendertargetPreHDR10.IsValid())
+			{
+				TextureDesc desc;
+				desc.width = swapChain.desc.width;
+				desc.height = swapChain.desc.height;
+				desc.format = Format::R11G11B10_FLOAT;
+				desc.bind_flags = BindFlag::RENDER_TARGET | BindFlag::SHADER_RESOURCE;
+				// try to set background color for swapchain color as if it's using hdr scaling:
+				desc.clear.color[0] = swapChain.desc.clear_color[0] * 9;
+				desc.clear.color[1] = swapChain.desc.clear_color[1] * 9;
+				desc.clear.color[2] = swapChain.desc.clear_color[2] * 9;
+				desc.clear.color[3] = swapChain.desc.clear_color[3];
+				bool success = graphicsDevice->CreateTexture(&desc, nullptr, &rendertargetPreHDR10);
+				assert(success);
+				graphicsDevice->SetName(&rendertargetPreHDR10, "Application::rendertargetPreHDR10");
+			}
+		}
+		else
+		{
+			// If swapchain is SRGB or Linear HDR, it can be used for blending and rendertargetPreHDR10 is not needed
+			//	- If it is SRGB, the render path will ensure tonemapping to SDR
+			//	- If it is Linear HDR, we can blend trivially in linear space
+			rendertargetPreHDR10 = {};
+		}
 
 		if (!wi::initializer::IsInitializeFinished())
 		{
 			// Until engine is not loaded, present initialization screen...
 			CommandList cmd = graphicsDevice->BeginCommandList();
-			graphicsDevice->RenderPassBegin(&swapChain, cmd);
+			if (rendertargetPreHDR10.IsValid())
+			{
+				graphicsDevice->RenderPassBegin(&rendertargetPreHDR10, cmd, true);
+			}
+			else
+			{
+				graphicsDevice->RenderPassBegin(&swapChain, cmd);
+			}
 			Viewport viewport;
 			viewport.width = (float)swapChain.desc.width;
 			viewport.height = (float)swapChain.desc.height;
 			graphicsDevice->BindViewports(1, &viewport, cmd);
-			if (wi::initializer::IsInitializeFinished(wi::initializer::INITIALIZED_SYSTEM_FONT))
+			static bool splash_screen_check = false;
+			if (!splash_screen.IsValid() && !splash_screen_check)
 			{
+				splash_screen_check = true;
+				std::string splash_screen_path = wi::helper::GetCurrentPath() + "/splash_screen.png";
+				if (wi::helper::FileExists(splash_screen_path))
+				{
+					wi::Resource resource = wi::resourcemanager::Load(splash_screen_path);
+					if (resource.IsValid())
+					{
+						splash_screen = resource.GetTexture();
+						splash_screen_subresource = graphicsDevice->CreateSubresource(&splash_screen, SubresourceType::SRV, 0, 1, 0, 1); // only first mip! mipgen is not initialized at this point...
+					}
+				}
+			}
+			if (splash_screen.IsValid())
+			{
+				if (wi::initializer::IsInitializeFinished(wi::initializer::INITIALIZED_SYSTEM_IMAGE))
+				{
+					// Draw the splash screen while engine is initializing and image renderer is ready
+					wi::image::SetCanvas(canvas);
+					wi::image::Params fx;
+					const TextureDesc& desc = splash_screen.GetDesc();
+					const float canvas_aspect = canvas.GetLogicalWidth() / canvas.GetLogicalHeight();
+					const float image_aspect = float(desc.width) / float(desc.height);
+					if (canvas_aspect > image_aspect)
+					{
+						// display aspect is wider than image:
+						fx.siz.x = canvas.GetLogicalWidth();
+						fx.siz.y = canvas.GetLogicalHeight() / image_aspect * canvas_aspect;
+					}
+					else
+					{
+						// image aspect is wider or equal to display
+						fx.siz.x = canvas.GetLogicalWidth() / canvas_aspect * image_aspect;
+						fx.siz.y = canvas.GetLogicalHeight();
+					}
+					fx.pos = XMFLOAT3(canvas.GetLogicalWidth() * 0.5f, canvas.GetLogicalHeight() * 0.5f, 0);
+					fx.pivot = XMFLOAT2(0.5f, 0.5f);
+					if (colorspace != ColorSpace::SRGB)
+					{
+						fx.enableLinearOutputMapping(9);
+					}
+					fx.image_subresource = splash_screen_subresource;
+					wi::image::Draw(&splash_screen, fx, cmd);
+				}
+			}
+			else if (wi::initializer::IsInitializeFinished(wi::initializer::INITIALIZED_SYSTEM_FONT))
+			{
+				// If there is no splash screen, the log is rendered while engine is initializing
+				ColorSpace colorspace = graphicsDevice->GetSwapChainColorSpace(&swapChain);
 				wi::backlog::DrawOutputText(canvas, cmd, colorspace);
 			}
 			graphicsDevice->RenderPassEnd(cmd);
+
+			if (rendertargetPreHDR10.IsValid() && wi::initializer::IsInitializeFinished(wi::initializer::INITIALIZED_SYSTEM_IMAGE))
+			{
+				// In HDR10, we perform a final mapping from linear to HDR10, into the swapchain
+				graphicsDevice->RenderPassBegin(&swapChain, cmd);
+				wi::image::Params fx;
+				fx.enableFullScreen();
+				fx.enableHDR10OutputMapping(); // this is doing the linear -> HDR10_ST2084 conversion
+				wi::image::Draw(&rendertargetPreHDR10, fx, cmd);
+				graphicsDevice->RenderPassEnd(cmd);
+			}
+
 			graphicsDevice->SubmitCommandLists();
 			return;
 		}
 
-		#ifdef WICKEDENGINE_BUILD_DX12
-		static bool startup_workaround = false;
-		if (!startup_workaround)
-		{
-			startup_workaround = true;
-			if (dynamic_cast<GraphicsDevice_DX12*>(graphicsDevice.get()))
-			{
-				CommandList cmd = graphicsDevice->BeginCommandList();
-				wi::renderer::Workaround(1, cmd);
-				graphicsDevice->SubmitCommandLists();
-			}
-		}
-		#endif // WICKEDENGINE_BUILD_DX12
+		splash_screen = {}; // splash screen no longer needed after initialization, it is deleted
 
 		static bool startup_script = false;
 		if (!startup_script)
 		{
 			startup_script = true;
-			wi::lua::RegisterObject(wi::lua::Application_BindLua::className, "main", new wi::lua::Application_BindLua(this));
-			wi::lua::RegisterObject(wi::lua::Application_BindLua::className, "application", new wi::lua::Application_BindLua(this));
-			wi::lua::RunFile("startup.lua");
+			const std::string workingdir = wi::helper::GetCurrentPath() + "/";
+			const std::string rewriteable_script_filename = workingdir + rewriteable_startup_script_text;
+			if (wi::helper::FileExists(rewriteable_script_filename))
+			{
+				if (wi::lua::RunFile(rewriteable_script_filename))
+				{
+					wi::backlog::post("Executed startup file: " + rewriteable_script_filename);
+				}
+			}
+			else
+			{
+				const std::string startup_lua_filename = workingdir + "startup.lua";
+				if (wi::helper::FileExists(startup_lua_filename))
+				{
+					if (wi::lua::RunFile(startup_lua_filename))
+					{
+						wi::backlog::post("Executed startup file: " + startup_lua_filename);
+					}
+				}
+				const std::string startup_luab_filename = workingdir + "startup.luab";
+				if (wi::helper::FileExists(startup_luab_filename))
+				{
+					if (wi::lua::RunBinaryFile(startup_luab_filename))
+					{
+						wi::backlog::post("Executed startup file: " + startup_luab_filename);
+					}
+				}
+			}
 		}
 
-		if (!is_window_active && !wi::arguments::HasArgument("alwaysactive"))
+		if (!is_window_active && !alwaysactive)
 		{
 			// If the application is not active, disable Update loops:
 			deltaTimeAccumulator = 0;
+			wi::helper::Sleep(10);
+			wi::input::Update(window, canvas); // update input while inactive, this solves a problem with past inputs processed immediately after activation
+			timer.record_elapsed_seconds(); // after application becomes active, delta time shouldn't spike, could blow up gameplay or physics
 			return;
 		}
 
 		wi::profiler::BeginFrame();
 
-		deltaTime = float(std::max(0.0, timer.record_elapsed_seconds()));
+		deltaTime = float(timer.record_elapsed_seconds());
+
+		const float target_deltaTime = 1.0f / targetFrameRate;
+		if (framerate_lock && deltaTime < target_deltaTime)
+		{
+			wi::helper::QuickSleep((target_deltaTime - deltaTime) * 1000);
+			deltaTime += float(timer.record_elapsed_seconds());
+		}
+
+		// avoid instability caused by large delta time
+		deltaTime = clamp(deltaTime, 0.0f, 0.5f);
 
 		wi::input::Update(window, canvas);
 
 		// Wake up the events that need to be executed on the main thread, in thread safe manner:
 		wi::eventhandler::FireEvent(wi::eventhandler::EVENT_THREAD_SAFE_POINT, 0);
 
-		const float dt = framerate_lock ? (1.0f / targetFrameRate) : deltaTime;
+		fadeManager.Update(deltaTime);
 
-		fadeManager.Update(dt);
-
-		if (GetActivePath() != nullptr)
+		if (activePath != nullptr)
 		{
-			GetActivePath()->colorspace = colorspace;
-			GetActivePath()->init(canvas);
-			GetActivePath()->PreUpdate();
+			ColorSpace colorspace = graphicsDevice->GetSwapChainColorSpace(&swapChain);
+			activePath->colorspace = colorspace;
+			activePath->init(canvas);
+			activePath->PreUpdate();
 		}
 
 		// Fixed time update:
@@ -160,7 +299,7 @@ namespace wi
 		{
 			if (frameskip)
 			{
-				deltaTimeAccumulator += dt;
+				deltaTimeAccumulator += deltaTime;
 				if (deltaTimeAccumulator > 10)
 				{
 					// application probably lost control, fixed update would take too long
@@ -182,12 +321,39 @@ namespace wi
 		wi::profiler::EndRange(range); // Fixed Update
 
 		// Variable-timed update:
-		Update(dt);
+		Update(deltaTime);
 
 		Render();
 
 		// Begin final compositing:
 		CommandList cmd = graphicsDevice->BeginCommandList();
+
+		// CrossFade texture save:
+		if (fadeManager.crossFadeTextureSaveRequired)
+		{
+			Texture backbuffer = rendertargetPreHDR10.IsValid() ? rendertargetPreHDR10 : graphicsDevice->GetBackBuffer(&swapChain);
+			if (
+				fadeManager.crossFadeTexture.desc.width != backbuffer.desc.width ||
+				fadeManager.crossFadeTexture.desc.height != backbuffer.desc.height ||
+				fadeManager.crossFadeTexture.desc.format != backbuffer.desc.format
+				)
+			{
+				TextureDesc desc = backbuffer.desc;
+				desc.bind_flags = BindFlag::SHADER_RESOURCE;
+				bool success = graphicsDevice->CreateTexture(&desc, nullptr, &fadeManager.crossFadeTexture);
+				assert(success);
+				graphicsDevice->SetName(&fadeManager.crossFadeTexture, "wiFadeManager::crossFadeTexture");
+			}
+			wi::renderer::PushBarrier(GPUBarrier::Image(&backbuffer, backbuffer.desc.layout, ResourceState::COPY_SRC));
+			wi::renderer::PushBarrier(GPUBarrier::Image(&fadeManager.crossFadeTexture, fadeManager.crossFadeTexture.desc.layout, ResourceState::COPY_DST));
+			wi::renderer::FlushBarriers(cmd);
+			graphicsDevice->CopyResource(&fadeManager.crossFadeTexture, &backbuffer, cmd);
+			wi::renderer::PushBarrier(GPUBarrier::Image(&fadeManager.crossFadeTexture, ResourceState::COPY_DST, fadeManager.crossFadeTexture.desc.layout));
+			wi::renderer::PushBarrier(GPUBarrier::Image(&backbuffer, ResourceState::COPY_SRC, backbuffer.desc.layout));
+			wi::renderer::FlushBarriers(cmd);
+			fadeManager.crossFadeTextureSaveRequired = false;
+		}
+
 		wi::image::SetCanvas(canvas);
 		wi::font::SetCanvas(canvas);
 		Viewport viewport;
@@ -195,51 +361,51 @@ namespace wi
 		viewport.height = (float)swapChain.desc.height;
 		graphicsDevice->BindViewports(1, &viewport, cmd);
 
-		bool colorspace_conversion_required = colorspace == ColorSpace::HDR10_ST2084;
-		if (colorspace_conversion_required)
+		if (rendertargetPreHDR10.IsValid())
 		{
-			// In HDR10, we perform the compositing in a custom linear color space render target
-			graphicsDevice->RenderPassBegin(&renderpass, cmd);
+			graphicsDevice->RenderPassBegin(&rendertargetPreHDR10, cmd, true);
 		}
 		else
 		{
-			// If swapchain is SRGB or Linear HDR, it can be used for blending
-			//	- If it is SRGB, the render path will ensure tonemapping to SDR
-			//	- If it is Linear HDR, we can blend trivially in linear space
 			graphicsDevice->RenderPassBegin(&swapChain, cmd);
 		}
 		Compose(cmd);
 		graphicsDevice->RenderPassEnd(cmd);
 
-		if (colorspace_conversion_required)
+		if (rendertargetPreHDR10.IsValid())
 		{
 			// In HDR10, we perform a final mapping from linear to HDR10, into the swapchain
 			graphicsDevice->RenderPassBegin(&swapChain, cmd);
 			wi::image::Params fx;
 			fx.enableFullScreen();
 			fx.enableHDR10OutputMapping();
-			wi::image::Draw(&rendertarget, fx, cmd);
+			wi::image::Draw(&rendertargetPreHDR10, fx, cmd);
 			graphicsDevice->RenderPassEnd(cmd);
 		}
 
 		wi::input::ClearForNextFrame();
 		wi::profiler::EndFrame(cmd);
 		graphicsDevice->SubmitCommandLists();
+		wi::renderer::UpdateGPUSuballocator();
 	}
 
 	void Application::Update(float dt)
 	{
 		auto range = wi::profiler::BeginRangeCPU("Update");
 
+		infoDisplay.rect = {};
+
 		wi::lua::SetDeltaTime(double(dt));
 		wi::lua::Update();
 
 		wi::backlog::Update(canvas, dt);
 
-		if (GetActivePath() != nullptr)
+		wi::resourcemanager::UpdateStreamingResources(dt);
+
+		if (activePath != nullptr)
 		{
-			GetActivePath()->Update(dt);
-			GetActivePath()->PostUpdate();
+			activePath->Update(dt);
+			activePath->PostUpdate();
 		}
 
 		wi::profiler::EndRange(range); // Update
@@ -249,9 +415,9 @@ namespace wi
 	{
 		wi::lua::FixedUpdate();
 
-		if (GetActivePath() != nullptr)
+		if (activePath != nullptr)
 		{
-			GetActivePath()->FixedUpdate();
+			activePath->FixedUpdate();
 		}
 	}
 
@@ -261,9 +427,11 @@ namespace wi
 
 		wi::lua::Render();
 
-		if (GetActivePath() != nullptr)
+		if (activePath != nullptr)
 		{
-			GetActivePath()->Render();
+			activePath->PreRender();
+			activePath->Render();
+			activePath->PostRender();
 		}
 
 		wi::profiler::EndRange(range); // Render
@@ -274,9 +442,9 @@ namespace wi
 		auto range = wi::profiler::BeginRangeCPU("Compose");
 		ColorSpace colorspace = graphicsDevice->GetSwapChainColorSpace(&swapChain);
 
-		if (GetActivePath() != nullptr)
+		if (activePath != nullptr)
 		{
-			GetActivePath()->Compose(cmd);
+			activePath->Compose(cmd);
 		}
 
 		if (fadeManager.IsActive())
@@ -284,14 +452,30 @@ namespace wi
 			// display fade rect
 			wi::image::Params fx;
 			fx.enableFullScreen();
-			fx.color = fadeManager.color;
 			fx.opacity = fadeManager.opacity;
-			wi::image::Draw(wi::texturehelper::getWhite(), fx, cmd);
+			if (fadeManager.type == FadeManager::FadeType::FadeToColor)
+			{
+				fx.color = fadeManager.color;
+				wi::image::Draw(nullptr, fx, cmd);
+			}
+			else if (fadeManager.type == FadeManager::FadeType::CrossFade)
+			{
+				wi::image::Draw(&fadeManager.crossFadeTexture, fx, cmd);
+			}
+		}
+		else
+		{
+			fadeManager.crossFadeTexture = {};
 		}
 
 		// Draw the information display
 		if (infoDisplay.active)
 		{
+			if (infoDisplay.rect.right > 0)
+			{
+				graphicsDevice->BindScissorRects(1, &infoDisplay.rect, cmd);
+			}
+
 			infodisplay_str.clear();
 			if (infoDisplay.watermark)
 			{
@@ -299,34 +483,29 @@ namespace wi
 				infodisplay_str += wi::version::GetVersionString();
 				infodisplay_str += " ";
 
+#if defined(PLATFORM_WINDOWS_DESKTOP)
+				infodisplay_str += "[Windows]";
+#elif defined(PLATFORM_LINUX)
+				infodisplay_str += "[Linux]";
+#elif defined(PLATFORM_PS5)
+				infodisplay_str += "[PS5]";
+#elif defined(PLATFORM_XBOX)
+				infodisplay_str += "[Xbox]";
+#endif // PLATFORM
+
 #if defined(_ARM)
 				infodisplay_str += "[ARM]";
 #elif defined(_WIN64)
 				infodisplay_str += "[64-bit]";
 #elif defined(_WIN32)
 				infodisplay_str += "[32-bit]";
-#endif
+#endif // _ARM
 
-#ifdef PLATFORM_UWP
-				infodisplay_str += "[UWP]";
-#endif
-
-#ifdef WICKEDENGINE_BUILD_DX12
-				if (dynamic_cast<GraphicsDevice_DX12*>(graphicsDevice.get()))
-				{
-					infodisplay_str += "[DX12]";
-				}
-#endif
-#ifdef WICKEDENGINE_BUILD_VULKAN
-				if (dynamic_cast<GraphicsDevice_Vulkan*>(graphicsDevice.get()))
-				{
-					infodisplay_str += "[Vulkan]";
-				}
-#endif
+				infodisplay_str += graphicsDevice->GetTag();
 
 #ifdef _DEBUG
 				infodisplay_str += "[DEBUG]";
-#endif
+#endif // _DEBUG
 				if (graphicsDevice->IsDebugDevice())
 				{
 					infodisplay_str += "[debugdevice]";
@@ -413,9 +592,36 @@ namespace wi
 				infodisplay_str += "\n";
 			}
 
+			if (infoDisplay.pipeline_creation)
+			{
+				int pipeline_creation = wi::renderer::IsPipelineCreationActive();
+				if (pipeline_creation > 0)
+				{
+					infodisplay_str += "Pending pipeline creations by graphics driver: " + std::to_string(pipeline_creation) + ". Some rendering will be skipped.\n";
+				}
+			}
+			
+			if (infoDisplay.mouse_info)
+			{
+				infodisplay_str += "Mouse = (" + std::to_string(wi::input::GetPointer().x) + ", " + std::to_string(wi::input::GetPointer().y) + ") ";
+				if (wi::input::Down(wi::input::MOUSE_BUTTON_LEFT))
+				{
+					infodisplay_str += "| Left ";
+				}
+				if (wi::input::Down(wi::input::MOUSE_BUTTON_MIDDLE))
+				{
+					infodisplay_str += "| Middle ";
+				}
+				if (wi::input::Down(wi::input::MOUSE_BUTTON_RIGHT))
+				{
+					infodisplay_str += "| Right ";
+				}
+				infodisplay_str += "\n";
+			}
+			
 			wi::font::Params params = wi::font::Params(
-				4,
-				4,
+				4 + canvas.PhysicalToLogical((uint32_t)infoDisplay.rect.left),
+				4 + canvas.PhysicalToLogical((uint32_t)infoDisplay.rect.top),
 				infoDisplay.size,
 				wi::font::WIFALIGN_LEFT,
 				wi::font::WIFALIGN_TOP,
@@ -474,19 +680,44 @@ namespace wi
 			{
 				params.cursor = wi::font::Draw(std::to_string(wi::renderer::GetShaderErrorCount()) + " shader compilation errors! Check the backlog for more information!\n", params, cmd);
 			}
-
+			if (wi::backlog::GetUnseenLogLevelMax() >= wi::backlog::LogLevel::Error)
+			{
+				params.cursor = wi::font::Draw("Errors found, check the backlog for more information!", params, cmd);
+			}
 
 			if (infoDisplay.colorgrading_helper)
 			{
-				wi::image::Draw(wi::texturehelper::getColorGradeDefault(), wi::image::Params(0, 0, 256.0f / canvas.GetDPIScaling(), 16.0f / canvas.GetDPIScaling()), cmd);
+				wi::image::Draw(
+					wi::texturehelper::getColorGradeDefault(),
+					wi::image::Params(
+						canvas.PhysicalToLogical((uint32_t)infoDisplay.rect.left),
+						canvas.PhysicalToLogical((uint32_t)infoDisplay.rect.top),
+						canvas.PhysicalToLogical(256),
+						canvas.PhysicalToLogical(16)
+					),
+					cmd
+				);
+			}
+
+			if (infoDisplay.rect.right > 0)
+			{
+				wi::graphics::Rect rect;
+				rect.right = canvas.width;
+				rect.bottom = canvas.height;
+				graphicsDevice->BindScissorRects(1, &rect, cmd);
 			}
 		}
 
-		wi::profiler::DrawData(canvas, 4, 120, cmd, colorspace);
+		wi::profiler::DrawData(canvas, 4, 10, cmd, colorspace);
 
 		wi::backlog::Draw(canvas, cmd, colorspace);
 
 		wi::profiler::EndRange(range); // Compose
+	}
+
+	void Application::Exit()
+	{
+		wi::platform::Exit();
 	}
 
 	void Application::SetWindow(wi::platform::window_type window)
@@ -510,6 +741,32 @@ namespace wi
 				validationMode = ValidationMode::Verbose;
 			}
 
+			GPUPreference preference = GPUPreference::Discrete;
+			if (wi::arguments::HasArgument("igpu"))
+			{
+				preference = GPUPreference::Integrated;
+			}
+			else if (wi::arguments::HasArgument("nvidiagpu"))
+			{
+				preference = GPUPreference::Nvidia;
+			}
+			else if (wi::arguments::HasArgument("amdgpu"))
+			{
+				preference = GPUPreference::AMD;
+			}
+			else if (wi::arguments::HasArgument("intelgpu"))
+			{
+				preference = GPUPreference::Intel;
+			}
+
+#ifdef PLATFORM_PS5
+			wi::renderer::SetShaderPath(wi::renderer::GetShaderPath() + "ps5/");
+			graphicsDevice = std::make_unique<GraphicsDevice_PS5>(validationMode);
+#elif defined(PLATFORM_APPLE)
+			wi::renderer::SetShaderPath(wi::renderer::GetShaderPath() + "metal/");
+			graphicsDevice = std::make_unique<GraphicsDevice_Metal>(validationMode, preference);
+
+#else
 			bool use_dx12 = wi::arguments::HasArgument("dx12");
 			bool use_vulkan = wi::arguments::HasArgument("vulkan");
 
@@ -518,13 +775,13 @@ namespace wi
 				wi::helper::messageBox("The engine was built without DX12 support!", "Error");
 				use_dx12 = false;
 			}
-#endif
+#endif // WICKEDENGINE_BUILD_DX12
 #ifndef WICKEDENGINE_BUILD_VULKAN
 			if (use_vulkan) {
 				wi::helper::messageBox("The engine was built without Vulkan support!", "Error");
 				use_vulkan = false;
 			}
-#endif
+#endif // WICKEDENGINE_BUILD_VULKAN
 
 			if (!use_dx12 && !use_vulkan)
 			{
@@ -543,38 +800,61 @@ namespace wi
 			{
 #ifdef WICKEDENGINE_BUILD_VULKAN
 				wi::renderer::SetShaderPath(wi::renderer::GetShaderPath() + "spirv/");
-				graphicsDevice = std::make_unique<GraphicsDevice_Vulkan>(window, validationMode);
+				graphicsDevice = std::make_unique<GraphicsDevice_Vulkan>(window, validationMode, preference);
 #endif
 			}
 			else if (use_dx12)
 			{
 #ifdef WICKEDENGINE_BUILD_DX12
+#ifdef PLATFORM_XBOX
+				wi::renderer::SetShaderPath(wi::renderer::GetShaderPath() + "hlsl6_xs/");
+#else
 				wi::renderer::SetShaderPath(wi::renderer::GetShaderPath() + "hlsl6/");
-				graphicsDevice = std::make_unique<GraphicsDevice_DX12>(validationMode);
+#endif // PLATFORM_XBOX
+				graphicsDevice = std::make_unique<GraphicsDevice_DX12>(validationMode, preference);
 #endif
 			}
+#endif // PLATFORM_PS5
 		}
 		wi::graphics::GetDevice() = graphicsDevice.get();
 
-		canvas.init(window);
-
-		SwapChainDesc desc;
-		if (swapChain.IsValid())
+		if (renderWidth > 0 && renderHeight > 0)
 		{
-			// it will only resize, but keep format and other settings
-			desc = swapChain.desc;
+			platform::WindowProperties windowprops;
+			platform::GetWindowProperties(window, &windowprops);
+			canvas.init(renderWidth, renderHeight, windowprops.dpi);
 		}
 		else
 		{
+			canvas.init(window);
+		}
+
+		SwapChainDesc desc = swapChain.desc;
+		if (!swapChain.IsValid())
+		{
 			// initialize for the first time
 			desc.buffer_count = 3;
-			desc.format = Format::R10G10B10A2_UNORM;
+			if (graphicsDevice->CheckCapability(GraphicsDeviceCapability::R9G9B9E5_SHAREDEXP_RENDERABLE))
+			{
+				desc.format = Format::R9G9B9E5_SHAREDEXP;
+			}
+			else
+			{
+				desc.format = Format::R10G10B10A2_UNORM;
+			}
 		}
 		desc.width = canvas.GetPhysicalWidth();
 		desc.height = canvas.GetPhysicalHeight();
 		desc.allow_hdr = allow_hdr;
 		bool success = graphicsDevice->CreateSwapChain(&desc, window, &swapChain);
 		assert(success);
+
+		rendertargetPreHDR10 = {};
+
+#ifdef PLATFORM_PS5
+		// PS5 swapchain resolution was decided in CreateSwapchain(), so reinit canvas:
+		canvas.init(swapChain.desc.width, swapChain.desc.height);
+#endif // PLATFORM_PS5
 
 		swapChainVsyncChangeEvent = wi::eventhandler::Subscribe(wi::eventhandler::EVENT_SET_VSYNC, [this](uint64_t userdata) {
 			SwapChainDesc desc = swapChain.desc;
@@ -583,24 +863,42 @@ namespace wi
 			assert(success);
 			});
 
-		if (graphicsDevice->GetSwapChainColorSpace(&swapChain) == ColorSpace::HDR10_ST2084)
-		{
-			TextureDesc desc;
-			desc.width = swapChain.desc.width;
-			desc.height = swapChain.desc.height;
-			desc.format = Format::R11G11B10_FLOAT;
-			desc.bind_flags = BindFlag::RENDER_TARGET | BindFlag::SHADER_RESOURCE;
-			bool success = graphicsDevice->CreateTexture(&desc, nullptr, &rendertarget);
-			assert(success);
-			graphicsDevice->SetName(&rendertarget, "Application::rendertarget");
+	}
 
-			RenderPassDesc renderpassdesc;
-			renderpassdesc.attachments.push_back(RenderPassAttachment::RenderTarget(rendertarget, RenderPassAttachment::LoadOp::CLEAR));
-			success = graphicsDevice->CreateRenderPass(&renderpassdesc, &renderpass);
-			assert(success);
+	void Application::SetRenderResolution(uint32_t width, uint32_t height)
+	{
+		renderWidth = width;
+		renderHeight = height;
+	}
+
+	void Application::GetRenderResolution(uint32_t& width, uint32_t& height) const
+	{
+		if (renderWidth > 0 && renderHeight > 0)
+		{
+			width = renderWidth;
+			height = renderHeight;
+		}
+		else
+		{
+			width = canvas.GetPhysicalWidth();
+			height = canvas.GetPhysicalHeight();
 		}
 	}
 
+	void Application::SetFullScreen(bool fullscreen)
+	{
+		wi::platform::SetWindowFullScreen(window, fullscreen);
+	}
+
+	bool Application::IsFullScreen() const
+	{
+		return wi::platform::IsWindowFullScreen(window);
+	}
+
+	bool Application::IsScriptReplacement() const
+	{
+		return wi::helper::FileExists(rewriteable_startup_script_text);
+	}
 }
 
 

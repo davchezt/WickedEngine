@@ -5,9 +5,19 @@
 #include <algorithm>
 #include <limits>
 
-#if __has_include("DirectXMath.h")
+#if !defined(WICKED_CMAKE_BUILD) && !defined(_M_ARM64) && !defined(__arm64__)
+#define _XM_F16C_INTRINSICS_
+#define _XM_FMA3_INTRINSICS_
+#endif // !defined(WICKED_CMAKE_BUILD) && !defined(_M_ARM64)
+
+#ifdef __APPLE__
+#define __EMULATE_UUID
+#include "Utility/NeonIntrinsicsAppleShim.h"
+#endif // __APPLE__
+
+#if __has_include(<DirectXMath.h>)
 // In this case, DirectXMath is coming from Windows SDK.
-//	It is better to use this on Windows as some Windows libraries could depend on the same 
+//	It is better to use this on Windows as some Windows libraries could depend on the same
 //	DirectXMath headers
 #include <DirectXMath.h>
 #include <DirectXPackedVector.h>
@@ -16,12 +26,9 @@
 // In this case, DirectXMath is coming from supplied source code
 //	On platforms that don't have Windows SDK, the source code for DirectXMath is provided
 //	as part of the engine utilities
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wuninitialized"
-#include "Utility/DirectXMath.h"
-#include "Utility/DirectXPackedVector.h"
-#include "Utility/DirectXCollision.h"
-#pragma GCC diagnostic pop
+#include "Utility/DirectXMath/DirectXMath.h"
+#include "Utility/DirectXMath/DirectXPackedVector.h"
+#include "Utility/DirectXMath/DirectXCollision.h"
 #endif
 
 using namespace DirectX;
@@ -29,17 +36,33 @@ using namespace DirectX::PackedVector;
 
 namespace wi::math
 {
-	static constexpr XMFLOAT4X4 IDENTITY_MATRIX = XMFLOAT4X4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1);
+	inline constexpr XMFLOAT4X4 IDENTITY_MATRIX = XMFLOAT4X4(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1);
+	inline constexpr float PI = XM_PI;
 
-	constexpr float saturate(float x) { return std::min(std::max(x, 0.0f), 1.0f); }
+	inline bool float_equal(float f1, float f2) {
+		return (std::abs(f1 - f2) <= std::numeric_limits<float>::epsilon() * std::max(std::abs(f1), std::abs(f2)));
+	}
 
+	constexpr float saturate(float x)
+	{
+		return ::saturate(x);
+	}
+
+	inline float LengthSquared(const XMFLOAT2& v)
+	{
+		return v.x * v.x + v.y * v.y;
+	}
+	inline float LengthSquared(const XMFLOAT3& v)
+	{
+		return v.x * v.x + v.y * v.y + v.z * v.z;
+	}
 	inline float Length(const XMFLOAT2& v)
 	{
-		return std::sqrt(v.x*v.x + v.y*v.y);
+		return std::sqrt(LengthSquared(v));
 	}
 	inline float Length(const XMFLOAT3& v)
 	{
-		return std::sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
+		return std::sqrt(LengthSquared(v));
 	}
 	inline float Distance(XMVECTOR v1, XMVECTOR v2)
 	{
@@ -57,6 +80,18 @@ namespace wi::math
 		float Distance = 0.0f;
 		XMStoreFloat(&Distance, length);
 		return Distance;
+	}
+	inline float Dot(const XMFLOAT2& v1, const XMFLOAT2& v2)
+	{
+		XMVECTOR vector1 = XMLoadFloat2(&v1);
+		XMVECTOR vector2 = XMLoadFloat2(&v2);
+		return XMVectorGetX(XMVector2Dot(vector1, vector2));
+	}
+	inline float Dot(const XMFLOAT3& v1, const XMFLOAT3& v2)
+	{
+		XMVECTOR vector1 = XMLoadFloat3(&v1);
+		XMVECTOR vector2 = XMLoadFloat3(&v2);
+		return XMVectorGetX(XMVector3Dot(vector1, vector2));
 	}
 	inline float Distance(const XMFLOAT2& v1, const XMFLOAT2& v2)
 	{
@@ -81,6 +116,16 @@ namespace wi::math
 		XMVECTOR vector1 = XMLoadFloat3(&v1);
 		XMVECTOR vector2 = XMLoadFloat3(&v2);
 		return DistanceSquared(vector1, vector2);
+	}
+	inline float DistanceSquared(const XMVECTOR& v1, const XMFLOAT3& v2)
+	{
+		XMVECTOR vector2 = XMLoadFloat3(&v2);
+		return DistanceSquared(v1, vector2);
+	}
+	inline float DistanceSquared(const XMFLOAT3& v1, const XMVECTOR& v2)
+	{
+		XMVECTOR vector1 = XMLoadFloat3(&v1);
+		return DistanceSquared(vector1, v2);
 	}
 	inline float DistanceEstimated(const XMFLOAT2& v1, const XMFLOAT2& v2)
 	{
@@ -110,13 +155,33 @@ namespace wi::math
 	{
 		return XMFLOAT3((a.x + b.x)*0.5f, (a.y + b.y)*0.5f, (a.z + b.z)*0.5f);
 	}
-	constexpr float InverseLerp(float value1, float value2, float pos)
+	inline XMVECTOR InverseLerp(XMVECTOR value1, XMVECTOR value2, XMVECTOR pos)
 	{
 		return (pos - value1) / (value2 - value1);
 	}
-	constexpr float Lerp(float value1, float value2, float amount)
+	constexpr float InverseLerp(float value1, float value2, float pos)
+	{
+		return ::inverse_lerp(value1, value2, pos);
+	}
+	constexpr XMFLOAT2 InverseLerp(const XMFLOAT2& value1, const XMFLOAT2& value2, const XMFLOAT2& pos)
+	{
+		return XMFLOAT2(InverseLerp(value1.x, value2.x, pos.x), InverseLerp(value1.y, value2.y, pos.y));
+	}
+	constexpr XMFLOAT3 InverseLerp(const XMFLOAT3& value1, const XMFLOAT3& value2, const XMFLOAT3& pos)
+	{
+		return XMFLOAT3(InverseLerp(value1.x, value2.x, pos.x), InverseLerp(value1.y, value2.y, pos.y), InverseLerp(value1.z, value2.z, pos.z));
+	}
+	constexpr XMFLOAT4 InverseLerp(const XMFLOAT4& value1, const XMFLOAT4& value2, const XMFLOAT4& pos)
+	{
+		return XMFLOAT4(InverseLerp(value1.x, value2.x, pos.x), InverseLerp(value1.y, value2.y, pos.y), InverseLerp(value1.z, value2.z, pos.z), InverseLerp(value1.w, value2.w, pos.w));
+	}
+	inline XMVECTOR Lerp(XMVECTOR value1, XMVECTOR value2, XMVECTOR amount)
 	{
 		return value1 + (value2 - value1) * amount;
+	}
+	constexpr float Lerp(float value1, float value2, float amount)
+	{
+		return ::lerp(value1, value2, amount);
 	}
 	constexpr XMFLOAT2 Lerp(const XMFLOAT2& a, const XMFLOAT2& b, float i)
 	{
@@ -130,6 +195,18 @@ namespace wi::math
 	{
 		return XMFLOAT4(Lerp(a.x, b.x, i), Lerp(a.y, b.y, i), Lerp(a.z, b.z, i), Lerp(a.w, b.w, i));
 	}
+	constexpr XMFLOAT2 Lerp(const XMFLOAT2& a, const XMFLOAT2& b, const XMFLOAT2& i)
+	{
+		return XMFLOAT2(Lerp(a.x, b.x, i.x), Lerp(a.y, b.y, i.y));
+	}
+	constexpr XMFLOAT3 Lerp(const XMFLOAT3& a, const XMFLOAT3& b, const XMFLOAT3& i)
+	{
+		return XMFLOAT3(Lerp(a.x, b.x, i.x), Lerp(a.y, b.y, i.y), Lerp(a.z, b.z, i.z));
+	}
+	constexpr XMFLOAT4 Lerp(const XMFLOAT4& a, const XMFLOAT4& b, const XMFLOAT4& i)
+	{
+		return XMFLOAT4(Lerp(a.x, b.x, i.x), Lerp(a.y, b.y, i.y), Lerp(a.z, b.z, i.z), Lerp(a.w, b.w, i.w));
+	}
 	inline XMFLOAT4 Slerp(const XMFLOAT4& a, const XMFLOAT4& b, float i)
 	{
 		XMVECTOR _a = XMLoadFloat4(&a);
@@ -139,11 +216,32 @@ namespace wi::math
 		XMStoreFloat4(&retVal, result);
 		return retVal;
 	}
+	constexpr XMFLOAT2 Max(const XMFLOAT2& a, const XMFLOAT2& b) {
+		return XMFLOAT2(std::max(a.x, b.x), std::max(a.y, b.y));
+	}
 	constexpr XMFLOAT3 Max(const XMFLOAT3& a, const XMFLOAT3& b) {
 		return XMFLOAT3(std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z));
 	}
+	constexpr XMFLOAT4 Max(const XMFLOAT4& a, const XMFLOAT4& b) {
+		return XMFLOAT4(std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z), std::max(a.w, b.w));
+	}
+	constexpr XMFLOAT2 Min(const XMFLOAT2& a, const XMFLOAT2& b) {
+		return XMFLOAT2(std::min(a.x, b.x), std::min(a.y, b.y));
+	}
 	constexpr XMFLOAT3 Min(const XMFLOAT3& a, const XMFLOAT3& b) {
 		return XMFLOAT3(std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z));
+	}
+	constexpr XMFLOAT4 Min(const XMFLOAT4& a, const XMFLOAT4& b) {
+		return XMFLOAT4(std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z), std::min(a.w, b.w));
+	}
+	constexpr XMFLOAT2 Abs(const XMFLOAT2& a) {
+		return XMFLOAT2(std::abs(a.x), std::abs(a.y));
+	}
+	constexpr XMFLOAT3 Abs(const XMFLOAT3& a) {
+		return XMFLOAT3(std::abs(a.x), std::abs(a.y), std::abs(a.z));
+	}
+	constexpr XMFLOAT4 Abs(const XMFLOAT4& a) {
+		return XMFLOAT4(std::abs(a.x), std::abs(a.y), std::abs(a.z), std::abs(a.w));
 	}
 	constexpr float Clamp(float val, float min, float max)
 	{
@@ -216,10 +314,59 @@ namespace wi::math
 		return ++x;
 	}
 
+	// A uniform 2D random generator for hemisphere sampling: http://holger.dammertz.org/stuff/notes_HammersleyOnHemisphere.html
+	//	idx	: iteration index
+	//	num	: number of iterations in total
+	constexpr XMFLOAT2 Hammersley2D(uint32_t idx, uint32_t num) {
+		uint32_t bits = idx;
+		bits = (bits << 16u) | (bits >> 16u);
+		bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+		bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+		bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+		bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+		const float radicalInverse_VdC = float(bits) * 2.3283064365386963e-10f; // / 0x100000000
+
+		return XMFLOAT2(float(idx) / float(num), radicalInverse_VdC);
+	}
+	inline XMMATRIX GetTangentSpace(const XMFLOAT3& N)
+	{
+		// Choose a helper vector for the cross product
+		XMVECTOR helper = std::abs(N.x) > 0.99 ? XMVectorSet(0, 0, 1, 0) : XMVectorSet(1, 0, 0, 0);
+
+		// Generate vectors
+		XMVECTOR normal = XMLoadFloat3(&N);
+		XMVECTOR tangent = XMVector3Normalize(XMVector3Cross(normal, helper));
+		XMVECTOR binormal = XMVector3Normalize(XMVector3Cross(normal, tangent));
+		return XMMATRIX(tangent, binormal, normal, XMVectorSet(0,0,0,1));
+	}
+	inline XMFLOAT3 HemispherePoint_Uniform(float u, float v)
+	{
+		float phi = v * 2 * PI;
+		float cosTheta = 1 - u;
+		float sinTheta = std::sqrt(1 - cosTheta * cosTheta);
+		return XMFLOAT3(std::cos(phi) * sinTheta, std::sin(phi) * sinTheta, cosTheta);
+	}
+	inline XMFLOAT3 HemispherePoint_Cos(float u, float v)
+	{
+		float phi = v * 2 * PI;
+		float cosTheta = std::sqrt(1 - u);
+		float sinTheta = std::sqrt(1 - cosTheta * cosTheta);
+		return XMFLOAT3(std::cos(phi) * sinTheta, std::sin(phi) * sinTheta, cosTheta);
+	}
+
 	// A, B, C: trangle vertices
 	float TriangleArea(const XMVECTOR& A, const XMVECTOR& B, const XMVECTOR& C);
 	// a, b, c: trangle side lengths
 	float TriangleArea(float a, float b, float c);
+
+	constexpr float SphereSurfaceArea(float radius)
+	{
+		return 4 * PI * radius * radius;
+	}
+	constexpr float SphereVolume(float radius)
+	{
+		return 4.0f / 3.0f * PI * radius * radius * radius;
+	}
 
 	XMFLOAT3 GetCubicHermiteSplinePos(
 		const XMFLOAT3& startPos,
@@ -233,17 +380,42 @@ namespace wi::math
 	inline XMVECTOR GetQuadraticBezierPos(const XMVECTOR& a, const XMVECTOR& b, const XMVECTOR& c, float t)
 	{
 		// XMVECTOR optimized version
-		const float param0 = std::pow(1 - t, 2.0f);
+		const float param0 = sqr(1 - t);
 		const float param1 = 2 * (1 - t) * t;
-		const float param2 = std::pow(t, 2.0f);
+		const float param2 = sqr(t);
 		const XMVECTOR param = XMVectorSet(param0, param1, param2, 1);
 		const XMMATRIX M = XMMATRIX(a, b, c, XMVectorSet(0, 0, 0, 1));
 		return XMVector3TransformNormal(param, M);
 	}
 
+	// Centripetal Catmull-Rom avoids self intersections that can appear with XMVectorCatmullRom
+	//	But it doesn't support the case when p0 == p1 or p2 == p3!
+	//	This also supports tension to control curve smoothness
+	//	Note: Catmull-Rom interpolates between p1 and p2 by value of t
+	inline XMVECTOR XM_CALLCONV CatmullRomCentripetal(XMVECTOR p0, XMVECTOR p1, XMVECTOR p2, XMVECTOR p3, float t, float tension = 0.5f)
+	{
+		float alpha = 1.0f - tension;
+		float t0 = 0.0f;
+		float t1 = t0 + std::pow(DistanceEstimated(p0, p1), alpha);
+		float t2 = t1 + std::pow(DistanceEstimated(p1, p2), alpha);
+		float t3 = t2 + std::pow(DistanceEstimated(p2, p3), alpha);
+		t = Lerp(t1, t2, t);
+		float t1t0 = 1.0f / std::max(0.001f, t1 - t0);
+		float t2t1 = 1.0f / std::max(0.001f, t2 - t1);
+		float t3t2 = 1.0f / std::max(0.001f, t3 - t2);
+		float t2t0 = 1.0f / std::max(0.001f, t2 - t0);
+		float t3t1 = 1.0f / std::max(0.001f, t3 - t1);
+		XMVECTOR A1 = (t1 - t) * t1t0 * p0 + (t - t0) * t1t0 * p1;
+		XMVECTOR A2 = (t2 - t) * t2t1 * p1 + (t - t1) * t2t1 * p2;
+		XMVECTOR A3 = (t3 - t) * t3t2 * p2 + (t - t2) * t3t2 * p3;
+		XMVECTOR B1 = (t2 - t) * t2t0 * A1 + (t - t0) * t2t0 * A2;
+		XMVECTOR B2 = (t3 - t) * t3t1 * A2 + (t - t1) * t3t1 * A3;
+		XMVECTOR C = (t2 - t) * t2t1 * B1 + (t - t1) * t2t1 * B2;
+		return C;
+	}
+
 	XMFLOAT3 QuaternionToRollPitchYaw(const XMFLOAT4& quaternion);
 
-	XMVECTOR GetClosestPointToLine(const XMVECTOR& A, const XMVECTOR& B, const XMVECTOR& P, bool segmentClamp = false);
 	float GetPointSegmentDistance(const XMVECTOR& point, const XMVECTOR& segmentA, const XMVECTOR& segmentB);
 
 	inline float GetPlanePointDistance(const XMVECTOR& planeOrigin, const XMVECTOR& planeNormal, const XMVECTOR& point)
@@ -257,11 +429,84 @@ namespace wi::math
 	float GetAngle(const XMFLOAT2& a, const XMFLOAT2& b);
 	float GetAngle(const XMFLOAT3& a, const XMFLOAT3& b, const XMFLOAT3& axis, float max = XM_2PI);
 	float GetAngle(XMVECTOR A, XMVECTOR B, XMVECTOR axis, float max = XM_2PI);
+	float GetAngleSigned(XMVECTOR A, XMVECTOR B, XMVECTOR axis);
 	void ConstructTriangleEquilateral(float radius, XMFLOAT4& A, XMFLOAT4& B, XMFLOAT4& C);
 	void GetBarycentric(const XMVECTOR& p, const XMVECTOR& a, const XMVECTOR& b, const XMVECTOR& c, float &u, float &v, float &w, bool clamp = false);
 
+	inline XMFLOAT3 GetPosition(const XMFLOAT4X4& _m)
+	{
+		return *((XMFLOAT3*)&_m._41);
+	}
+	inline XMFLOAT3 GetForward(const XMFLOAT4X4& _m)
+	{
+		return XMFLOAT3(_m.m[2][0], _m.m[2][1], _m.m[2][2]);
+	}
+	inline XMFLOAT3 GetUp(const XMFLOAT4X4& _m)
+	{
+		return XMFLOAT3(_m.m[1][0], _m.m[1][1], _m.m[1][2]);
+	}
+	inline XMFLOAT3 GetRight(const XMFLOAT4X4& _m)
+	{
+		return XMFLOAT3(_m.m[0][0], _m.m[0][1], _m.m[0][2]);
+	}
+
+	inline XMVECTOR GetPosition(const XMMATRIX& M)
+	{
+		XMFLOAT4X4 _m;
+		XMStoreFloat4x4(&_m, M);
+		XMFLOAT3 ret = GetPosition(_m);
+		return XMLoadFloat3(&ret);
+	}
+	inline XMVECTOR GetForward(const XMMATRIX& M)
+	{
+		XMFLOAT4X4 _m;
+		XMStoreFloat4x4(&_m, M);
+		XMFLOAT3 ret = GetForward(_m);
+		return XMLoadFloat3(&ret);
+	}
+	inline XMVECTOR GetUp(const XMMATRIX& M)
+	{
+		XMFLOAT4X4 _m;
+		XMStoreFloat4x4(&_m, M);
+		XMFLOAT3 ret = GetUp(_m);
+		return XMLoadFloat3(&ret);
+	}
+	inline XMVECTOR GetRight(const XMMATRIX& M)
+	{
+		XMFLOAT4X4 _m;
+		XMStoreFloat4x4(&_m, M);
+		XMFLOAT3 ret = GetRight(_m);
+		return XMLoadFloat3(&ret);
+	}
+
 	// Returns an element of a precomputed halton sequence. Specify which iteration to get with idx >= 0
 	const XMFLOAT4& GetHaltonSequence(int idx);
+
+	inline float f16tof32(uint32_t u)
+	{
+		return XMConvertHalfToFloat(uint16_t(u));
+	}
+	inline uint32_t f32tof16(float f)
+	{
+		return XMConvertFloatToHalf(f);
+	}
+
+	inline float asfloat(uint32_t u)
+	{
+		return *(float*)&u;
+	}
+	inline uint32_t asuint(float f)
+	{
+		return *(uint32_t*)&f;
+	}
+
+	inline XMFLOAT3 min(XMFLOAT3 a, float b)
+	{
+		a.x = std::min(a.x, b);
+		a.y = std::min(a.y, b);
+		a.z = std::min(a.z, b);
+		return a;
+	}
 
 	inline uint32_t CompressNormal(const XMFLOAT3& normal)
 	{
@@ -294,31 +539,121 @@ namespace wi::math
 
 		return retval;
 	}
-	inline XMFLOAT3 Unpack_R11G11B10_FLOAT(uint32_t value)
+	inline XMFLOAT3 Unpack_R11G11B10_FLOAT(uint32_t rgb) // compared to DirectXMath version this is optimized with f16tof32
 	{
-		XMFLOAT3PK pk;
-		pk.v = value;
-		XMVECTOR V = XMLoadFloat3PK(&pk);
+		float r = f16tof32((rgb << 4) & 0x7FF0);
+		float g = f16tof32((rgb >> 7) & 0x7FF0);
+		float b = f16tof32((rgb >> 17) & 0x7FE0);
+		return XMFLOAT3(r, g, b);
+	}
+	inline uint32_t Pack_R11G11B10_FLOAT(XMFLOAT3 rgb) // compared to DirectXMath version this is optimized with f32tof16
+	{
+		// Clamp upper bound so that it doesn't accidentally round up to INF 
+		// Exponent=15, Mantissa=1.11111
+		rgb = min(rgb, asfloat(0x477C0000));
+		uint32_t r = ((f32tof16(rgb.x) + 8) >> 4) & 0x000007FF;
+		uint32_t g = ((f32tof16(rgb.y) + 8) << 7) & 0x003FF800;
+		uint32_t b = ((f32tof16(rgb.z) + 16) << 17) & 0xFFC00000;
+		return r | g | b;
+	}
+	inline XMFLOAT3 Unpack_R9G9B9E5_SHAREDEXP(uint32_t value)
+	{
+		XMFLOAT3SE se;
+		se.v = value;
+		XMVECTOR V = XMLoadFloat3SE(&se);
 		XMFLOAT3 result;
 		XMStoreFloat3(&result, V);
 		return result;
 	}
-	inline uint32_t Pack_R11G11B10_FLOAT(const XMFLOAT3& color)
+	inline uint32_t Pack_R9G9B9E5_SHAREDEXP(const XMFLOAT3& value)
 	{
-		XMFLOAT3PK pk;
-		XMStoreFloat3PK(&pk, XMLoadFloat3(&color));
-		return pk.v;
+		XMFLOAT3SE se;
+		XMStoreFloat3SE(&se, XMLoadFloat3(&value));
+		return se;
+	}
+
+	inline uint32_t pack_half2(float x, float y)
+	{
+		return f32tof16(x) | (f32tof16(y) << 16u);
+	}
+	inline uint32_t pack_half2(const XMFLOAT2& value)
+	{
+		return pack_half2(value.x, value.y);
+	}
+	inline XMUINT2 pack_half3(float x, float y, float z)
+	{
+		return XMUINT2(
+			f32tof16(x) | (f32tof16(y) << 16u),
+			f32tof16(z)
+		);
+	}
+	inline XMUINT2 pack_half3(const XMFLOAT3& value)
+	{
+		return pack_half3(value.x, value.y, value.z);
+	}
+	inline XMUINT2 pack_half4(float x, float y, float z, float w)
+	{
+		return XMUINT2(
+			f32tof16(x) | (f32tof16(y) << 16u),
+			f32tof16(z) | (f32tof16(w) << 16u)
+		);
+	}
+	inline XMUINT2 pack_half4(const XMFLOAT4& value)
+	{
+		return pack_half4(value.x, value.y, value.z, value.w);
+	}
+
+	inline XMFLOAT2 unpack_half2(uint32_t value)
+	{
+		XMFLOAT2 retVal;
+		retVal.x = f16tof32(value);
+		retVal.y = f16tof32(value >> 16u);
+		return retVal;
+	}
+	inline XMFLOAT3 unpack_half3(XMUINT2 value)
+	{
+		XMFLOAT3 retVal;
+		retVal.x = f16tof32(value.x);
+		retVal.y = f16tof32(value.x >> 16u);
+		retVal.z = f16tof32(value.y);
+		return retVal;
+	}
+	inline XMFLOAT4 unpack_half4(XMUINT2 value)
+	{
+		XMFLOAT4 retVal;
+		retVal.x = f16tof32(value.x);
+		retVal.y = f16tof32(value.x >> 16u);
+		retVal.z = f16tof32(value.y);
+		retVal.w = f16tof32(value.y >> 16u);
+		return retVal;
 	}
 
 
+	constexpr uint32_t pack_unorm16x2(float x, float y)
+	{
+		return uint32_t(saturate(x) * 65535.0f) | (uint32_t(saturate(y) * 65535.0f) << 16u);
+	}
+	constexpr uint32_t pack_unorm16x2(XMFLOAT2 value)
+	{
+		return pack_unorm16x2(value.x, value.y);
+	}
+	constexpr XMUINT2 pack_unorm16x4(float x, float y, float z, float w)
+	{
+		return XMUINT2(pack_unorm16x2(x, y), pack_unorm16x2(z, w));
+	}
+	constexpr XMUINT2 pack_unorm16x4(XMFLOAT4 value)
+	{
+		return pack_unorm16x4(value.x, value.y, value.z, value.w);
+	}
+
 
 	//-----------------------------------------------------------------------------
-	// Compute the intersection of a ray (Origin, Direction) with a triangle 
-	// (V0, V1, V2).  Return true if there is an intersection and also set *pDist 
+	// Compute the intersection of a ray (Origin, Direction) with a triangle
+	// (V0, V1, V2).  Return true if there is an intersection and also set *pDist
 	// to the distance along the ray to the intersection.
-	// 
-	// The algorithm is based on Moller, Tomas and Trumbore, "Fast, Minimum Storage 
-	// Ray-Triangle Intersection", Journal of Graphics Tools, vol. 2, no. 1, 
+	//
+	// The algorithm is based on Moller, Tomas and Trumbore, "Fast, Minimum Storage
+	// Ray-Triangle Intersection", Journal of Graphics Tools, vol. 2, no. 1,
 	// pp 21-28, 1997.
 	//
 	//	Modified for WickedEngine to return barycentrics and support TMin, TMax
@@ -434,6 +769,26 @@ namespace wi::math
 			return false;
 
 		return true;
+	}
+
+	inline XMVECTOR PointOnLineSegmentNearestPoint(_In_ FXMVECTOR S1, _In_ FXMVECTOR S2, _In_ FXMVECTOR P) noexcept
+	{
+		XMVECTOR Dir = XMVectorSubtract(S2, S1);
+		XMVECTOR Projection = XMVectorSubtract(XMVector3Dot(P, Dir), XMVector3Dot(S1, Dir));
+		XMVECTOR LengthSq = XMVector3Dot(Dir, Dir);
+
+		XMVECTOR t = XMVectorMultiply(Projection, XMVectorReciprocal(LengthSq));
+		XMVECTOR Point = XMVectorMultiplyAdd(t, Dir, S1);
+
+		// t < 0
+		XMVECTOR SelectS1 = XMVectorLess(Projection, XMVectorZero());
+		Point = XMVectorSelect(Point, S1, SelectS1);
+
+		// t > 1
+		XMVECTOR SelectS2 = XMVectorGreater(Projection, LengthSq);
+		Point = XMVectorSelect(Point, S2, SelectS2);
+
+		return Point;
 	}
 };
 

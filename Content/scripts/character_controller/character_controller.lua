@@ -1,559 +1,1053 @@
 -- Lua Third person camera and character controller script
 --	This script will load a simple scene with a character that can be controlled
 --
+--	Tips:
+--		- Character models that you use should have a humanoid rig (this is created automatically from VRM, Makehuman and Mixamo model imports)
+--		- The level objects should be tagged as "Navmesh" because the characters will collide with only those, and these are optimized for intersections
+--		- To set the player start position, you can put a metadata component to the level scene and set it to "Player" preset
+--		- To add NPCs you can put a metadata component to the level scene and set it to "NPC" preset
+--		- To specify which model a character in the level (Player or NPC) uses, add a string property to its metadata named "name" and its value is the name of the character, for example name = johnny will use assets/johnny.wiscene
+--		- To specify which animation set a character should use, add "animset" string property to metadata, the value should be the name of the animset which will be concatenated to anim names with "_". For example: animset = male will load animations like "walk_male", etc. if available, else fall back to "walk"
+--		- To set patrol route for an NPC character, add a "waypoint" named string property to its metadata and the value is a name of the target waypoint entity. Waypoints can be chained by having a metadata for them and having "waypoint" string properties on each.
+--		- To set conversation dialog for an NPC character, add a "dialog" named string property to its metadata and the value is a name of the lua file in assets/dialogs/. For example dialog = hello will make the character use the assets/dialogs/hello.lua dialog script
+--
 -- 	CONTROLS:
---		WASD/left thumbstick: walk
---		SHIFT/right shoulder button: walk -> jog
---		E/left shoulder button: jog -> run
---		SPACE/gamepad X/gamepad button 2: jump
+--		WASD/left thumbstick: walk/jog
+--		Left Control: slow walk
+--		Left Shift/left shoulder button: jog -> run
+--		SPACE/gamepad X/gamepad button 3: jump
 --		Right Mouse Button/Right thumbstick: rotate camera
+--		Left Mouse Button: wave hand
 --		Scoll middle mouse/Left-Right triggers: adjust camera distance
 --		H: toggle debug draw
+--		L: toggle framerate lock
 --		ESCAPE key: quit
---		ENTER: reload script
+--		R: reload script
+--		ENTER: interaction
 
--- Debug Draw Helper
-local DrawAxis = function(point,f)
-	DrawLine(point,point:Add(Vector(f,0,0)),Vector(1,0,0,1))
-	DrawLine(point,point:Add(Vector(0,f,0)),Vector(0,1,0,1))
-	DrawLine(point,point:Add(Vector(0,0,f)),Vector(0,0,1,1))
-end
+local debug = false -- press H to toggle
+local framerate_lock = false
+local framerate_lock_target = 20
+local slope_threshold = 0.2 -- How much slopeiness will cause character to slide down instead of standing on it
+local gravity = -30
+local dynamic_voxelization = false -- Set to true to revoxelize navigation every frame
 
-local debug = true -- press H to toggle
+dofile(script_dir() .. "/assets/conversation.lua") -- load conversation system logic from separate file
+conversation = Conversation() -- conversation will be accessible from dialog scripts
 
 local scene = GetScene()
 
-Character = {
-	model = INVALID_ENTITY,
-	target = INVALID_ENTITY, -- Camera will look at this location, rays will be started from this location, etc.
-	current_anim = INVALID_ENTITY,
-	idle_anim = INVALID_ENTITY,
-	walk_anim = INVALID_ENTITY,
-	jog_anim = INVALID_ENTITY,
-	run_anim = INVALID_ENTITY,
-	jump_anim = INVALID_ENTITY,
-	swim_idle_anim = INVALID_ENTITY,
-	swim_anim = INVALID_ENTITY,
-	all_anims = {},
-	neck = INVALID_ENTITY,
-	head = INVALID_ENTITY,
-	left_hand = INVALID_ENTITY,
-	right_hand = INVALID_ENTITY,
-	left_foot = INVALID_ENTITY,
-	right_foot = INVALID_ENTITY,
-	face = Vector(0,0,1), -- forward direction
-	force = Vector(),
-	velocity = Vector(),
-	savedPointerPos = Vector(),
-	walk_speed = 0.2,
-	jog_speed = 0.4,
-	run_speed = 0.8,
-	jump_speed = 14,
-	swim_speed = 0.5,
-	layerMask = 0x2, -- The character will be tagged to use this layer, so scene intersection can filter out the character
-	scale = Vector(1, 1, 1),
-	rotation = Vector(0,math.pi,0),
-	start_position = Vector(0, 1, 0),
-	
-	states = {
-		IDLE = "idle",
-		WALK = "walk",
-		JOG = "jog",
-		RUN = "run",
-		JUMP = "jump",
-		SWIM_IDLE = "swim_idle",
-		SWIM = "swim",
-	},
-	
-	Create = function(self, model_name)
-		local character_scene = Scene()
-		self.model = LoadModel(character_scene, model_name)
-		local layer = character_scene.Component_GetLayer(self.model)
-		layer.SetLayerMask(self.layerMask)
+local Layers = {
+	Player = 1 << 0,
+	NPC = 1 << 1,
+}
 
-		self.state = self.states.IDLE
-		self.state_prev = self.state
+-- Simple character states
+--	All states that the character can enter are listed here
+--	The naming in "" matches the animation name in animations library (assets/animations.wiscene)
+--	Movement states are handled with player input in a specialized way
+--	Other states (example: WAVE) can be entered from IDLE and they last until the animation ends. In case of looped animation, they last until movement input happens
+States = {
+	IDLE = "idle",
+	WALK = "walk",
+	JOG = "jog",
+	RUN = "run",
+	JUMP = "jump",
+	SWIM_IDLE = "swim_idle",
+	SWIM = "swim",
+	WAVE = "wave"
+}
+
+Mood = {
+	Neutral = ExpressionPreset.Neutral,
+	Happy = ExpressionPreset.Happy,
+	Angry = ExpressionPreset.Angry,
+	Sad = ExpressionPreset.Sad,
+	Relaxed = ExpressionPreset.Relaxed,
+	Surprised = ExpressionPreset.Surprised
+}
+
+player = nil
+npcs = {}
+points_of_interest = {}
+
+local enable_footprints = true
+local footprint_texture = Texture(script_dir() .. "assets/footprint.dds")
+local footprints = {}
+
+local character_capsules = {}
+local voxelgrid = VoxelGrid()
+
+local function Character(model_scene, start_transform, controllable, anim_scene, animset)
+	local self = {
+		model = INVALID_ENTITY,
+		target_rot_horizontal = 0,
+		target_rot_vertical = 0,
+		target_height = 0,
+		anims = {},
+		neck = INVALID_ENTITY,
+		head = INVALID_ENTITY,
+		left_hand = INVALID_ENTITY,
+		right_hand = INVALID_ENTITY,
+		left_foot = INVALID_ENTITY,
+		right_foot = INVALID_ENTITY,
+		left_toes = INVALID_ENTITY,
+		right_toes = INVALID_ENTITY,
+		savedPointerPos = Vector(),
+		walk_speed = 0.1,
+		jog_speed = 0.2,
+		run_speed = 0.4,
+		jump_speed = 8,
+		swim_speed = 0.2,
+		layerMask = ~0, -- layerMask will be used to filter collisions
+		scale = Vector(1, 1, 1),
+		rotation = Vector(0,math.pi,0),
+		position = Vector(),
+		ground_intersect = false,
+		controllable = true,
+		foot_placed_left = false,
+		foot_placed_right = false,
+		mood = Mood.Neutral,
+		mood_amount = 1,
+		expression = INVALID_ENTITY,
+		object_entities = {},
 		
-		for i,entity in ipairs(character_scene.Entity_GetAnimationArray()) do
-			table.insert(self.all_anims, entity)
-		end
+		patrol_waypoints = {},
+		patrol_waypoints_original = {},
+		patrol_next = 0,
+		patrol_wait = 0,
+		patrol_reached = false,
+		hired = nil,
+		dialogs = {},
+		next_dialog = 1,
 		
-		self.idle_anim = character_scene.Entity_FindByName("idle")
-		self.walk_anim = character_scene.Entity_FindByName("walk")
-		self.jog_anim = character_scene.Entity_FindByName("jog")
-		self.run_anim = character_scene.Entity_FindByName("run")
-		self.jump_anim = character_scene.Entity_FindByName("jump")
-		self.swim_idle_anim = character_scene.Entity_FindByName("swim_idle")
-		self.swim_anim = character_scene.Entity_FindByName("swim")
-
-		self.collider = character_scene.Entity_GetHumanoidArray()[1]
-		local humanoid = character_scene.Component_GetHumanoidArray()[1]
-		humanoid.SetLookAtEnabled(false)
-		self.neck = humanoid.GetBoneEntity(HumanoidBone.Neck)
-		self.head = humanoid.GetBoneEntity(HumanoidBone.Head)
-		self.left_hand = humanoid.GetBoneEntity(HumanoidBone.LeftHand)
-		self.right_hand = humanoid.GetBoneEntity(HumanoidBone.RightHand)
-		self.left_foot = humanoid.GetBoneEntity(HumanoidBone.LeftFoot)
-		self.right_foot = humanoid.GetBoneEntity(HumanoidBone.RightFoot)
-		
-		local model_transform = character_scene.Component_GetTransform(self.model)
-		model_transform.ClearTransform()
-		model_transform.Scale(self.scale)
-		model_transform.Rotate(self.rotation)
-		model_transform.Translate(self.start_position)
-		model_transform.UpdateTransform()
-		
-		self.target = CreateEntity()
-		local target_transform = character_scene.Component_CreateTransform(self.target)
-		target_transform.Translate(character_scene.Component_GetTransform(self.head).GetPosition())
-		target_transform.Translate(self.start_position)
-		
-		character_scene.Component_Attach(self.target, self.model)
-
-		scene.Merge(character_scene)
-	end,
-	
-	Jump = function(self,f)
-		self.force.SetY(f)
-		self.state = self.states.JUMP
-	end,
-	MoveDirection = function(self,dir,f)
-		local target_transform = scene.Component_GetTransform(self.target)
-		dir = vector.Transform(dir:Normalize(), target_transform.GetMatrix())
-		dir.SetY(0)
-		local dot = vector.Dot(self.face, dir)
-		if(dot < 0) then
-			self.face = vector.TransformNormal(self.face, matrix.RotationY(math.pi * 0.01))
-		end
-		self.face = vector.Lerp(self.face, dir, 0.2);
-		self.face.Normalize()
-		if(dot > 0) then 
-			self.force = vector.Add(self.force, self.face:Multiply(Vector(f,f,f)))
-		end
-	end,
-
-	Update = function(self)
-
-		local dt = getDeltaTime()
-
-
-		local model_transform = scene.Component_GetTransform(self.model)
-		local savedPos = model_transform.GetPosition()
-		model_transform.ClearTransform()
-		model_transform.MatrixTransform(matrix.LookTo(Vector(),self.face):Inverse())
-		model_transform.Scale(self.scale)
-		model_transform.Rotate(self.rotation)
-		model_transform.Translate(savedPos)
-		model_transform.UpdateTransform()
-		scene.Component_Detach(self.target)
-		scene.Component_Attach(self.target, self.model)
-
-		
-		-- Camera target control:
-
-		-- read from gamepad analog stick:
-		local diff = input.GetAnalog(GAMEPAD_ANALOG_THUMBSTICK_R)
-		diff = vector.Multiply(diff, dt * 4)
-		
-		-- read from mouse:
-		if(input.Down(MOUSE_BUTTON_RIGHT)) then
-			local mouseDif = input.GetPointerDelta()
-			mouseDif = mouseDif:Multiply(dt * 0.3)
-			diff = vector.Add(diff, mouseDif)
-			input.SetPointer(self.savedPointerPos)
-			input.HidePointer(true)
-		else
-			self.savedPointerPos = input.GetPointer()
-			input.HidePointer(false)
-		end
-		
-		local target_transform = scene.Component_GetTransform(self.target)
-		target_transform.Rotate(Vector(diff.GetY(),diff.GetX()))
-
-
-		
-		-- state and animation update
-		if(self.state == self.states.IDLE) then
-			self.current_anim = self.idle_anim
-		elseif(self.state == self.states.WALK) then
-			self.current_anim = self.walk_anim
-		elseif(self.state == self.states.JOG) then
-			self.current_anim = self.jog_anim
-		elseif(self.state == self.states.RUN) then
-			self.current_anim = self.run_anim
-		elseif(self.state == self.states.JUMP) then
-			self.current_anim = self.jump_anim
-		elseif(self.state == self.states.SWIM_IDLE) then
-			self.current_anim = self.swim_idle_anim
-		elseif(self.state == self.states.SWIM) then
-			self.current_anim = self.swim_anim
-		end
-		
-		local current_anim = scene.Component_GetAnimation(self.current_anim)
-		if current_anim ~= nil then
-
-			-- Blend in current animation:
-			current_anim.SetAmount(math.lerp(current_anim.GetAmount(), 1, 0.1))
-			current_anim.Play()
-			if self.state_prev ~= self.state then
-				-- If anim just started in this frame, reset timer to beginning:
-				current_anim.SetTimer(current_anim.GetStart())
-				self.state_prev = self.state
+		GetFacing = function(self)
+			local charactercomponent = scene.Component_GetCharacter(self.model)
+			return charactercomponent.GetFacingSmoothed()
+		end,
+		Jump = function(self,f)
+			local charactercomponent = scene.Component_GetCharacter(self.model)
+			charactercomponent.Jump(f)
+			self.state = States.JUMP
+			charactercomponent.StopAnimation() -- fix for jumping when jump anim didn't finish yet, instead I force prev anim to finish
+		end,
+		Turn = function(self,dir)
+			local charactercomponent = scene.Component_GetCharacter(self.model)
+			charactercomponent.Turn(dir)
+		end,
+		MoveDirection = function(self,dir)
+			local charactercomponent = scene.Component_GetCharacter(self.model)
+			local rotation_matrix = matrix.Multiply(matrix.RotationY(self.target_rot_horizontal), matrix.RotationX(self.target_rot_vertical))
+			dir = vector.TransformNormal(dir.Normalize(), rotation_matrix)
+			dir.SetY(0)
+			local dirNorm = dir.Normalize()
+			charactercomponent.Turn(dirNorm)
+			local speed = self.walk_speed
+			if self.state == States.WALK then
+				speed = self.walk_speed
+			elseif self.state == States.JOG then
+				speed = self.jog_speed
+			elseif self.state == States.RUN then
+				speed = self.run_speed
+			elseif self.state == States.SWIM then
+				speed = self.swim_speed
+			elseif not charactercomponent.IsGrounded() then
+				speed = self.run_speed
 			end
+			charactercomponent.Move(dirNorm:Multiply(Vector(speed,speed,speed)))
+		end,
+		SetAnimationAmount = function(self,amount)
+			local charactercomponent = scene.Component_GetCharacter(self.model)
+			charactercomponent.SetAnimationAmount(amount)
+		end,
+
+		Update = function(self)
+
+			local dt = getDeltaTime()
+
+			local charactercomponent = scene.Component_GetCharacter(self.model)
+			self.ground_intersect = charactercomponent.IsGrounded()
+			self.position = charactercomponent.GetPositionInterpolated()
+			local capsule = charactercomponent.GetCapsule()
+			character_capsules[self.model] = capsule
+			--DrawCapsule(capsule)
+			charactercomponent.SetDedicatedShadow(self == player or (conversation.override_input and conversation.character == self)) -- main character and cinematic focus character have dedicated shadow
+
+			local humanoid = scene.Component_GetHumanoid(self.humanoid)
+			humanoid.SetLookAtEnabled(false)
 			
-			-- Ease out other animations:
-			for i,anim in ipairs(self.all_anims) do
-				if (anim ~= INVALID_ENTITY) and (anim ~= self.current_anim) then
-					local prev_anim = scene.Component_GetAnimation(anim)
-					prev_anim.SetAmount(math.lerp(prev_anim.GetAmount(), 0, 0.1))
-					if prev_anim.GetAmount() <= 0 then
-						prev_anim.Stop()
+			if self.controllable then
+				-- Camera target control:
+
+				-- read from gamepad analog stick:
+				local diff = input.GetAnalog(GAMEPAD_ANALOG_THUMBSTICK_R)
+				diff = vector.Multiply(diff, dt * 4)
+				
+				-- read from mouse:
+				if(input.Down(MOUSE_BUTTON_RIGHT)) then
+					local mouseDif = input.GetPointerDelta()
+					mouseDif = mouseDif:Multiply(0.016 * 0.1) -- not using delta time for delta mouse because it's not a diff from prev frame but hw delta movement reading!
+					diff = vector.Add(diff, mouseDif)
+					input.SetPointer(self.savedPointerPos)
+					input.HidePointer(true)
+				else
+					self.savedPointerPos = input.GetPointer()
+					input.HidePointer(false)
+				end
+
+				diff = vector.Add(diff, vector.Multiply(input.GetTouchPan(), -dt))
+				
+				self.target_rot_horizontal = self.target_rot_horizontal + diff.GetX()
+				self.target_rot_vertical = math.clamp(self.target_rot_vertical + diff.GetY(), -math.pi * 0.3, math.pi * 0.4) -- vertical camera limits
+			end
+
+			-- Blend to current mood, blend out other moods:
+			local expression = scene.Component_GetExpression(self.expression)
+			if expression ~= nil then
+				for i,preset in pairs(Mood) do
+					local weight = expression.GetPresetWeight(preset)
+					if preset == self.mood then
+						weight = math.lerp(weight, self.mood_amount, 0.1)
+					else
+						weight = math.lerp(weight, 0, 0.1)
 					end
+					expression.SetPresetWeight(preset, weight)
 				end
 			end
+
+			local moveInputDir = Vector()
+			local moveInputLength = 0
+			if self.controllable then
+				if not backlog_isactive() then
+					-- Movement input:
+					if(input.Down(KEYBOARD_BUTTON_LEFT) or input.Down(string.byte('A'))) then
+						moveInputDir = moveInputDir:Add( Vector(-1) )
+					end
+					if(input.Down(KEYBOARD_BUTTON_RIGHT) or input.Down(string.byte('D'))) then
+						moveInputDir = moveInputDir:Add( Vector(1) )
+					end
+					
+					if(input.Down(KEYBOARD_BUTTON_UP) or input.Down(string.byte('W'))) then
+						moveInputDir = moveInputDir:Add( Vector(0,0,1) )
+					end
+					if(input.Down(KEYBOARD_BUTTON_DOWN) or input.Down(string.byte('S'))) then
+						moveInputDir = moveInputDir:Add( Vector(0,0,-1) )
+					end
+
+					local analog = input.GetAnalog(GAMEPAD_ANALOG_THUMBSTICK_L)
+					moveInputDir = vector.Add(moveInputDir, Vector(analog.GetX(), 0, analog.GetY()))
+					moveInputLength = vector.Length(moveInputDir)
+				end
+			end
+
+			local animation = scene.Component_GetAnimation(self.anims[self.state])
+			local looped_anim = animation.IsLooped()
 			
-			-- Simple state transition to idle:
-			if self.state == self.states.JUMP then
-				if current_anim.GetTimer() > current_anim.GetEnd() then
-					self.state = self.states.IDLE
+			-- state and animation update
+			charactercomponent.PlayAnimation(self.anims[self.state])
+			if looped_anim then
+				if moveInputLength > 0 or self.state == States.WALK or self.state == States.JOG or self.state == States.RUN then
+					-- Looped anims decay back to IDLE when a movement input was done, and also always for movement-related states
+					--	Note that movement-related states decay back to IDLE but at the same frame if input is still held they re-enter their own state and keep it running
+					self.state = States.IDLE
 				end
 			else
-				if self.velocity.Length() < 0.1 and self.state ~= self.states.SWIM_IDLE and self.state ~= self.states.SWIM then
-					self.state = self.states.IDLE
+				if charactercomponent.IsAnimationEnded() then
+					-- If current animation is non-looped, only decay back to idle when it is over
+					self.state = States.IDLE
 				end
 			end
-		end
 
-		if dt > 0.1 then
-			return -- avoid processing too large delta times to avoid instability
-		end
-
-		-- swim test:
-		if self.neck ~= INVALID_ENTITY then
-			local neck_pos = scene.Component_GetTransform(self.neck).GetPosition()
-			local water_threshold = 0.05
-			neck_pos = vector.Add(neck_pos, Vector(0, -water_threshold, 0))
-			local swim_ray = Ray(neck_pos, Vector(0,1,0), 0, 100)
-			local water_entity, water_pos, water_normal, water_distance = scene.Intersects(swim_ray, FILTER_WATER)
-			if water_entity ~= INVALID_ENTITY then
-				model_transform.Translate(Vector(0,water_distance - water_threshold,0))
-				model_transform.UpdateTransform()
-				self.force.SetY(0)
-				self.force = vector.Multiply(self.force, 0.8) -- water friction
-				self.velocity.SetY(0)
-				self.state = self.states.SWIM_IDLE
+			if charactercomponent.IsSwimming() then
+				self.state = States.SWIM_IDLE
 			end
-		end
 
-		-- Movement input:
-		local lookDir = Vector()
-		if(input.Down(KEYBOARD_BUTTON_LEFT) or input.Down(string.byte('A'))) then
-			lookDir = lookDir:Add( Vector(-1) )
-		end
-		if(input.Down(KEYBOARD_BUTTON_RIGHT) or input.Down(string.byte('D'))) then
-			lookDir = lookDir:Add( Vector(1) )
-		end
-		
-		if(input.Down(KEYBOARD_BUTTON_UP) or input.Down(string.byte('W'))) then
-			lookDir = lookDir:Add( Vector(0,0,1) )
-		end
-		if(input.Down(KEYBOARD_BUTTON_DOWN) or input.Down(string.byte('S'))) then
-			lookDir = lookDir:Add( Vector(0,0,-1) )
-		end
-
-		local analog = input.GetAnalog(GAMEPAD_ANALOG_THUMBSTICK_L)
-		lookDir = vector.Add(lookDir, Vector(analog.GetX(), 0, analog.GetY()))
-			
-		if self.state ~= self.states.JUMP and self.state_prev ~= self.states.JUMP and self.velocity.GetY() == 0 then
-			if(lookDir.Length() > 0) then
-				if self.state == self.states.SWIM_IDLE then
-					self:MoveDirection(lookDir,self.swim_speed)
-					self.state = self.states.SWIM
-				else
-					if(input.Down(KEYBOARD_BUTTON_LSHIFT) or input.Down(GAMEPAD_BUTTON_6)) then
-						if input.Down(string.byte('E')) or input.Down(GAMEPAD_BUTTON_5) then
-							self:MoveDirection(lookDir,self.run_speed)
-							self.state = self.states.RUN
-						else
-							self:MoveDirection(lookDir,self.jog_speed)
-							self.state = self.states.JOG
+			if self.controllable then
+				if not backlog_isactive() then
+					-- Apply movement:
+					if moveInputLength > 0 then
+						if self.state == States.SWIM_IDLE then
+							self.state = States.SWIM
+							self:MoveDirection(moveInputDir)
+						elseif self.state == States.JUMP and not charactercomponent.IsGrounded() then
+							self:MoveDirection(moveInputDir)
+						elseif self.state == States.IDLE and (self.ground_intersect or charactercomponent.IsWallIntersect()) then
+							local analog_len = vector.Length(analog)
+							if input.Down(KEYBOARD_BUTTON_LCONTROL) or (analog_len > 0 and analog_len < 0.75) then
+								self.state = States.WALK
+							else
+								if input.Down(KEYBOARD_BUTTON_LSHIFT) or input.Down(GAMEPAD_BUTTON_5) then
+									self.state = States.RUN
+								else
+									self.state = States.JOG
+								end
+							end
+							self:MoveDirection(moveInputDir)
 						end
-					else
-						self:MoveDirection(lookDir,self.walk_speed)
-						self.state = self.states.WALK
 					end
+					
+					if (input.Press(string.byte('J')) or input.Press(KEYBOARD_BUTTON_SPACE) or input.Press(GAMEPAD_BUTTON_3)) and self.ground_intersect then
+						self:Jump(self.jump_speed)
+					end
+				end
+
+			elseif not(conversation.override_input and conversation.character == self) then
+
+				-- NPC patrol behavior:
+				local patrol_count = len(self.patrol_waypoints)
+				if patrol_count > 0 then
+					local pos = self.position
+					local patrol = self.patrol_waypoints[self.patrol_next % patrol_count + 1]
+					local patrol_transform = scene.Component_GetTransform(patrol.entity)
+					if patrol_transform ~= nil then
+						local patrol_pos = patrol_transform.GetPosition()
+						local patrol_wait = patrol.wait or 0 -- default: 0
+						local patrol_vec = vector.Subtract(patrol_pos, pos)
+						patrol_vec.SetY(0)
+						local distance = patrol_vec.Length()
+						local patrol_dist = patrol.distance or 0.5 -- default : 0.5
+						local patrol_dist_threshold = patrol.distance_threshold or 0 -- default : 0
+						if distance < patrol_dist then
+							-- reached patrol waypoint:
+							self.patrol_reached = true
+							if self.state ~= States.SWIM_IDLE then
+								self.state = States.IDLE
+							end
+							if self.patrol_wait >= patrol_wait then
+								self.patrol_next = self.patrol_next + 1
+							else
+								self.patrol_wait = self.patrol_wait + dt
+							end
+						elseif self.patrol_reached then
+							--  threshold to avoid jerking between moving and reached destination:
+							--	 Between distance and distance + threshold, the character will not advance towards waypoint
+							--	 Useful for dynamic waypoint, such as following behaviour
+							if distance > patrol_dist + patrol_dist_threshold then
+								self.patrol_reached = false
+							end
+						else
+							-- move towards patrol waypoint:
+							charactercomponent.SetPathGoal(patrol_pos, voxelgrid) -- this is deferred into scene update
+							local pathquery = charactercomponent.GetPathQuery()
+							pathquery.SetAgentHeight(3)
+							if pathquery.IsSuccessful() then
+								-- If there is a valid pathfinding result for waypoint, replace heading direction by that:
+								patrol_vec = vector.Subtract(pathquery.GetNextWaypoint(), pos)
+								patrol_vec.SetY(0)
+							end
+							if debug then
+								DrawPathQuery(pathquery)
+							end
+							self.patrol_wait = 0
+							-- check if it's blocked by player collision:
+							local capsule = charactercomponent.GetCapsule()
+							local forward_offset = vector.Multiply(patrol_vec.Normalize(), 0.5)
+							capsule.SetBase(vector.Add(capsule.GetBase(), forward_offset))
+							capsule.SetTip(vector.Add(capsule.GetTip(), forward_offset))
+							capsule.SetRadius(capsule.GetRadius() * 2)
+
+							-- Manual check for blocked patrol:
+							--	This is manually done because it is difficult to filter out current NPC among other NPCs
+							--	Because NPCs can also be blocked by other NPCs but not themselves
+							--	And introducing custom layer for every NPC is not very good
+							local blocked = false
+							for other_entity,other_capsule in pairs(character_capsules) do
+								if other_entity ~= self.model then
+									if capsule.Intersects(other_capsule) then
+										blocked = true
+									end
+								end
+							end
+							
+							if blocked then
+								if debug then
+									DrawDebugText("patrol blocked", vector.Add(capsule.GetTip(), Vector(0,0.1)), Vector(1,0,0,1), 0.08, DEBUG_TEXT_DEPTH_TEST | DEBUG_TEXT_CAMERA_FACING)
+									DrawCapsule(capsule, Vector(1,0,0,1))
+								end
+							else
+								if self.state == States.SWIM_IDLE then
+									self.state = States.SWIM
+								else
+									self.state = patrol.state or States.WALK -- default : WALK
+								end
+								self:MoveDirection(patrol_vec)
+								if debug then
+									DrawDebugText("patrol blocking check", vector.Add(capsule.GetTip(), Vector(0,0.1)), Vector(0,1,0,1), 0.08, DEBUG_TEXT_DEPTH_TEST | DEBUG_TEXT_CAMERA_FACING)
+									DrawCapsule(capsule, Vector(0,1,0,1))
+								end
+							end
+
+						end
+					end
+				end
+				
+			end
+
+			-- If camera is inside character capsule, fade out the character, otherwise fade in:
+			if capsule.Intersects(GetCamera().GetPosition()) then
+				for i,entity in ipairs(self.object_entities) do
+					local object = scene.Component_GetObject(entity)
+					local color = object.GetColor()
+					local opacity = color.GetW()
+					opacity = math.lerp(opacity, 0, 0.1)
+					color.SetW(opacity)
+					object.SetColor(color)
+				end
+			else
+				for i,entity in ipairs(self.object_entities) do
+					local object = scene.Component_GetObject(entity)
+					local color = object.GetColor()
+					local opacity = color.GetW()
+					opacity = math.lerp(opacity, 1, 0.1)
+					color.SetW(opacity)
+					object.SetColor(color)
+				end
+			end
+
+			-- Enter state of individual anims:
+			if self.controllable and self.state == States.IDLE then
+				if input.Press(MOUSE_BUTTON_LEFT) then
+					self.state = States.WAVE
 				end
 			end
 			
-			if(input.Press(string.byte('J')) or input.Press(KEYBOARD_BUTTON_SPACE) or input.Press(GAMEPAD_BUTTON_2)) then
-				self:Jump(self.jump_speed)
-			end
-		elseif self.velocity.GetY() > 0 then
-			self:MoveDirection(lookDir,self.walk_speed)
-		end
+		end,
 
-		self.face.SetY(0)
-		self.face=self.face:Normalize()
+		Update_Footprints = function(self)
+			local radius = 0.1
 
-		self.force = vector.Add(self.force, Vector(0, -1, 0)) -- gravity
-		self.velocity = vector.Multiply(self.force, dt)
-
-		
-		-- Capsule collision for character:		
-		local capsule = scene.Component_GetCollider(self.collider).GetCapsule()
-		local original_capsulepos = model_transform.GetPosition()
-		local capsulepos = original_capsulepos
-		local capsuleheight = vector.Subtract(capsule.GetTip(), capsule.GetBase()).Length()
-		local radius = capsule.GetRadius()
-		local ground_intersect = false
-
-		local fixed_update_remain = dt
-		local fixed_update_fps = 120
-		local fixed_update_rate = 1.0 / fixed_update_fps
-		local fixed_dt = fixed_update_rate / dt
-
-		while fixed_update_remain > 0 do
-			fixed_update_remain = fixed_update_remain - fixed_update_rate
-		
-			local step = vector.Multiply(self.velocity, fixed_dt)
-
-			capsulepos = vector.Add(capsulepos, step)
-			capsule = Capsule(capsulepos, vector.Add(capsulepos, Vector(0, capsuleheight)), radius)
-			local o2, p2, n2, depth, velocity = scene.Intersects(capsule, FILTER_NAVIGATION_MESH | FILTER_COLLIDER, ~self.layerMask) -- scene/capsule collision
-			if(o2 ~= INVALID_ENTITY) then
-
-				if debug then
-					DrawPoint(p2,0.1,Vector(1,1,0,1))
-					DrawLine(p2, vector.Add(p2, n2), Vector(1,1,0,1))
+			-- Left footprint:
+			local capsule = Capsule(scene.Component_GetTransform(self.left_foot).GetPosition(), scene.Component_GetTransform(self.left_toes).GetPosition(), 0.1)
+			--DrawCapsule(capsule, Vector(1,0,0,1))
+			local collEntity,collPos = scene.Intersects(capsule, FILTER_NAVIGATION_MESH)
+			if collEntity ~= INVALID_ENTITY then
+				if not self.foot_placed_left then
+					self.foot_placed_left = true
+					local entity = CreateEntity()
+					local transform = scene.Component_CreateTransform(entity)
+					local material = scene.Component_CreateMaterial(entity)
+					local decal = scene.Component_CreateDecal(entity)
+					local layer = scene.Component_CreateLayer(entity)
+					transform.MatrixTransform(matrix.LookTo(Vector(),self:GetFacing()):Inverse())
+					transform.Rotate(Vector(math.pi * 0.5))
+					transform.Scale(0.1)
+					transform.Translate(collPos)
+					material.SetTexture(TextureSlot.BASECOLORMAP, footprint_texture)
+					material.SetBaseColor(Vector(0.1,0.1,0.1,1))
+					decal.SetSlopeBlendPower(2)
+					layer.SetLayerMask(~(Layers.Player | Layers.NPC))
+					scene.Component_Attach(entity, collEntity)
+					table.insert(footprints, entity)
 				end
+			else
+				self.foot_placed_left = false
+			end
 
-				local ground_slope = vector.Dot(n2, Vector(0,1,0))
-				local slope_threshold = 0.1
-
-				if self.velocity.GetY() < 0 and ground_slope > slope_threshold then
-					-- Ground intersection, remove falling motion:
-					self.velocity.SetY(0)
-					capsulepos = vector.Add(capsulepos, Vector(0, depth, 0))
-					capsulepos = vector.Add(capsulepos, velocity) -- apply moving platform velocity
-					self.force = vector.Multiply(self.force, 0.85) -- ground friction
-					ground_intersect = true
-				elseif ground_slope <= slope_threshold then
-					-- Slide on contact surface:
-					local velocityLen = self.velocity.Length()
-					local velocityNormalized = self.velocity.Normalize()
-					local undesiredMotion = n2:Multiply(vector.Dot(velocityNormalized, n2))
-					local desiredMotion = vector.Subtract(velocityNormalized, undesiredMotion)
-					if ground_intersect then
-						desiredMotion.SetY(0)
-					end
-					self.velocity = vector.Multiply(desiredMotion, velocityLen)
-					capsulepos = vector.Add(capsulepos, vector.Multiply(n2, depth))
+			-- Right footprint:
+			local capsule = Capsule(scene.Component_GetTransform(self.right_foot).GetPosition(), scene.Component_GetTransform(self.right_toes).GetPosition(), 0.1)
+			--DrawCapsule(capsule, Vector(1,0,0,1))
+			local collEntity,collPos = scene.Intersects(capsule, FILTER_NAVIGATION_MESH)
+			if collEntity ~= INVALID_ENTITY then
+				if not self.foot_placed_right then
+					self.foot_placed_right = true
+					local entity = CreateEntity()
+					local transform = scene.Component_CreateTransform(entity)
+					local material = scene.Component_CreateMaterial(entity)
+					local decal = scene.Component_CreateDecal(entity)
+					local layer = scene.Component_CreateLayer(entity)
+					transform.MatrixTransform(matrix.LookTo(Vector(),self:GetFacing()):Inverse())
+					transform.Rotate(Vector(math.pi * 0.5))
+					transform.Scale(0.1)
+					transform.Translate(collPos)
+					material.SetTexture(TextureSlot.BASECOLORMAP, footprint_texture)
+					material.SetTexMulAdd(Vector(-1, 1, 0, 0)) -- flip left footprint texture to be right
+					material.SetBaseColor(Vector(0.1,0.1,0.1,1))
+					decal.SetSlopeBlendPower(2)
+					layer.SetLayerMask(~(Layers.Player | Layers.NPC))
+					scene.Component_Attach(entity, collEntity)
+					table.insert(footprints, entity)
 				end
-
+			else
+				self.foot_placed_right = false
 			end
+		end,
 
+		SetPatrol = function(self, patrol)
+			self.patrol_waypoints_original = patrol
+			self.patrol_waypoints = patrol
+		end,
+		ReturnToPatrol = function(self) -- return to original patrol route
+			self.patrol_waypoints = self.patrol_waypoints_original
+		end,
+
+		Follow = function(self, leader)
+			self.hired = leader
+		end,
+		Unfollow = function(self)
+			self.hired = nil
+			self.patrol_waypoints = {}
+		end,
+
+	}
+
+	-- Character initialization:
+	self.position = start_transform.GetPosition()
+	local facing = vector.Rotate(start_transform.GetForward(), vector.QuaternionFromRollPitchYaw(self.rotation))
+	self.controllable = controllable
+	if controllable then
+		self.layerMask = Layers.Player
+		self.target_rot_horizontal = vector.GetAngle(Vector(0,0,1), facing, Vector(0,1,0)) -- only modify camera rot for player
+	else
+		self.layerMask = Layers.NPC
+	end
+
+	-- Note: we instantiate the model_scene into the main scene, start_transform stores a component pointer which gets invalidated after this!!
+	self.model = scene.Instantiate(model_scene, true)
+
+	local charactercomponent = scene.Component_CreateCharacter(self.model) -- some character features will be handled by the built-in CharacterComponent in Wicked Engine
+	charactercomponent.SetPosition(self.position)
+	charactercomponent.SetFacing(facing)
+	charactercomponent.SetWidth(0.3)
+	charactercomponent.SetHeight(1.8)
+	if controllable then
+		charactercomponent.SetTurningSpeed(9)
+	else
+		charactercomponent.SetTurningSpeed(7) -- Set NPC to turn slower because when we approach it for conversation, fast turning looks bad
+	end
+	--charactercomponent.SetFootPlacementEnabled(false)
+
+	local layer = scene.Component_GetLayer(self.model)
+	layer.SetLayerMask(self.layerMask)
+
+	self.state = States.IDLE
+
+	for i,entity in ipairs(scene.Entity_GetHumanoidArray()) do
+		if scene.Entity_IsDescendant(entity, self.model) then
+			self.humanoid = entity
+			local humanoid = scene.Component_GetHumanoid(self.humanoid)
+			humanoid.SetLookAtEnabled(false)
+			self.neck = humanoid.GetBoneEntity(HumanoidBone.Neck)
+			self.head = humanoid.GetBoneEntity(HumanoidBone.Head)
+			self.left_hand = humanoid.GetBoneEntity(HumanoidBone.LeftHand)
+			self.right_hand = humanoid.GetBoneEntity(HumanoidBone.RightHand)
+			self.left_foot = humanoid.GetBoneEntity(HumanoidBone.LeftFoot)
+			self.right_foot = humanoid.GetBoneEntity(HumanoidBone.RightFoot)
+			self.left_toes = humanoid.GetBoneEntity(HumanoidBone.LeftToes)
+			self.right_toes = humanoid.GetBoneEntity(HumanoidBone.RightToes)
+			break
+		end
+	end
+	for i,entity in ipairs(scene.Entity_GetExpressionArray()) do
+		if scene.Entity_IsDescendant(entity, self.model) then
+			self.expression = entity
+
+			-- Set up some overrides to avoid bad looking expression combinations:
+			local expression = scene.Component_GetExpression(self.expression)
+			expression.SetPresetOverrideBlink(ExpressionPreset.Happy, ExpressionOverride.Block)
+			expression.SetPresetOverrideMouth(ExpressionPreset.Happy, ExpressionOverride.Blend)
+			expression.SetPresetOverrideBlink(ExpressionPreset.Surprised, ExpressionOverride.Block)
+		end
+	end
+
+	-- Enable wetmap for all objects of character, so it can get wet in the ocean (if the weather has it):
+	for i,entity in ipairs(scene.Entity_GetObjectArray()) do
+		if scene.Entity_IsDescendant(entity, self.model) then
+			local object = scene.Component_GetObject(entity)
+			object.SetWetmapEnabled(true)
+			table.insert(self.object_entities, entity) -- save object array for later use
+		end
+	end
+
+	self.root = self.humanoid
+	
+	scene.ResetPose(self.model)
+
+	-- The base animation entities are queried from the anim_scene, they are not yet tergeting our character:
+	for i,state in pairs(States) do
+		self.anims[state] = anim_scene.Entity_FindByName(state)
+		if self.anims[state] == INVALID_ENTITY then
+			backlog_post("Animation not found: " .. state)
+		else
+			backlog_post("Animation found: " .. state)
+		end
+	end
+
+	-- Retarget animation entities onto the character, and add them to the CharacterComponent:
+	--	Also see if a requested animation set (animset) is available for each animation, and use that instead if yes
+	animset = "_" .. animset
+	for state,anim in pairs(self.anims) do
+		local anim_name_component = anim_scene.Component_GetName(anim)
+		if anim_name_component ~= nil then
+			local anim_set_name = anim_name_component.GetName() .. animset
+			local anim_set_entity = anim_scene.Entity_FindByName(anim_set_name)
+			if anim_set_entity ~= INVALID_ENTITY then
+				anim = anim_set_entity -- if there is animation with requested animset, replace default anim to that
+			end
+			self.anims[state] = scene.RetargetAnimation(self.humanoid, anim, false, anim_scene)
+			charactercomponent.AddAnimation(self.anims[state]) -- 
+		end
+	end
+	
+	local model_transform = scene.Component_GetTransform(self.model)
+	model_transform.ClearTransform()
+	model_transform.Scale(self.scale)
+	model_transform.Rotate(self.rotation)
+	model_transform.Translate(self.position)
+	model_transform.UpdateTransform()
+
+	self.target_height = scene.Component_GetTransform(self.neck).GetPosition().GetY()
+
+	return self
+end
+
+-- Interaction between two characters:
+local ResolveCharacters = function(characterA, characterB)
+	local humanoidA = scene.Component_GetHumanoid(characterA.humanoid)
+	local humanoidB = scene.Component_GetHumanoid(characterB.humanoid)
+	if humanoidA ~= INVALID_ENTITY and humanoidB ~= INVALID_ENTITY then
+		local headA = scene.Component_GetTransform(characterA.head).GetPosition()
+		local headB = scene.Component_GetTransform(characterB.head).GetPosition()
+		local distance = vector.Subtract(headA, headB).Length()
+		if distance < 1.5 then
+			humanoidA.SetLookAtEnabled(true)
+			humanoidB.SetLookAtEnabled(true)
+			humanoidA.SetLookAt(headB)
+			humanoidB.SetLookAt(headA)
+
+			local facing_amount = vector.Dot(characterB:GetFacing(), vector.Subtract(characterA.position, characterB.position).Normalize())
+			if characterA.dialogs ~= nil and #characterA.dialogs > 0 and conversation.state == ConversationState.Disabled and facing_amount > 0.8 then
+				if input.Press(KEYBOARD_BUTTON_ENTER) or input.Press(GAMEPAD_BUTTON_2) then
+					characterA:Turn(vector.Subtract(headB, headA):Normalize())
+					conversation:Enter(characterA)
+					application.CrossFade(0.5)
+				end
+				DrawDebugText("", vector.Add(headA, Vector(0,0.4)), Vector(1,1,1,1), 0.1, DEBUG_TEXT_DEPTH_TEST | DEBUG_TEXT_CAMERA_FACING)
+			end
 		end
 
-		model_transform.Translate(vector.Subtract(capsulepos, original_capsulepos)) -- transform by the capsule offset
-		model_transform.UpdateTransform()
-		
-		-- try to put water ripple:
-		if self.velocity.Length() > 0.01 and self.state ~= self.states.SWIM_IDLE then
-			local w,wp = scene.Intersects(capsule, FILTER_WATER)
-			if w ~= INVALID_ENTITY then
-				PutWaterRipple(script_dir() .. "assets/ripple.png", wp)
+		if characterA.hired ~= nil then
+			characterA.patrol_waypoints = {
+				{
+					entity = characterA.hired.model,
+					distance = 2,
+					distance_threshold = 1
+				}
+			}
+			if distance < 5 then
+				if characterA.hired.state == States.JOG or characterA.hired.state == States.RUN then
+					characterA.patrol_waypoints[1].state = States.JOG
+				else
+					characterA.patrol_waypoints[1].state = States.WALK
+				end
+			elseif distance < 10 then
+				characterA.patrol_waypoints[1].state = States.JOG
+			else
+				characterA.patrol_waypoints[1].state = States.RUN
 			end
 		end
-		
-	end,
 
-}
+	end
+
+end
+
+
+local function PointOfInterest(entity)
+	local self = {
+		entity = INVALID_ENTITY,
+		position = Vector(),
+		dialogs = {},
+		next_dialog = 1,
+	}
+	self.entity = entity
+	return self
+end
+
+local ResolvePointsOfInterest = function(player)
+	local humanoid = scene.Component_GetHumanoid(player.humanoid)
+	if humanoid == INVALID_ENTITY then
+		return
+	end
+
+	local head = scene.Component_GetTransform(player.head).GetPosition()
+	for i,poi in ipairs(points_of_interest) do
+		poi.position = scene.Component_GetTransform(poi.entity).GetPosition()
+		local distance = vector.Subtract(head, poi.position).Length()
+		if distance < 2.5 then
+			humanoid.SetLookAtEnabled(true)
+			humanoid.SetLookAt(poi.position)
+
+			local dir = vector.Subtract(poi.position, head)
+			dir.SetY(0)
+			dir = dir.Normalize()
+			local facing_amount = vector.Dot(player:GetFacing(), dir)
+			if poi.dialogs ~=nil and #poi.dialogs > 0 and conversation.state == ConversationState.Disabled and facing_amount > 0.5 then
+				if input.Press(KEYBOARD_BUTTON_ENTER) or input.Press(GAMEPAD_BUTTON_2) then
+					conversation:Enter(poi)
+				end
+				DrawDebugText("", vector.Add(poi.position, Vector(0,0.4)), Vector(1,1,1,1), 0.1, DEBUG_TEXT_CAMERA_FACING)
+			end
+		end
+	end
+
+end
 
 -- Third person camera controller class:
-ThirdPersonCamera = {
-	camera = INVALID_ENTITY,
-	character = nil,
-	side_offset = 0.2,
-	rest_distance = 1,
-	rest_distance_new = 1,
-	min_distance = 0.5,
-	zoom_speed = 0.3,
-	
-	Create = function(self, character)
-		self.character = character
+local function ThirdPersonCamera(character)
+	local self = {
+		camera = INVALID_ENTITY,
+		character = nil,
+		side_offset = 0.2,
+		rest_distance = 2.5,
+		rest_distance_new = 2.5,
+		min_distance = 0.5,
+		zoom_speed = 0.3,
+		target_rot_horizontal = 0,
+		target_rot_vertical = 0,
+		target_height = 1,
 		
-		self.camera = CreateEntity()
-		local camera_transform = scene.Component_CreateTransform(self.camera)
-	end,
-	
-	Update = function(self)
-		if self.character == nil then
-			return
-		end
-
-		-- Mouse scroll or gamepad triggers will move the camera distance:
-		local scroll = input.GetPointer().GetZ() -- pointer.z is the mouse wheel delta this frame
-		scroll = scroll + input.GetAnalog(GAMEPAD_ANALOG_TRIGGER_R).GetX()
-		scroll = scroll - input.GetAnalog(GAMEPAD_ANALOG_TRIGGER_L).GetX()
-		scroll = scroll * self.zoom_speed
-		self.rest_distance_new = math.max(self.rest_distance_new - scroll, self.min_distance) -- do not allow too close using max
-		self.rest_distance = math.lerp(self.rest_distance, self.rest_distance_new, 0.1) -- lerp will smooth out the zooming
-
-		-- We update the scene so that character's target_transform will be using up to date values
-		scene.UpdateHierarchy()
-
-		local camera_transform = scene.Component_GetTransform(self.camera)
-		local target_transform = scene.Component_GetTransform(self.character.target)
-
+		Create = function(self, character)
+			self.character = character
+			
+			self.camera = CreateEntity()
+			local camera_transform = scene.Component_CreateTransform(self.camera)
+		end,
 		
-		-- First calculate the rest orientation (transform) of the camera:
-		local mat = matrix.Translation(Vector(self.side_offset, 0, -self.rest_distance))
-		mat = matrix.Multiply(mat, target_transform.GetMatrix())
-		camera_transform.ClearTransform()
-		camera_transform.MatrixTransform(mat)
-		camera_transform.UpdateTransform()
+		Update = function(self, smoothing)
+			if self.character == nil then
+				return
+			end
+
+			local dt = getDeltaTime()
+			local dt_smoothing = smoothing or dt * 5
+
+			-- Mouse scroll or gamepad triggers will move the camera distance:
+			local scroll = input.GetPointer().GetZ() -- pointer.z is the mouse wheel delta this frame
+			local pinch_pos, pinch_scale, pinch_delta_scale = input.GetTouchPinch() -- also handle touch control pinch gesture
+			scroll = scroll + pinch_delta_scale * 4
+			scroll = scroll + input.GetAnalog(GAMEPAD_ANALOG_TRIGGER_R).GetX()
+			scroll = scroll - input.GetAnalog(GAMEPAD_ANALOG_TRIGGER_L).GetX()
+			scroll = scroll * self.zoom_speed
+			self.rest_distance_new = math.max(self.rest_distance_new - scroll, self.min_distance) -- do not allow too close using max
+			self.rest_distance = math.lerp(self.rest_distance, self.rest_distance_new, dt_smoothing) -- lerp will smooth out the zooming
+
+			-- This will allow some smoothing for certain movements of camera target:
+			local charactercomponent = scene.Component_GetCharacter(self.character.model)
+			local character_position = charactercomponent.GetPositionInterpolated()
+			self.target_rot_horizontal = math.lerp(self.target_rot_horizontal, self.character.target_rot_horizontal, dt_smoothing)
+			self.target_rot_vertical = math.lerp(self.target_rot_vertical, self.character.target_rot_vertical, dt_smoothing)
+			self.target_height = math.lerp(self.target_height, character_position.GetY() + self.character.target_height + charactercomponent.GetFootOffset(), dt_smoothing)
+
+			local camera_transform = scene.Component_GetTransform(self.camera)
+			local target_transform = TransformComponent()
+			target_transform.Translate(Vector(character_position.GetX(), 0, character_position.GetZ()))
+			target_transform.Translate(Vector(0, self.target_height))
+			target_transform.Rotate(Vector(self.target_rot_vertical, self.target_rot_horizontal))
+			target_transform.UpdateTransform()
+			
+			-- First calculate the rest orientation (transform) of the camera:
+			local mat = matrix.Translation(Vector(self.side_offset, 0, -self.rest_distance))
+			mat = matrix.Multiply(mat, target_transform.GetMatrix())
+			camera_transform.ClearTransform()
+			camera_transform.MatrixTransform(mat)
+			camera_transform.UpdateTransform()
 
 
-		-- Camera collision:
+			-- Camera collision:
 
-		-- Compute the relation vectors between camera and target:
-		local camPos = camera_transform.GetPosition()
-		local targetPos = target_transform.GetPosition()
-		local camDistance = vector.Subtract(camPos, targetPos).Length()
+			-- Compute the relation vectors between camera and target:
+			local camPos = camera_transform.GetPosition()
+			local targetPos = target_transform.GetPosition()
+			local camDistance = vector.Subtract(camPos, targetPos).Length()
 
-		-- These will store the closest collision distance and required camera position:
-		local bestDistance = camDistance
-		local bestPos = camPos
-		local camera = GetCamera()
+			-- These will store the closest collision distance and required camera position:
+			local bestDistance = camDistance
+			local bestPos = camPos
+			local camera = GetCamera()
 
-		-- Update global camera matrices for rest position:
-		camera.TransformCamera(camera_transform)
-		camera.UpdateCamera()
+			-- Update global camera matrices for rest position:
+			camera.TransformCamera(camera_transform)
+			camera.UpdateCamera()
 
-		-- Cast rays from target to clip space points on the camera near plane to avoid clipping through objects:
-		local unproj = camera.GetInvViewProjection()	-- camera matrix used to unproject from clip space to world space
-		local clip_coords = {
-			Vector(0,0,1,1),	-- center
-			Vector(-1,-1,1,1),	-- bottom left
-			Vector(-1,1,1,1),	-- top left
-			Vector(1,-1,1,1),	-- bottom right
-			Vector(1,1,1,1),	-- top right
-		}
-		for i,coord in ipairs(clip_coords) do
-			local corner = vector.TransformCoord(coord, unproj)
-			local target_to_corner = vector.Subtract(corner, targetPos)
-			local corner_to_campos = vector.Subtract(camPos, corner)
-			local TMin = 0
-			local TMax = target_to_corner.Length() -- optimization: limit the ray tracing distance
+			-- Cast rays from target to clip space points on the camera near plane to avoid clipping through objects:
+			local unproj = camera.GetInvViewProjection()	-- camera matrix used to unproject from clip space to world space
+			local clip_coords = {
+				Vector(0,0,1,1),	-- center
+				Vector(-1,-1,1,1),	-- bottom left
+				Vector(-1,1,1,1),	-- top left
+				Vector(1,-1,1,1),	-- bottom right
+				Vector(1,1,1,1),	-- top right
+			}
+			for i,coord in ipairs(clip_coords) do
+				local corner = vector.TransformCoord(coord, unproj)
+				local target_to_corner = vector.Subtract(corner, targetPos)
+				local corner_to_campos = vector.Subtract(camPos, corner)
+				local TMin = 0
+				local TMax = target_to_corner.Length() -- optimization: limit the ray tracing distance
 
-			local ray = Ray(targetPos, target_to_corner.Normalize(), TMin, TMax)
+				local ray = Ray(targetPos, target_to_corner.Normalize(), TMin, TMax)
 
-			local collObj,collPos,collNor = scene.Intersects(ray, FILTER_NAVIGATION_MESH | FILTER_COLLIDER, ~self.character.layerMask)
-			if(collObj ~= INVALID_ENTITY) then
-				-- It hit something, see if it is between the player and camera:
-				local collDiff = vector.Subtract(collPos, targetPos)
-				local collDist = collDiff.Length()
-				if(collDist > 0 and collDist < bestDistance) then
-					bestDistance = collDist
-					bestPos = vector.Add(collPos, corner_to_campos)
-					--DrawPoint(collPos, 0.1, Vector(1,0,0,1))
+				local collision_layer =  ~(Layers.Player | Layers.NPC) -- specifies that neither NPC, nor Player can collide with camera
+				local collObj,collPos,collNor = scene.Intersects(ray, FILTER_NAVIGATION_MESH | FILTER_COLLIDER,  collision_layer)
+				if(collObj ~= INVALID_ENTITY) then
+					-- It hit something, see if it is between the player and camera:
+					local collDiff = vector.Subtract(collPos, targetPos)
+					local collDist = collDiff.Length()
+					if(collDist > 0 and collDist < bestDistance) then
+						bestDistance = collDist
+						bestPos = vector.Add(collPos, corner_to_campos)
+						--DrawPoint(collPos, 0.1, Vector(1,0,0,1))
+					end
 				end
 			end
-		end
-		
-		-- We have the best candidate for new camera position now, so offset the camera with the delta between the old and new camera position:
-		local collision_offset = vector.Subtract(bestPos, camPos)
-		mat = matrix.Multiply(mat, matrix.Translation(collision_offset))
-		camera_transform.ClearTransform()
-		camera_transform.MatrixTransform(mat)
-		camera_transform.UpdateTransform()
-		--DrawPoint(bestPos, 0.1, Vector(1,1,0,1))
-		
-		-- Feed back camera after collision:
-		camera.TransformCamera(camera_transform)
-		camera.UpdateCamera()
 			
-	end,
-}
+			-- We have the best candidate for new camera position now, so offset the camera with the delta between the old and new camera position:
+			local collision_offset = vector.Subtract(bestPos, camPos)
+			mat = matrix.Multiply(mat, matrix.Translation(collision_offset))
+			camera_transform.ClearTransform()
+			camera_transform.MatrixTransform(mat)
+			camera_transform.UpdateTransform()
+			--DrawPoint(bestPos, 0.1, Vector(1,1,0,1))
+			
+			-- Feed back camera after collision:
+			camera.TransformCamera(camera_transform)
+			camera.UpdateCamera()
+				
+		end,
+	}
 
-	
-ClearWorld()
-LoadModel(script_dir() .. "assets/level.wiscene")
---LoadModel(script_dir() .. "assets/terrain.wiscene")
---dofile(script_dir() .. "../dungeon_generator/dungeon_generator.lua")
+	self:Create(character)
+	self:Update(1) -- 1: immediate jump instead of smoothing at initialization
+	return self
+end
 
-local player = Character
-player:Create(script_dir() .. "assets/character.wiscene")
-local camera = ThirdPersonCamera
-camera:Create(player)
-
--- Main loop:
 runProcess(function()
 	
 	-- We will override the render path so we can invoke the script from Editor and controls won't collide with editor scripts
 	--	Also save the active component that we can restore when ESCAPE is pressed
 	local prevPath = application.GetActivePath()
 	local path = RenderPath3D()
+	local loadingscreen = LoadingScreen()
+
 	--path.SetLightShaftsEnabled(true)
 	path.SetLightShaftsStrength(0.01)
 	path.SetAO(AO_MSAO)
 	path.SetAOPower(0.25)
-	path.SetOutlineEnabled(true)
+	--path.SetOutlineEnabled(true)
 	path.SetOutlineThreshold(0.11)
 	path.SetOutlineThickness(1.7)
 	path.SetOutlineColor(0,0,0,0.6)
 	path.SetBloomThreshold(5)
-	application.SetActivePath(path)
+	SetCapsuleShadowEnabled(true)
+	SetCapsuleShadowFade(0.4)
+	SetCapsuleShadowAngle(math.pi * 0.15)
 
 	--application.SetInfoDisplay(false)
-	application.SetFPSDisplay(true)
-	--path.SetResolutionScale(0.5)
+	--application.SetFPSDisplay(true)
+	--path.SetResolutionScale(0.75)
+	--path.SetFSR2Enabled(true)
+	--path.SetFSR2Preset(FSR2_Preset.Performance)
+	--SetProfilerEnabled(true)
+	SetDebugEnvProbesEnabled(false)
+	SetGridHelperEnabled(false)
+	SetDebugCamerasEnabled(false)
 
-	while true do
+	-- Configure a simple loading progress bar:
+	local loadingbar = Sprite()
+	loadingbar.SetMaskTexture(texturehelper.CreateGradientTexture(
+		GradientType.Linear,
+		2048, 1,
+		Vector(0, 0), Vector(1, 0),
+		GradientFlags.Inverse | GradientFlags.R16Unorm,
+		"111r"
+	))
+	local loadingbarparams = loadingbar.GetParams()
+	loadingbarparams.SetColor(Vector(1,0.2,0.2,1))
+	loadingbarparams.SetBlendMode(BLENDMODE_ALPHA)
+	loadingscreen.AddSprite(loadingbar)
+	loadingscreen.SetBackgroundTexture(Texture(script_dir() .. "assets/loadingscreen.png"))
 
-		player:Update()
-		camera:Update()
-		update()
-		
-		if(input.Press(KEYBOARD_BUTTON_ESCAPE)) then
-			-- restore previous component
-			--	so if you loaded this script from the editor, you can go back to the editor with ESC
-			backlog_post("EXIT")
-			killProcesses()
-			application.SetActivePath(prevPath)
-			return
-		end
-		if(input.Press(string.byte('R'))) then
-			-- reload script
-			backlog_post("RELOAD")
-			killProcesses()
-			application.SetActivePath(prevPath)
-			dofile(script_file())
-			return
-		end
+	-- All LoadModel tasks are started by the LoadingScreen asynchronously, but we get back root Entity handles immediately:
+	local anim_scene = Scene()
+	loadingscreen.AddLoadModelTask(anim_scene, script_dir() .. "assets/animations.wiscene")
+	local loading_scene = Scene()
+	loadingscreen.AddLoadModelTask(loading_scene, script_dir() .. "assets/level.wiscene")
+	loadingscreen.AddRenderPathActivationTask(path, application, 0.5, 0, 0, 0, FadeType.FadeToColor)
+	application.SetActivePath(loadingscreen, 0.5, 0, 0, 0, FadeType.CrossFade) -- activate and switch to loading screen
 
+	-- Because we are in a runProcess, we can block loading screen like this while application is still running normally:
+	--	Meanwhile, we can update the progress bar sprite
+	while not loadingscreen.IsFinished() do
+		update() -- gives back control for application for one frame, script waits until next update() phase
+		local canvas = application.GetCanvas()
+		loadingbarparams.SetPos(Vector(50, canvas.GetLogicalHeight() * 0.8))
+		loadingbarparams.SetSize(Vector(canvas.GetLogicalWidth() - 100, 20))
+		local progress = 1 - loadingscreen.GetProgress() / 100.0
+		loadingbarparams.SetMaskAlphaRange(math.saturate(progress - 0.05), math.saturate(progress))
+		loadingbar.SetParams(loadingbarparams)
+	end
+
+	loadingscreen = nil -- no longer need it, deleted
+	
+	-- After loading finished, we clear the main scene, and merge loaded scene into it:
+	scene.Clear()
+	scene.Merge(loading_scene)
+	scene.Update(0)
+	
+	if len(scene.Component_GetVoxelGridArray()) > 0 then
+		voxelgrid = scene.Component_GetVoxelGridArray()[1] -- take existing voxel grid from scene if available
+	else
+		voxelgrid = VoxelGrid(128,32,128)
+		voxelgrid.SetVoxelSize(0.25)
+		voxelgrid.SetCenter(Vector(0,0.1,0))
+		scene.VoxelizeScene(voxelgrid, false, FILTER_NAVIGATION_MESH | FILTER_COLLIDER, ~(Layers.Player | Layers.NPC)) -- generate a voxel grid in code, player and NPCs not included
 	end
 	
-end)
+	-- Create characters from scene metadata components:
+	local character_scenes = {}
+	for i,entity in ipairs(scene.Entity_GetMetadataArray()) do
+		local metadata = scene.Component_GetMetadata(entity)
+		local transform = scene.Component_GetTransform(entity)
+		if metadata ~= nil and transform ~= nil then
 
--- Draw
-runProcess(function()
+			-- Determine name of the placed character:
+			local name = "character" -- default name
+			if metadata.HasString("name") then
+				name = metadata.GetString("name")
+			end
 
+			-- Load character model if doesn't exist yet:
+			if character_scenes[name] == nil then
+				character_scenes[name] = Scene()
+				LoadModel(character_scenes[name], script_dir() .. "assets/" .. name .. ".wiscene")
+			end
+
+			if player == nil and metadata.GetPreset() == MetadataPreset.Player then
+				player = Character(character_scenes[name], transform, true, anim_scene, metadata.GetString("animset"))
+			end
+			if metadata.GetPreset() == MetadataPreset.NPC then
+				local npc = Character(character_scenes[name], transform, false, anim_scene, metadata.GetString("animset"))
+
+				-- add dialog tree if found:
+				if metadata.HasString("dialog") then
+					npc.dialogs = dofile(script_dir() .. "assets/dialogs/" .. metadata.GetString("dialog") .. ".lua")
+				end
+
+				-- Add patrol waypoints if found:
+				--	It will be looking for "waypoint" named string values in metadata components, and they can be chained by their value
+				local patrol_waypoints = {}
+				local visited = {} -- avoid infinite loop
+				local metadata_waypoint = scene.Component_GetMetadata(entity)
+				while metadata_waypoint ~= nil and metadata_waypoint.HasString("waypoint") do
+					local waypoint_name = metadata_waypoint.GetString("waypoint")
+					local waypoint_entity = scene.Entity_FindByName(waypoint_name)
+					if waypoint_entity ~= INVALID_ENTITY then
+						if visited[waypoint_entity] then
+							break
+						else
+							metadata_waypoint = scene.Component_GetMetadata(waypoint_entity) -- chain waypoints
+							visited[waypoint_entity] = true
+						end
+						if metadata_waypoint == nil then
+							break
+						end
+						local waypoint = {
+							entity = waypoint_entity,
+							wait = metadata_waypoint.GetFloat("wait")
+						}
+						if metadata_waypoint.HasString("state") then
+							waypoint.state = metadata_waypoint.GetString("state")
+						end
+						table.insert(patrol_waypoints, waypoint) -- add waypoint to NPC
+					else
+						break
+					end
+				end
+				npc:SetPatrol(patrol_waypoints)
+				table.insert(npcs, npc) -- add NPC
+			end
+
+			-- Add points of interest:
+			if metadata.GetPreset() == MetadataPreset.PointOfInterest then
+				local poi = PointOfInterest(entity)
+				-- add dialog tree if found:
+				if metadata.HasString("dialog") then
+					poi.dialogs = dofile(script_dir() .. "assets/dialogs/" .. metadata.GetString("dialog") .. ".lua")
+				end
+				table.insert(points_of_interest, poi)
+			end
+		end
+	end
+
+	-- if player was not created from a metadata component, create a default player:
+	if player == nil then
+		if character_scenes["character"] == nil then
+			character_scenes["character"] = Scene()
+			LoadModel(character_scenes["character"], script_dir() .. "assets/character.wiscene")
+		end
+		player = Character(character_scenes["character"], TransformComponent(), true, anim_scene, "")
+	end
+	
+	local camera = ThirdPersonCamera(player)
+
+	path.AddFont(conversation.font)
+	path.AddFont(conversation.advance_font)
+	
 	local help_text = "Wicked Engine Character demo (LUA)\n\n"
 	help_text = help_text .. "Controls:\n"
 	help_text = help_text .. "#############\n"
-	help_text = help_text .. "WASD/arrows/left analog stick: walk\n"
-	help_text = help_text .. "SHIFT/right shoulder button: walk -> jog\n"
-	help_text = help_text .. "E/left shoulder button: jog -> run\n"
-	help_text = help_text .. "SPACE/gamepad X/gamepad button 2: Jump\n"
+	help_text = help_text .. "WASD/arrows/left analog stick: jog\n"
+	help_text = help_text .. "SHIFT/right shoulder button: jog -> run\n"
+	help_text = help_text .. "LEFT CONTROL: walk\n"
+	help_text = help_text .. "SPACE/gamepad X/gamepad button 3: Jump\n"
 	help_text = help_text .. "Right Mouse Button/Right thumbstick: rotate camera\n"
-	help_text = help_text .. "Scoll middle mouse/Left-Right triggers: adjust camera distance\n"
+	help_text = help_text .. "Left Mouse Button: wave hand\n"
+	help_text = help_text .. "Scroll middle mouse/Left-Right triggers: adjust camera distance\n"
 	help_text = help_text .. "ESCAPE key: quit\n"
+	help_text = help_text .. "ENTER key: interact\n"
 	help_text = help_text .. "R: reload script\n"
 	help_text = help_text .. "H: toggle debug draw\n"
-	
+	help_text = help_text .. "L: toggle framerate lock\n"
+
+	-- Main loop:
 	while true do
 
+		update()
+
+		player:Update()
+		for k,npc in pairs(npcs) do
+			npc:Update()
+			ResolveCharacters(npc, player)
+		end
+
+		ResolvePointsOfInterest(player)
+
+		if enable_footprints then
+			player:Update_Footprints()
+			for k,npc in pairs(npcs) do
+				npc:Update_Footprints()
+			end
+			-- Cap the max number of decals:
+			while #footprints > 100 do
+				local entity = footprints[1]
+				scene.Entity_Remove(entity)
+				table.remove(footprints, 1)
+			end
+		end
+
+		conversation:Update(path, scene, player)
+		player.controllable = not conversation.override_input
+
+		if dynamic_voxelization then
+			voxelgrid.ClearData()
+			scene.VoxelizeScene(voxelgrid, false, FILTER_NAVIGATION_MESH | FILTER_COLLIDER, ~(Layers.Player | Layers.NPC)) -- player and npc layers not included in voxelization
+		end
+
+		render() -- Camera update below will be happening after render phase is signaled, after update phase ended (this helps camera jitter as it will use the latest scene.Update() transforms doen by engine system)
+
+		if not conversation.override_input then
+			camera:Update()
+		end
+		
 		-- Do some debug draw geometry:
 			
 		DrawDebugText(help_text, Vector(0,2,2), Vector(1,1,1,1), 0.1, DEBUG_TEXT_DEPTH_TEST)
@@ -565,14 +1059,7 @@ runProcess(function()
 		if debug and backlog_isactive() == false then
 
 			local model_transform = scene.Component_GetTransform(player.model)
-			local target_transform = scene.Component_GetTransform(player.target)
-			
-			--velocity
-			DrawLine(target_transform.GetPosition(),target_transform.GetPosition():Add(player.velocity))
-			--face
-			DrawLine(target_transform.GetPosition(),target_transform.GetPosition():Add(player.face:Normalize()),Vector(0,1,0,1))
-			--intersection
-			--DrawAxis(player.p,0.5)
+			local target_transform = scene.Component_GetTransform(player.neck)
 			
 			-- camera target box and axis
 			--DrawBox(target_transform.GetMatrix())
@@ -591,18 +1078,51 @@ runProcess(function()
 			DrawPoint(scene.Component_GetTransform(player.right_foot).GetPosition(),0.05, Vector(0,1,1,1))
 
 			
-			local capsule = scene.Component_GetCollider(player.collider).GetCapsule()
+			local capsule = scene.Component_GetCharacter(player.model).GetCapsule()
 			DrawCapsule(capsule)
 
 			local str = "State: " .. player.state .. "\n"
-			--str = str .. "Velocity = " .. player.velocity.GetX() .. ", " .. player.velocity.GetY() .. "," .. player.velocity.GetZ() .. "\n"
-			--str = str .. "Force = " .. player.force.GetX() .. ", " .. player.force.GetY() .. "," .. player.force.GetZ() .. "\n"
 			DrawDebugText(str, vector.Add(capsule.GetBase(), Vector(0,0.4)), Vector(1,1,1,1), 1, DEBUG_TEXT_CAMERA_FACING | DEBUG_TEXT_CAMERA_SCALING)
 
+			DrawVoxelGrid(voxelgrid)
+
+		end
+		
+		if not backlog_isactive() then
+			if(input.Press(KEYBOARD_BUTTON_ESCAPE)) then
+				-- restore previous component
+				--	so if you loaded this script from the editor, you can go back to the editor with ESC
+				backlog_post("EXIT")
+				for i,anim in ipairs(scene.Component_GetAnimationArray()) do
+					anim.Stop() -- stop animations because some of them are retargeted and animation source scene will be lost after we exit this script!
+				end
+				for i,character in ipairs(scene.Component_GetCharacterArray()) do
+					character.StopAnimation()
+				end
+				application.SetActivePath(prevPath, 0.5, 0, 0, 0, FadeType.CrossFade)
+				killProcesses()
+				return
+			end
+			if(input.Press(string.byte('R'))) then
+				-- reload script
+				backlog_post("RELOAD")
+				application.SetActivePath(prevPath, 0.5, 0, 0, 0, FadeType.CrossFade)
+				while not application.IsFaded() do
+					update()
+				end
+				killProcesses()
+				dofile(script_file())
+				return
+			end
+			if input.Press(string.byte('L')) then
+				framerate_lock = not framerate_lock
+				application.SetFrameRateLock(framerate_lock)
+				if framerate_lock then
+					application.SetTargetFrameRate(framerate_lock_target)
+				end
+			end
 		end
 
-		-- Wait for the engine to render the scene
-		render()
 	end
+	
 end)
-

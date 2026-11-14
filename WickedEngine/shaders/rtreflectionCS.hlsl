@@ -27,7 +27,7 @@ void main(uint2 DTid : SV_DispatchThreadID)
 {
 	const float2 uv = ((float2)DTid.xy + 0.5) * postprocess.resolution_rcp;
 
-	const uint downsampleFactor = 2;
+	const float downsampleFactor = rtreflection_downscalefactor;
 
 	// This is necessary for accurate upscaling. This is so we don't reuse the same half-res pixels
 	uint2 screenJitter = floor(blue_noise(uint2(0, 0)).xy * downsampleFactor);
@@ -36,7 +36,9 @@ void main(uint2 DTid : SV_DispatchThreadID)
 
 	const float depth = texture_depth.SampleLevel(sampler_linear_clamp, jitterUV, 0);
 	const float lineardepth = texture_lineardepth.SampleLevel(sampler_linear_clamp, jitterUV, 0);
-	const float roughness = texture_roughness[jitterPixel];
+
+	const half3 normal_roughness = texture_normal_roughness[jitterPixel].rgb;
+	const half roughness = normal_roughness.b;
 
 	if (!NeedReflection(roughness, depth, rtreflection_roughness_cutoff))
 	{
@@ -46,9 +48,9 @@ void main(uint2 DTid : SV_DispatchThreadID)
 		return;
 	}
 
-	const float3 N = decode_oct(texture_normal[jitterPixel]);
+	const float3 N = decode_normal(normal_roughness.rg);
 	const float3 P = reconstruct_position(jitterUV, depth);
-	const float3 V = normalize(GetCamera().position - P);
+	const float3 V = normalize(GetCamera().frustum_corners.screen_to_nearplane(uv) - P); // ortho support
 
 	const float4 GGX = ReflectionDir_GGX(V, N, roughness, blue_noise(DTid.xy).xy);
 	const float3 R = GGX.xyz;
@@ -69,18 +71,18 @@ void main(uint2 DTid : SV_DispatchThreadID)
 
 	float4 additive_dist = float4(0, 0, 0, FLT_MAX);
 
-	RayQuery<
-		RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES
-	> q;
+	wiRayQuery q;
 	q.TraceRayInline(
 		scene_acceleration_structure,	// RaytracingAccelerationStructure AccelerationStructure
-		0,								// uint RayFlags
+		RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES |
+		RAY_FLAG_CULL_BACK_FACING_TRIANGLES, // uint RayFlags
 		asuint(postprocess.params1.x),	// uint InstanceInclusionMask
 		ray								// RayDesc Ray
 	);
 	while (q.Proceed())
 	{
 		PrimitiveID prim;
+		prim.init();
 		prim.primitiveIndex = q.CandidatePrimitiveIndex();
 		prim.instanceIndex = q.CandidateInstanceID();
 		prim.subsetIndex = q.CandidateGeometryIndex();
@@ -95,7 +97,7 @@ void main(uint2 DTid : SV_DispatchThreadID)
 
 		float alphatest = clamp(blue_noise(DTid.xy, q.CandidateTriangleRayT()).r, 0, 0.99);
 
-		if (surface.material.options & SHADERMATERIAL_OPTION_BIT_ADDITIVE)
+		if (surface.material.IsAdditive())
 		{
 			additive_dist.xyz += surface.emissiveColor;
 			additive_dist.w = min(additive_dist.w, q.CandidateTriangleRayT());
@@ -114,23 +116,30 @@ void main(uint2 DTid : SV_DispatchThreadID)
 	if (q.CommittedStatus() != COMMITTED_TRIANGLE_HIT)
 	{
 		// miss:
-		payload.data.xyz += GetDynamicSkyColor(q.WorldRayDirection());
+		[branch]
+		if (IsStaticSky())
+		{
+			// We have envmap information in a texture:
+			payload.data.xyz += GetStaticSkyColor(q.WorldRayDirection());
+		}
+		else
+		{
+			payload.data.xyz += GetDynamicSkyColor(q.WorldRayDirection());
+		}
 		payload.data.w = FLT_MAX;
 	}
 	else
 	{
 		// closest hit:
 		PrimitiveID prim;
+		prim.init();
 		prim.primitiveIndex = q.CommittedPrimitiveIndex();
 		prim.instanceIndex = q.CommittedInstanceID();
 		prim.subsetIndex = q.CommittedGeometryIndex();
 
 		Surface surface;
 		surface.init();
-		if (!q.CommittedTriangleFrontFace())
-		{
-			surface.flags |= SURFACE_FLAG_BACKFACE;
-		}
+		surface.SetBackface(!q.CommittedTriangleFrontFace());
 		surface.V = -ray.Direction;
 		surface.raycone = raycone;
 		surface.hit_depth = q.CommittedRayT();
@@ -138,7 +147,7 @@ void main(uint2 DTid : SV_DispatchThreadID)
 			return;
 
 		surface.pixel = DTid.xy;
-		surface.screenUV = surface.pixel * postprocess.resolution_rcp.xy;
+		surface.screenUV = (surface.pixel + 0.5) * postprocess.resolution_rcp.xy;
 
 		if (surface.material.IsUnlit())
 		{
@@ -151,17 +160,23 @@ void main(uint2 DTid : SV_DispatchThreadID)
 			surface.V = -q.WorldRayDirection();
 			surface.update();
 
+			if (!surface.IsGIApplied())
+			{
+				float3 ambient = GetAmbient(surface.N);
+				surface.gi = lerp(ambient, ambient * surface.sss.rgb, saturate(surface.sss.a));
+			}
+
 			Lighting lighting;
-			lighting.create(0, 0, GetAmbient(surface.N), 0);
+			lighting.create(0, 0, surface.gi, 0);
 
 			[loop]
-			for (uint iterator = 0; iterator < GetFrame().lightarray_count; iterator++)
+			for (uint iterator = 0; iterator < lights().item_count(); iterator++)
 			{
-				ShaderEntity light = load_entity(GetFrame().lightarray_offset + iterator);
+				ShaderEntity light = load_entity(lights().first_item() + iterator);
 				if ((light.layerMask & surface.material.layerMask) == 0)
 					continue;
 
-				if (light.GetFlags() & ENTITY_FLAG_LIGHT_STATIC)
+				if (light.IsStaticLight())
 				{
 					continue; // static lights will be skipped (they are used in lightmap baking)
 				}
@@ -178,6 +193,11 @@ void main(uint2 DTid : SV_DispatchThreadID)
 					light_point(light, surface, lighting);
 				}
 				break;
+				case ENTITY_TYPE_RECTLIGHT:
+				{
+					light_rect(light, surface, lighting);
+				}
+				break;
 				case ENTITY_TYPE_SPOTLIGHT:
 				{
 					light_spot(light, surface, lighting);
@@ -190,9 +210,9 @@ void main(uint2 DTid : SV_DispatchThreadID)
 			lighting.indirect.specular += surface.emissiveColor;
 
 			[branch]
-			if (GetScene().ddgi.color_texture >= 0)
+			if (GetScene().ddgi.probe_buffer >= 0)
 			{
-				lighting.indirect.diffuse = ddgi_sample_irradiance(surface.P, surface.N);
+				lighting.indirect.diffuse = ddgi_sample_irradiance(surface.P, surface.N, surface.dominant_lightdir, surface.dominant_lightcolor);
 			}
 
 			float4 color = 0;

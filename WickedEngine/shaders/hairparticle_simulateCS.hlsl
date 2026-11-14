@@ -2,33 +2,55 @@
 #include "hairparticleHF.hlsli"
 #include "ShaderInterop_HairParticle.h"
 
-static const float3 HAIRPATCH[] = {
-	float3(-1, -1, 0),
-	float3(1, -1, 0),
-	float3(-1, 1, 0),
-	float3(1, 1, 0),
+static const half3 HAIRPATCH[] = {
+	// root (for every strand):
+	half3(-1, -1, 0),
+	half3(1, -1, 0),
+
+	// cap (for every segment of every strand):
+	half3(-1, 1, 0),
+	half3(1, 1, 0),
 };
 
+// The strands are simulated with a fixed time step, independent of the frame rate:
+static const float HAIR_SIMULATION_FREQUENCY = 60;
+static const float HAIR_SIMULATION_MAX_STEPS = 4;
+
 Buffer<uint> meshIndexBuffer : register(t0);
-ByteAddressBuffer meshVertexBuffer_POS : register(t1);
-Buffer<float> meshVertexBuffer_length : register(t2);
+Buffer<float4> meshVertexBuffer_POS : register(t1);
+Buffer<half4> meshVertexBuffer_NOR : register(t2);
+Buffer<half> meshVertexBuffer_length : register(t3);
 
 RWStructuredBuffer<PatchSimulationData> simulationBuffer : register(u0);
-RWByteAddressBuffer vertexBuffer_POS : register(u1);
-RWByteAddressBuffer vertexBuffer_UVS : register(u2);
+RWBuffer<float4> vertexBuffer_POS : register(u1);
+RWBuffer<float2> vertexBuffer_UVS : register(u2);
 RWBuffer<uint> culledIndexBuffer : register(u3);
-RWByteAddressBuffer counterBuffer : register(u4);
+RWStructuredBuffer<IndirectDrawArgsIndexedInstanced> indirectBuffer : register(u4);
+RWBuffer<float4> vertexBuffer_POS_RT : register(u5);
+RWBuffer<float4> vertexBuffer_NOR : register(u6);
+RWBuffer<uint> primitiveBuffer : register(u7);
 
 [numthreads(THREADCOUNT_SIMULATEHAIR, 1, 1)]
 void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIndex : SV_GroupIndex)
 {
-	if (DTid.x >= xHairParticleCount)
+	if (DTid.x >= xHairStrandCount)
 		return;
 
-	// Generate patch:
-
+	const bool regenerate_frame = xHairFlags & HAIR_FLAG_REGENERATE_FRAME;
+	const uint gfx_vertexcount_per_strand = (xHairSegmentCount * 2 + 2) * xHairBillboardCount;
+	const uint gfx_indexcount_per_strand = 6 * xHairBillboardCount * xHairSegmentCount;
+	const uint index0 = DTid.x * gfx_indexcount_per_strand;
+	const uint vertexID0 = DTid.x * gfx_vertexcount_per_strand;
+	uint v0 = vertexID0;
+		
+	ShaderGeometry geometry = HairGetGeometry();
+	
+	RNG rng;
+	rng.init(uint2(xHairRandomSeed, DTid.x), 0);
+	
 	// random triangle on emitter surface:
-	uint tri = (uint)((xHairBaseMeshIndexCount / 3) * hash1(DTid.x));
+	const uint triangleCount = xHairBaseMeshIndexCount / 3;
+	const uint tri = rng.next_uint(triangleCount);
 
 	// load indices of triangle from index buffer
 	uint i0 = meshIndexBuffer[tri * 3 + 0];
@@ -36,19 +58,17 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 	uint i2 = meshIndexBuffer[tri * 3 + 2];
 
 	// load vertices of triangle from vertex buffer:
-	float4 pos_nor0 = asfloat(meshVertexBuffer_POS.Load4(i0 * xHairBaseMeshVertexPositionStride));
-	float4 pos_nor1 = asfloat(meshVertexBuffer_POS.Load4(i1 * xHairBaseMeshVertexPositionStride));
-	float4 pos_nor2 = asfloat(meshVertexBuffer_POS.Load4(i2 * xHairBaseMeshVertexPositionStride));
-    float3 nor0 = unpack_unitvector(asuint(pos_nor0.w));
-    float3 nor1 = unpack_unitvector(asuint(pos_nor1.w));
-    float3 nor2 = unpack_unitvector(asuint(pos_nor2.w));
-	float length0 = meshVertexBuffer_length[i0];
-	float length1 = meshVertexBuffer_length[i1];
-	float length2 = meshVertexBuffer_length[i2];
+	float3 pos0 = meshVertexBuffer_POS[i0].xyz;
+	float3 pos1 = meshVertexBuffer_POS[i1].xyz;
+	float3 pos2 = meshVertexBuffer_POS[i2].xyz;
+	half3 nor0 = meshVertexBuffer_NOR[i0].xyz;
+	half3 nor1 = meshVertexBuffer_NOR[i1].xyz;
+	half3 nor2 = meshVertexBuffer_NOR[i2].xyz;
+	half length0 = meshVertexBuffer_length[i0];
+	half length1 = meshVertexBuffer_length[i1];
+	half length2 = meshVertexBuffer_length[i2];
 
 	// random barycentric coords:
-	RNG rng;
-	rng.init(uint2(xHairRandomSeed, DTid.x), 0);
 	float f = rng.next_float();
 	float g = rng.next_float();
 	[flatten]
@@ -57,254 +77,492 @@ void main(uint3 DTid : SV_DispatchThreadID, uint3 Gid : SV_GroupID, uint groupIn
 		f = 1 - f;
 		g = 1 - g;
 	}
+	float2 bary = float2(f, g);
 
 	// compute final surface position on triangle from barycentric coords:
-	float3 position = pos_nor0.xyz + f * (pos_nor1.xyz - pos_nor0.xyz) + g * (pos_nor2.xyz - pos_nor0.xyz);
-	float3 target = normalize(nor0 + f * (nor1 - nor0) + g * (nor2 - nor0));
-	float3 tangent = normalize(mul(float3(hemispherepoint_cos(rng.next_float(), rng.next_float()).xy, 0), get_tangentspace(target)));
-	float3 binormal = cross(target, tangent);
-	float strand_length = length0 + f * (length1 - length0) + g * (length2 - length0);
-
-	uint tangent_random = 0;
-	tangent_random |= (uint)((uint)(tangent.x * 127.5f + 127.5f) << 0);
-	tangent_random |= (uint)((uint)(tangent.y * 127.5f + 127.5f) << 8);
-	tangent_random |= (uint)((uint)(tangent.z * 127.5f + 127.5f) << 16);
-	tangent_random |= (uint)(rng.next_float() * 255) << 24;
-
-	uint binormal_length = 0;
-	binormal_length |= (uint)((uint)(binormal.x * 127.5f + 127.5f) << 0);
-	binormal_length |= (uint)((uint)(binormal.y * 127.5f + 127.5f) << 8);
-	binormal_length |= (uint)((uint)(binormal.z * 127.5f + 127.5f) << 16);
-	binormal_length |= (uint)(lerp(1, rng.next_float(), saturate(xHairRandomness)) * strand_length * 255) << 24;
-
-	// Identifies the hair strand root particle:
-    const uint strandID = DTid.x * xHairSegmentCount;
-    
+	float3 base = attribute_at_bary(pos0, pos1, pos2, bary);
+	base = mul(xHairBaseMeshUnormRemap.GetMatrix(), float4(base, 1)).xyz; // position UNORM -> FLOAT
+	half3 target = normalize(attribute_at_bary(nor0, nor1, nor2, bary));
+	target = normalize(mul(xHairTransform.GetMatrixAdjoint(), target));
+	half3 tangent = normalize(mul(half3(hemispherepoint_cos(rng.next_float(), rng.next_float()).xy, 0), get_tangentspace(target)));
+	half3 binormal = cross(target, tangent);
+	half strand_length = attribute_at_bary(length0, length1, length2, bary);
+	
+	// Pick an atlas frame from gradient noise so neighbouring strands vary.
+	// With a single rect the modulo is always 0, so skip the noise entirely.
+	uint currentFrame = 0;
+	if (xHairAtlasRectCount > 1)
+	{
+		currentFrame = uint(noise_gradient_3D(base * xHairUniformity) * 1000) % xHairAtlasRectCount;
+	}
+	const HairParticleAtlasRect atlas_rect = xHairAtlasRects[currentFrame];
+	
 	// Transform particle by the emitter object matrix:
-	const float4x4 worldMatrix = xHairTransform.GetMatrix();
-    float3 base = mul(worldMatrix, float4(position.xyz, 1)).xyz;
-    target = normalize(mul((float3x3)worldMatrix, target));
+	base = mul(xHairTransform.GetMatrix(), float4(base.xyz, 1)).xyz;
+
+	float3 collapsed_base = base;
+	if (xHairFlags & HAIR_FLAG_UNORM_POS)
+	{
+		collapsed_base = inverse_lerp(geometry.aabb_min, geometry.aabb_max, collapsed_base); // remap to UNORM
+	}
+	
+	float3 diff = GetCamera().position - base;
+	const float distsq = dot(diff, diff);
+	const bool distance_culled = distsq > sqr(xHairViewDistance);
+
+	// Frustum culling the whole strand at once:
+	//	intentionally overestimated, to not disappear as soon in different views (shadow map, etc)
+	ShaderSphere sphere;
+	sphere.center = base;
+	sphere.radius = xHairLength;
+	//draw_sphere(sphere.center, sphere.radius);
+	const bool visible = !distance_culled && GetCamera().frustum.intersects(sphere);
+		
+	// Optimization: reduce to 1 atomic operation per wave
+	const uint waveAppendCount = WaveActiveCountBits(visible);
+	uint waveOffset;
+	if (WaveIsFirstLane() && waveAppendCount > 0)
+	{
+		InterlockedAdd(indirectBuffer[0].IndexCountPerInstance, waveAppendCount * gfx_indexcount_per_strand, waveOffset);
+	}
+	waveOffset = WaveReadLaneFirst(waveOffset);
+
+	// Append visible indices:
+	if (visible)
+	{
+		uint prevCount = waveOffset + WavePrefixSum(gfx_indexcount_per_strand);
+		uint i0 = index0;
+		uint ii0 = prevCount;
+		for (uint segmentID = 0; segmentID < xHairSegmentCount; ++segmentID)
+		{
+			for (uint billboardID = 0; billboardID < xHairBillboardCount; ++billboardID)
+			{
+				culledIndexBuffer[ii0++] = i0++;
+				culledIndexBuffer[ii0++] = i0++;
+				culledIndexBuffer[ii0++] = i0++;
+				culledIndexBuffer[ii0++] = i0++;
+				culledIndexBuffer[ii0++] = i0++;
+				culledIndexBuffer[ii0++] = i0++;
+			}
+		}
+	}
+	
+	half len = lerp(1, rng.next_float(), saturate(xHairRandomness)) * strand_length;
+	len *= xHairLength;
+	len *= atlas_rect.size;
+	len /= (half)xHairSegmentCount;
+	const float2 frame = float2(atlas_rect.aspect * xHairAspect * xHairSegmentCount, 1) * len * 0.5;
+	const float segment_radius = max(frame.x, frame.y);
+
+	//draw_line(base, base + tangent, float4(1, 0, 0, 1));
+	//draw_line(base, base + target, float4(0, 1, 0, 1));
+	//draw_line(base, base + binormal, float4(0, 0, 1, 1));
+
+	half3 bend = 0;
+	if (xHairFlags & HAIR_FLAG_CAMERA_BEND)
+	{
+		// Bend down to camera up vector to avoid seeing flat planes from above
+		bend = GetCamera().up * (1 - saturate(dot(target, GetCamera().up))) * 0.8;
+	}
+
+	// Compute the actual billboard normal direction (matching geometry
+	// orientation)
+	half3 billboard_normal = normalize(target + bend);
+
+	// Bottom vertices:
+	half3x3 TBN = half3x3(tangent, billboard_normal, binormal);
+	if (distance_culled)
+	{
+		// Strand is beyond the view distance, so it is never rendered: no
+		// indices are appended for it and its render vertex buffers are never
+		// read. Only the raytracing positions need to stay valid, and only when
+		// an acceleration structure consumes them. Collapse the strand to its
+		// own emitter position (not a shared point): the triangles stay
+		// zero-area (so far grass still does not contribute to ray traced
+		// lighting), but spreading them across the terrain keeps the raytracing
+		// BVH well distributed. Crucially it also means a strand crossing the
+		// cull boundary moves only within its own small neighbourhood instead of
+		// teleporting to/from a far shared point, so per-frame refits barely
+		// disturb the BVH and it does not degrade between rebuilds.
+		const uint root_vertexcount = 2 * xHairBillboardCount;
+		if (xHairFlags & HAIR_FLAG_RAYTRACED)
+		{
+			for (uint i = 0; i < root_vertexcount; ++i)
+			{
+				vertexBuffer_POS_RT[v0 + i] = float4(collapsed_base, 0);
+			}
+		}
+		v0 += root_vertexcount;
+	}
+	else
+	{
+		rng.init(uint2(xHairRandomSeed, DTid.x), 1); // reinit random for consistent billboard variation!
+		for (uint billboardID = 0; billboardID < xHairBillboardCount; ++billboardID)
+		{
+			half siz = billboardID == 0 ? 1 : lerp(0.2, 1, rng.next_float());
+			half rot = billboardID == 0 ? 0 : (rng.next_float() * PI);
+			half3x3 variationMatrix;
+			if (billboardID == 0)
+			{
+				// No size/rotation variation: the variation matrix is the
+				// identity, so mul(variation, TBN) reduces to TBN.
+				variationMatrix = TBN;
+			}
+			else
+			{
+				half2 rot_sincos;
+				sincos(rot, rot_sincos.x, rot_sincos.y);
+				variationMatrix = mul(half3x3(
+					rot_sincos.y * siz, 0, -rot_sincos.x,
+					0, siz, 0,
+					rot_sincos.x, 0, rot_sincos.y * siz
+				), TBN);
+			}
+
+			for (uint vertexID = 0; vertexID < 2; ++vertexID)
+			{
+				half3 patchPos = HAIRPATCH[vertexID];
+				float2 uv = patchPos.xy;
+				uv = uv * float2(0.5, 0.5) + 0.5;
+				uv.y = 1 - uv.y;
+				patchPos.y += 1;
+
+				// Sprite sheet UV transform:
+				uv.xy = mad(uv.xy, atlas_rect.texMulAdd.xy, atlas_rect.texMulAdd.zw);
+
+				// scale the billboard by the texture aspect:
+				patchPos.xyz *= frame.xyx;
+
+				// variation based on billboardID:
+				patchPos = mul(patchPos, variationMatrix);
+
+				float3 position = base + patchPos;
+				if (xHairFlags & HAIR_FLAG_UNORM_POS)
+				{
+					position = inverse_lerp(geometry.aabb_min, geometry.aabb_max, position); // remap to UNORM
+				}
+
+				vertexBuffer_POS[v0] = float4(position, 0);
+				vertexBuffer_NOR[v0] = half4(billboard_normal, 0);
+				vertexBuffer_UVS[v0] = uv;
+				if (xHairFlags & HAIR_FLAG_RAYTRACED)
+				{
+					vertexBuffer_POS_RT[v0] = float4(position, 0);
+				}
+
+				v0++;
+			}
+		}
+	}
+	
+	// Fixed time step: a frame takes as many steps as the scene time crossed step boundaries since the
+	//	previous frame (none while the scene time stands still, one per frame at 60 FPS), and the strands
+	//	are drawn interpolated between the last two steps.
+	const float step_time = GetFrame().time * HAIR_SIMULATION_FREQUENCY;
+	const float step_time_prev = GetFrame().time_previous * HAIR_SIMULATION_FREQUENCY;
+	const uint step_count = distance_culled ? 0 : (uint)clamp(floor(step_time) - floor(step_time_prev), 0, HAIR_SIMULATION_MAX_STEPS);
+	const half step_alpha = (half)frac(step_time);
+	const half dt = 1.0 / HAIR_SIMULATION_FREQUENCY;
+
+	const half gravityPower = xHairGravityPower;
+	const half stiffnessForce = xHairStiffness;
+	const half dragForce = xHairDrag;
+	const half3 boneAxis = target;
+	const half boneLength = len;
 	const float3 root = base;
 
-	const float3 diff = root - GetCamera().position;
-	const float distsq = dot(diff, diff);
-	const bool distance_culled = dot(diff, diff) > sqr(xHairViewDistance);
+	// Rest pose at regeneration. Strands beyond the view distance are held at rest pose so the wind
+	//	sample, integration and collider loop below are skipped. The rest pose
+	//	is still stored, so the tails stay valid and the strand resumes
+	//	without a pop when it re-enters the view distance (it is fully
+	//	dither-faded out before reaching the cull distance, so the transition
+	//	between simulated and rest pose is never visible).
+	if (regenerate_frame || distance_culled)
+	{
+		float3 tail = root;
+		for (uint segmentID = 0; segmentID < xHairSegmentCount; ++segmentID)
+		{
+			const uint particleID = DTid.x * xHairSegmentCount + segmentID;
+			tail += boneAxis * boneLength;
+			simulationBuffer[particleID].prevTail = tail;
+			simulationBuffer[particleID].currentTail = tail;
+		}
+	}
 
-	float3 normal = 0;
+	for (uint stepID = 0; stepID < step_count; ++stepID)
+	{
+		// The wind at this step's time, between the frame's previous and current wind:
+		const float step_end_time = (floor(step_time_prev) + stepID + 1) / HAIR_SIMULATION_FREQUENCY;
+		const half wind_lerp = (half)saturate((step_end_time - GetFrame().time_previous) / max(GetFrame().time - GetFrame().time_previous, 1e-6));
+		base = root;
+		for (uint segmentID = 0; segmentID < xHairSegmentCount; ++segmentID)
+		{
+			// Identifies the hair strand segment particle:
+			const uint particleID = DTid.x * xHairSegmentCount + segmentID;
 
-	const float delta_time = clamp(GetFrame().delta_time, 0, 1.0 / 30.0); // clamp delta time to avoid simulation blowing up
-    
+			float3 tail_current = simulationBuffer[particleID].currentTail;
+			float3 tail_prev = simulationBuffer[particleID].prevTail;
+			half3 inertia = (tail_current - tail_prev) * (1 - dragForce);
+			half3 stiffness = boneAxis * stiffnessForce;
+			half3 external = gravityPower * float3(0, -1, 0);
+			const float wind_weight = ((float)segmentID + 1) / (float)xHairSegmentCount;
+			half3 wind = lerp(sample_wind_prev(tail_current, wind_weight), sample_wind(tail_current, wind_weight), wind_lerp);
+			external += wind;
+
+			float3 tail_next = tail_current + inertia + dt * (stiffness + external);
+			half3 to_tail = normalize(tail_next - base);
+			tail_next = base + to_tail * boneLength;
+
+			//draw_sphere(tail_next, len);
+
+			// Apply every force and collider:
+			for (uint i = forces().first_item(); i < forces().end_item(); ++i)
+			{
+				ShaderEntity entity = load_entity(i);
+
+				[branch]
+				if (entity.layerMask & xHairLayerMask)
+				{
+					const float range = entity.GetRange();
+					const uint type = entity.GetType();
+
+					if (type == ENTITY_TYPE_COLLIDER_CAPSULE)
+					{
+						float3 A = entity.position;
+						float3 B = entity.GetColliderTip();
+						half3 N = normalize(A - B);
+						A -= N * range;
+						B += N * range;
+						//if (DTid.x == 0)
+						//{
+						//	draw_sphere(A, range);
+						//	draw_sphere(B, range);
+						//}
+						float3 C = closest_point_on_segment(A, B, tail_next);
+						float3 dir = C - tail_next;
+						float dist = length(dir);
+						dir /= dist;
+						dist = dist - range - segment_radius;
+						if (dist < 0)
+						{
+							tail_next += dir * dist;
+							to_tail = normalize(tail_next - base);
+							tail_next = base + to_tail * boneLength;
+						}
+					}
+					else
+					{
+						float3 closest_point = closest_point_on_segment(base, tail_next, entity.position);
+						float3 dir = entity.position - closest_point;
+						float dist = length(dir);
+						dir /= dist;
+
+						switch (type)
+						{
+							case ENTITY_TYPE_FORCEFIELD_POINT:
+								tail_next += dt * dir * entity.GetGravity() * (1 - saturate(dist / range));
+								to_tail = normalize(tail_next - base);
+								tail_next = base + to_tail * boneLength;
+								break;
+							case ENTITY_TYPE_FORCEFIELD_PLANE:
+								tail_next += dt * entity.GetDirection() * entity.GetGravity() * (1 - saturate(dist / range));
+								to_tail = normalize(tail_next - base);
+								tail_next = base + to_tail * boneLength;
+								break;
+							case ENTITY_TYPE_COLLIDER_SPHERE:
+								dist = dist - range - segment_radius;
+								if (dist < 0)
+								{
+									tail_next += dir * dist;
+									to_tail = normalize(tail_next - base);
+									tail_next = base + to_tail * boneLength;
+								}
+								break;
+							case ENTITY_TYPE_COLLIDER_PLANE:
+								dir = normalize(entity.GetDirection());
+								dist = plane_point_distance(entity.position, dir, closest_point);
+								if (dist < 0)
+								{
+									dir *= -1;
+									dist = abs(dist);
+								}
+								dist = dist - segment_radius;
+								if (dist < 0)
+								{
+									float4x4 planeProjection = load_entitymatrix(entity.GetMatrixIndex());
+									const float3 clipSpacePos = mul(planeProjection, float4(closest_point, 1)).xyz;
+									const float3 uvw = clipspace_to_uvw(clipSpacePos.xyz);
+									[branch]
+									if (is_saturated(uvw))
+									{
+										tail_next -= dir * dist;
+										to_tail = normalize(tail_next - base);
+										tail_next = base + to_tail * boneLength;
+									}
+								}
+								break;
+							default:
+								break;
+						}
+					}
+				}
+			}
+
+			// Don't allow tail to go below the axis plane:
+			float below_plane = plane_point_distance(base, boneAxis, tail_next);
+			if (below_plane < 0)
+			{
+				tail_next -= boneAxis * below_plane;
+			}
+
+			// Store simulation:
+			simulationBuffer[particleID].prevTail = tail_current;
+			simulationBuffer[particleID].currentTail = tail_next;
+
+			// Offset next segment root to current tip:
+			base = tail_next;
+		}
+	}
+
+	// Drawing, interpolated between the last two steps:
+	base = root;
 	for (uint segmentID = 0; segmentID < xHairSegmentCount; ++segmentID)
 	{
-		// Identifies the hair strand segment particle:
-		const uint particleID = strandID + segmentID;
-		simulationBuffer[particleID].tangent_random = tangent_random;
-		simulationBuffer[particleID].binormal_length = binormal_length;
+		const uint particleID = DTid.x * xHairSegmentCount + segmentID;
+		const float3 tail_next = lerp(simulationBuffer[particleID].prevTail, simulationBuffer[particleID].currentTail, step_alpha);
+		const half3 to_tail = normalize(tail_next - base);
 
-		if (xHairRegenerate)
+		//draw_point(tail_next, 0.1, float4(0,1,0,1));
+		//draw_line(base, tail_next, float4(1,0,0,1));
+		
+		half3 normal = to_tail;
+		
+		half3 normal_bend = normalize(normal + bend);
+		binormal = cross(normal_bend, tangent);
+		tangent = cross(binormal, normal_bend);
+		TBN = half3x3(tangent, normal_bend, binormal);
+		
+		//draw_line(base, base + tangent, float4(1, 0, 0, 1));
+		//draw_line(base, base + normal, float4(0, 1, 0, 1));
+		//draw_line(base, base + binormal, float4(0, 0, 1, 1));
+	
+		// Write out render buffers:
+		//	These must be persistent, not culled (raytracing, surfels...)
+		if (distance_culled)
 		{
-			simulationBuffer[particleID].position = base;
-			simulationBuffer[particleID].normal_velocity = f32tof16(target);
-		}
-
-        normal += f16tof32(simulationBuffer[particleID].normal_velocity);
-        normal = normalize(normal);
-
-		float len = (binormal_length >> 24) & 0x000000FF;
-		len /= 255.0f;
-		len *= xLength;
-
-		float3 tip = base + normal * len;
-		float3 midpoint = lerp(base, tip, 0.5);
-
-		// Accumulate forces, apply colliders:
-		float3 force = 0;
-        for (uint i = 0; i < GetFrame().forcefieldarray_count; ++i)
-        {
-			ShaderEntity entity = load_entity(GetFrame().forcefieldarray_offset + i);
-
-			[branch]
-			if (entity.layerMask & xHairLayerMask)
+			// See the root vertices above: collapse these cap vertices to this
+			// segment's rest position (spread along the strand), not a shared
+			// point, so the raytracing BVH stays well distributed and stable
+			// across cull-boundary crossings.
+			const uint cap_vertexcount = 2 * xHairBillboardCount;
+			for (uint i = 0; i < cap_vertexcount; ++i)
 			{
-				const float range = entity.GetRange();
-				const uint type = entity.GetType();
+				vertexBuffer_POS[v0] = float4(collapsed_base, 0); // pos must be written always for wetmap
+				vertexBuffer_NOR[v0] = half4(normal, 0); // nor must be written always for wetmap
 
-				if (type == ENTITY_TYPE_COLLIDER_CAPSULE)
+				if (xHairFlags & HAIR_FLAG_RAYTRACED)
 				{
-					float3 A = entity.position;
-					float3 B = entity.GetColliderTip();
-					float3 N = normalize(A - B);
-					A -= N * range;
-					B += N * range;
-					float3 C = closest_point_on_segment(A, B, midpoint);
-					float3 dir = C - midpoint;
-					float dist = length(dir);
-					dir /= dist;
-					dist = dist - range - len * 0.5;
-					if (dist < 0)
-					{
-						tip = tip - dir * dist;
-					}
+					vertexBuffer_POS_RT[v0] = float4(collapsed_base, 0);
+				}
+				v0++;
+			}
+		}
+		else
+		{
+			rng.init(uint2(xHairRandomSeed, DTid.x), 1); // reinit random for consistent billboard variation!
+			for(uint billboardID = 0; billboardID < xHairBillboardCount; ++billboardID)
+			{
+				half siz = billboardID == 0 ? 1 : lerp(0.2, 1, rng.next_float());
+				half rot = billboardID == 0 ? 0 : (rng.next_float() * PI);
+				half3x3 variationMatrix;
+				if (billboardID == 0)
+				{
+					// No size/rotation variation: the variation matrix is the
+					// identity, so mul(variation, TBN) reduces to TBN.
+					variationMatrix = TBN;
 				}
 				else
 				{
-					float3 closest_point = closest_point_on_segment(base, tip, entity.position);
-					float3 dir = entity.position - closest_point;
-					float dist = length(dir);
-					dir /= dist;
+					half2 rot_sincos;
+					sincos(rot, rot_sincos.x, rot_sincos.y);
+					variationMatrix = mul(half3x3(
+						rot_sincos.y * siz, 0, -rot_sincos.x,
+						0, siz, 0,
+						rot_sincos.x, 0, rot_sincos.y * siz
+					), TBN);
+				}
 
-					switch (type)
+				for (uint vertexID = 2; vertexID < 4; ++vertexID)
+				{
+					half3 patchPos = HAIRPATCH[vertexID];
+					float2 uv = patchPos.xy;
+					uv = uv * float2(0.5, 0.5) + 0.5;
+					uv.y = lerp((float)segmentID / (float)xHairSegmentCount, ((float)segmentID + 1) / (float)xHairSegmentCount, uv.y);
+					uv.y = 1 - uv.y;
+					patchPos.y += 1;
+
+					// Sprite sheet UV transform:
+					uv.xy = mad(uv.xy, atlas_rect.texMulAdd.xy, atlas_rect.texMulAdd.zw);
+
+					// scale the billboard by the texture aspect:
+					patchPos.xyz *= frame.xyx;
+
+					// variation based on billboardID:
+					patchPos = mul(patchPos, variationMatrix);
+
+					float3 position = base + patchPos;
+					if (xHairFlags & HAIR_FLAG_UNORM_POS)
 					{
-					case ENTITY_TYPE_FORCEFIELD_POINT:
-						force += dir * entity.GetGravity() * (1 - saturate(dist / range));
-						break;
-					case ENTITY_TYPE_FORCEFIELD_PLANE:
-						force += entity.GetDirection() * entity.GetGravity() * (1 - saturate(dist / range));
-						break;
-					case ENTITY_TYPE_COLLIDER_SPHERE:
-						dist = dist - range - len;
-						if (dist < 0)
-						{
-							tip = tip - dir * dist;
-						}
-						break;
-					case ENTITY_TYPE_COLLIDER_PLANE:
-						dir = normalize(entity.GetDirection());
-						dist = plane_point_distance(entity.position, dir, closest_point);
-						if (dist < 0)
-						{
-							dir *= -1;
-							dist = abs(dist);
-						}
-						dist = dist - len;
-						if (dist < 0)
-						{
-							float4x4 planeProjection = load_entitymatrix(entity.GetMatrixIndex());
-							const float3 clipSpacePos = mul(planeProjection, float4(closest_point, 1)).xyz;
-							const float3 uvw = clipspace_to_uv(clipSpacePos.xyz);
-							[branch]
-							if (is_saturated(uvw))
-							{
-								tip = tip + dir * dist;
-							}
-						}
-						break;
-					default:
-						break;
+						position = inverse_lerp(geometry.aabb_min, geometry.aabb_max, position); // remap to UNORM
 					}
+
+					vertexBuffer_POS[v0] = float4(position, 0);
+					// Store the bent normal (matching the billboard's actual
+					// orientation, TBN above), not the raw strand direction.
+					// Otherwise a wind/gravity-bent card is shaded as if it
+					// still pointed along the strand, which reads as a dark,
+					// pulsating patch when viewed from above (normal facing
+					// away from both the view and the light). Kept consistent
+					// with the root vertices, which also store the bent normal.
+					vertexBuffer_NOR[v0] = half4(normal_bend, 0);
+					vertexBuffer_UVS[v0] = uv;
+					if (xHairFlags & HAIR_FLAG_RAYTRACED)
+					{
+						vertexBuffer_POS_RT[v0] = float4(position, 0);
+					}
+
+					v0++;
 				}
 			}
-        }
-
-		// Pull back to rest position:
-        force += (target - normal) * xStiffness;
-
-        force *= delta_time;
-
-		// Simulation buffer load:
-        float3 velocity = f16tof32(simulationBuffer[particleID].normal_velocity >> 16u);
-
-		// Apply surface-movement-based velocity:
-		const float3 old_base = simulationBuffer[particleID].position;
-		const float3 old_normal = f16tof32(simulationBuffer[particleID].normal_velocity);
-		const float3 old_tip = old_base + old_normal * len;
-		const float3 surface_velocity = old_tip - tip;
-		velocity += surface_velocity;
-
-		// Apply forces:
-		float3 newVelocity = velocity + force;
-		float3 newNormal = normal + newVelocity * delta_time;
-		newNormal = normalize(newNormal);
-		if (dot(target, newNormal) > 0.5) // clamp the offset
-		{
-			normal = newNormal;
-			velocity = newVelocity;
-		}
-
-		// Drag:
-		velocity *= 0.98f;
-
-		// Store simulation data:
-		simulationBuffer[particleID].position = base;
-		simulationBuffer[particleID].normal_velocity = f32tof16(normal) | (f32tof16(velocity) << 16u);
-
-		// Write out render buffers:
-		//	These must be persistent, not culled (raytracing, surfels...)
-		uint v0 = particleID * 4;
-		uint i0 = particleID * 6;
-
-		uint rand = (tangent_random >> 24) & 0x000000FF;
-		float3x3 TBN = float3x3(tangent, normal, binormal); // don't derive binormal, because we want the shear!
-		float3 rootposition = base - normal * 0.1 * len; // inset to the emitter a bit, to avoid disconnect:
-		float2 frame = float2(xHairAspect, 1) * len * 0.5;
-		const uint currentFrame = (xHairFrameStart + rand) % xHairFrameCount;
-		uint2 offset = uint2(currentFrame % xHairFramesXY.x, currentFrame / xHairFramesXY.x);
-
-		for (uint vertexID = 0; vertexID < 4; ++vertexID)
-		{
-			// expand the particle into a billboard cross section, the patch:
-			float3 patchPos = HAIRPATCH[vertexID];
-			float2 uv = vertexID < 6 ? patchPos.xy : patchPos.zy;
-			uv = uv * float2(0.5f, 0.5f) + 0.5f;
-			uv.y = lerp((float)segmentID / (float)xHairSegmentCount, ((float)segmentID + 1) / (float)xHairSegmentCount, uv.y);
-			uv.y = 1 - uv.y;
-			patchPos.y += 1;
-
-			// Sprite sheet UV transform:
-			uv.xy += offset;
-			uv.xy *= xHairTexMul;
-
-			// scale the billboard by the texture aspect:
-			patchPos.xyz *= frame.xyx;
-
-			// rotate the patch into the tangent space of the emitting triangle:
-			patchPos = mul(patchPos, TBN);
-
-			// simplistic wind effect only affects the top, but leaves the base as is:
-			const float3 wind = compute_wind(rootposition, segmentID + patchPos.y);
-
-			float3 position = rootposition + patchPos + wind;
-			if (distance_culled)
-			{
-				position = 0;
-			}
-
-			uint4 data;
-			data.xyz = asuint(position);
-			data.w = pack_unitvector(normalize(normal + wind));
-			vertexBuffer_POS.Store4((v0 + vertexID) * 16, data);
-			vertexBuffer_UVS.Store2((v0 + vertexID) * 8, pack_half4(float4(uv, uv))); // a second uv set could be used here
-		}
-
-		// Frustum culling:
-		ShaderSphere sphere;
-		sphere.center = (base + tip) * 0.5;
-		sphere.radius = len;
-
-		const bool visible = !distance_culled && GetCamera().frustum.intersects(sphere);
-
-		// Optimization: reduce to 1 atomic operation per wave
-		const uint waveAppendCount = WaveActiveCountBits(visible);
-		uint waveOffset;
-		if (WaveIsFirstLane() && waveAppendCount > 0)
-		{
-			counterBuffer.InterlockedAdd(0, waveAppendCount, waveOffset);
-		}
-		waveOffset = WaveReadLaneFirst(waveOffset);
-
-		if (visible)
-		{
-			uint prevCount = waveOffset + WavePrefixSum(1);
-			uint ii0 = prevCount * 6;
-			culledIndexBuffer[ii0 + 0] = i0 + 0;
-			culledIndexBuffer[ii0 + 1] = i0 + 1;
-			culledIndexBuffer[ii0 + 2] = i0 + 2;
-			culledIndexBuffer[ii0 + 3] = i0 + 3;
-			culledIndexBuffer[ii0 + 4] = i0 + 4;
-			culledIndexBuffer[ii0 + 5] = i0 + 5;
 		}
 
 		// Offset next segment root to current tip:
-		base = tip;
-    }
+		base = tail_next;
+		target = normal;
+	}
+
+	// Primitive buffer creation is done here instead of CPU to reduce CPU time spent in buffer creations:
+	if (regenerate_frame)
+	{
+		uint i = index0;
+		v0 = vertexID0;
+		uint rootOffset = v0;
+		uint capOffset = rootOffset + 2 * xHairBillboardCount;
+		for (uint billboardID = 0; billboardID < xHairBillboardCount; ++billboardID)
+		{
+			for (uint segmentID = 0; segmentID < xHairSegmentCount; ++segmentID)
+			{
+				primitiveBuffer[i++] = rootOffset + 0;
+				primitiveBuffer[i++] = rootOffset + 1;
+				primitiveBuffer[i++] = capOffset + 0;
+				primitiveBuffer[i++] = capOffset + 0;
+				primitiveBuffer[i++] = rootOffset + 1;
+				primitiveBuffer[i++] = capOffset + 1;
+				rootOffset += 2;
+				capOffset += 2;
+				v0 += 2;
+			}
+			v0 += 2;
+		}
+	}
 }

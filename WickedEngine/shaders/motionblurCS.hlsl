@@ -52,6 +52,9 @@ void main(uint3 Gid : SV_GroupID, uint3 GTid : SV_GroupThreadID)
 	const uint2 subtile = unflatten2D(subtile_idx, MOTIONBLUR_TILESIZE / POSTPROCESS_BLOCKSIZE);
 	const uint2 subtile_upperleft = tile * MOTIONBLUR_TILESIZE + subtile * POSTPROCESS_BLOCKSIZE;
 	const uint2 pixel = subtile_upperleft + unflatten2D(GTid.x, POSTPROCESS_BLOCKSIZE);
+	const float2 uv = (pixel + 0.5f) * postprocess.resolution_rcp;
+	if (!GetCamera().is_uv_inside_scissor(uv))
+		return;
 
 	float4 color;
 
@@ -60,17 +63,15 @@ void main(uint3 Gid : SV_GroupID, uint3 GTid : SV_GroupThreadID)
 
 #else
 
-	const float strength = motionblur_strength / GetFrame().delta_time;
+	const float strength = motionblur_strength;
 
 	const float2 neighborhood_velocity = neighborhoodmax[(pixel + (dither((float2)pixel) - 0.5f) * 16) / MOTIONBLUR_TILESIZE] * strength; // dither to reduce tile artifact
 	const float neighborhood_velocity_magnitude = length(neighborhood_velocity);
 	const float4 center_color = input[pixel];
 
-	const float2 center_velocity = texture_velocity[pixel].xy * strength;
+	const float2 center_velocity = texture_velocity.SampleLevel(sampler_point_clamp, uv, 0).xy * strength;
 	const float center_velocity_magnitude = length(center_velocity);
-	const float center_depth = texture_lineardepth[pixel];
-
-	const float2 uv = (pixel + 0.5f) * postprocess.resolution_rcp;
+	const float center_depth = texture_lineardepth.SampleLevel(sampler_point_clamp, uv, 0);
 
 	float seed = 12345;
 	const float random_direction = blue_noise(pixel).x;
@@ -88,16 +89,19 @@ void main(uint3 Gid : SV_GroupID, uint3 GTid : SV_GroupThreadID)
 	[unroll]
 	for (float i = -range; i <= range; i += 2.0f)
 	{
+		uv2 = GetCamera().clamp_uv_to_scissor(uv2);
 		const float depth1 = texture_lineardepth.SampleLevel(sampler_point_clamp, uv2, 0);
 		const float2 velocity1 = texture_velocity.SampleLevel(sampler_point_clamp, uv2, 0).xy;
 		const float velocity_magnitude1 = length(velocity1);
 		const float3 color1 = input.SampleLevel(sampler_point_clamp, uv2, 0).rgb;
 		uv2 += sampling_direction;
+		uv2 = GetCamera().clamp_uv_to_scissor(uv2);
 		const float depth2 = texture_lineardepth.SampleLevel(sampler_point_clamp, uv2, 0);
 		const float2 velocity2 = texture_velocity.SampleLevel(sampler_point_clamp, uv2, 0).xy;
 		const float velocity_magnitude2 = length(velocity2);
 		const float3 color2 = input.SampleLevel(sampler_point_clamp, uv2, 0).rgb;
 		uv2 += sampling_direction;
+		uv2 = GetCamera().clamp_uv_to_scissor(uv2);
 
 #ifdef MOTIONBLUR_CHEAP
 		sum += float4(color1, 1);

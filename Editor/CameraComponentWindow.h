@@ -1,7 +1,17 @@
 #pragma once
-#include "WickedEngine.h"
-
 class EditorComponent;
+
+class CameraPreview : public wi::gui::Widget
+{
+public:
+	wi::RenderPath3D renderpath;
+	wi::ecs::Entity entity = wi::ecs::INVALID_ENTITY;
+	EditorComponent* editor = nullptr;
+
+	void RenderPreview();
+
+	void Render(const wi::Canvas& canvas, wi::graphics::CommandList cmd) const override;
+};
 
 class CameraComponentWindow : public wi::gui::Window
 {
@@ -19,6 +29,16 @@ public:
 	wi::gui::Slider apertureSizeSlider;
 	wi::gui::Slider apertureShapeXSlider;
 	wi::gui::Slider apertureShapeYSlider;
+
+	wi::gui::Button renderButton;
+	bool renderEnabled = false;
+	wi::gui::Slider resolutionXSlider;
+	wi::gui::Slider resolutionYSlider;
+	wi::gui::Slider samplecountSlider;
+	wi::gui::Slider updateIntervalSlider;
+	wi::gui::CheckBox crtCheckbox;
+
+	CameraPreview preview;
 
 	void ResizeLayout() override;
 };

@@ -1,6 +1,4 @@
 #pragma once
-#include "WickedEngine.h"
-
 class EditorComponent;
 
 class ArmatureWindow : public wi::gui::Window
@@ -15,6 +13,7 @@ public:
 
 	wi::gui::Label infoLabel;
 	wi::gui::Button resetPoseButton;
+	wi::gui::Button createHumanoidButton;
 	wi::gui::TreeList boneList;
 
 	void ResizeLayout() override;
